@@ -58,22 +58,77 @@ in `references/measuring.md`.
 2. **Pick one change** (ranked as ci-diagnose step 5 says: observed or
    ceiling): the one that saves the most wait on the slowest
    path, or, when ci-diagnose ranked it off that path, the most runner-minutes:
-   - **Cancel superseded pull-request runs.** For runs that only validate
-     the pull request's latest commit, give pull-request runs a
-     concurrency group per pull request, and every other run a group of its
-     own, so nothing on the default branch is ever cancelled or replaced
-     while pending (by default a group keeps one pending run and cancels the
-     one before it: GitHub docs). A cancelled run there can leave a commit
-     without a complete run. If the workflow already has a `concurrency`
-     group (deploys, a shared environment), keep it and ask before changing it.
-     Cancellation follows arrival order: a manual rerun of an older run
-     joins the group last and cancels the newer one, so rerun the newest.
-     `github.workflow` is the workflow's name, and GitHub compares group names ignoring case across the repository; if two workflow files share a name (or differ only in case), give each its own prefix.
+   - **Cancel superseded pull-request runs.** For runs that only validate the
+     pull request's latest commit, give pull-request runs a concurrency group
+     per pull request, and every other run a group of its own, so nothing on
+     the default branch is ever cancelled or replaced while pending (by
+     default a group keeps one pending run and cancels the one before it:
+     GitHub docs). A cancelled run there can leave a commit without a complete
+     run. If the workflow already has a `concurrency` group (deploys, a shared
+     environment), keep it and ask before changing it. Put the recipe only in
+     the top-level workflow, never in a reusable workflow: a called workflow
+     uses its caller's `github` context, so parallel calls to it from one run
+     (a matrix) share a group and can wait on each other, replace a pending
+     call, or, with cancelling on, cancel a running one, and a called workflow
+     in its caller's group can cancel the caller (GitHub docs).
+
+     Only first attempts of `opened`, `synchronize` and `reopened` runs share
+     the group. If the workflow also runs on `labeled` or `edited` and skips a
+     required job on that action, putting that run in the pull request's group
+     could cancel the run that is testing while the skipped job reports
+     success. A label or edit run keeps a group of its own, so this recipe
+     never cancels it (for an open pull request with no conflicts, the default
+     checkout tests GitHub's test merge commit of the head and the base). The
+     expression gives a rerun (`run_attempt` above 1) the group of its own
+     run, so long as GitHub evaluates the group for each attempt; GitHub's
+     docs don't say, so check it (below). A `ready_for_review` run isn't
+     cancelled by later pushes, which costs minutes, not safety.
+
+     Apply it only if a cancelled or skipped test run can't pass a required
+     check. Read `on.pull_request.types`, every job's and test step's `if:`,
+     the `needs` each required job depends on (a job skipped because a needed
+     job failed or was skipped reports success), and any reusable workflow.
+     Trace every required check back to the test jobs: each job between them
+     must fail unless what it needs ended `success`, not only on `failure`.
+     Look hardest at every required job that has `needs`, a gate or a test
+     job: an `if: always()` job keeps running when the run is cancelled
+     (GitHub docs), and GitHub's docs don't say what any required job still
+     waiting on its `needs` reports when the run is cancelled before it starts
+     (`skipped` would pass; a gate written `if: ${{ !cancelled() }}` or
+     `success() || failure()` is skipped when the run is cancelled). If any
+     event can report a required job with its tests skipped, or a required job
+     can pass on `cancelled`, stop and report it to the person instead: a
+     skipped job reports success with or without this recipe.
+
+     Then check on a pull request: a label change can't satisfy a required
+     check without the required tests passing; re-running an older run doesn't
+     cancel the newest one; and cancelling a run while its tests are still
+     running, and again while each required job is still waiting on its
+     `needs` (in a matrix, with one leg done and another queued), leaves every
+     required check on that commit neither `success`, `skipped` nor `neutral`,
+     with the merge blocked. If any of these tests shows otherwise, undo this
+     change (restore the workflow's previous `concurrency`, or none) and
+     report it to the person.
+
+     GitHub orders a group by when runs reach it, so an older commit's run can
+     occasionally cancel the newest one's. If that interrupts the required
+     checks before they pass, then with every required job checked as above
+     they end red or cancelled, not passing (GitHub counts `success`,
+     `skipped` and `neutral` as passing), and the merge stays blocked while
+     the affected required check has no passing result on the commit GitHub
+     evaluates (re-run the newest run, or push). When replacing an older group
+     expression, give the new one a fresh prefix (the example's `pr-latest-`)
+     so old reruns can't join it. `github.workflow` is the workflow's name,
+     and GitHub compares group names ignoring case across the repository,
+     job-level groups included: check the new group names, ignoring case,
+     against every existing workflow- and job-level `concurrency` group,
+     called workflows included, and give each workflow its own prefix where
+     two could meet.
 
      ```yaml
      concurrency:
-       group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.action != 'closed' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-       cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+       group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.run_attempt == 1 && contains(fromJSON('["opened","synchronize","reopened"]'), github.event.action) && format('pr-latest-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+       cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == 1 && contains(fromJSON('["opened","synchronize","reopened"]'), github.event.action) }}
      ```
 
    - **Fold tiny jobs.** First read which checks are required
