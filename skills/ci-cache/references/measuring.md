@@ -13,7 +13,8 @@ isn't logged in, stop and ask the person to run `gh auth login`.
 
 If `git ls-files .joggernaut` lists anything, the folder is tracked: stop
 and ask before writing there. Pick the `--created` time before you look, a
-few hours ago, so every run up to it has finished.
+few hours ago, so every run up to it has finished. Reuse a saved baseline only
+if the commands it records fetched this way; otherwise record it again.
 
 ```sh
 MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request --limit 150 \
@@ -45,7 +46,7 @@ below runs it only after a fetch that succeeded.
 MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request \
   --created 'MERGE-TIME..WINDOW-END' --out .joggernaut/after.jsonl &&   # times as YYYY-MM-DDTHH:MM:SSZ
 MEASURE compare --before .joggernaut/before.jsonl --after .joggernaut/after.jsonl \
-  --label RUNNER-LABEL [--job NAME]     # always pass the runner label; add --job when jobs run on different runners
+  --label RUNNER-LABEL [--job NAME] &&  # always pass the runner label; add --job when jobs run on different runners
 MEASURE tests --before JUNIT-BEFORE --after JUNIT-AFTER   # each downloaded into a new, empty folder
 ```
 

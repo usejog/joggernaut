@@ -50,8 +50,9 @@ in `references/measuring.md`.
 
 ## Steps
 
-1. **Measure the waste.** If there is no `.joggernaut/baseline.md`,
-   record a baseline as `references/measuring.md` says. From
+1. **Measure the waste.** If there is no `.joggernaut/baseline.md`, or its
+   commands didn't fetch with `--created` up to a time, record a baseline as
+   `references/measuring.md` says. From
    `measure.py split`: pushes per pull request, catch-up runs and their share
    of runner-minutes, the share of runner-minutes on failed runs, and which
    steps failed (read the failed

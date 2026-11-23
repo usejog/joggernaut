@@ -289,12 +289,24 @@ with tempfile.TemporaryDirectory() as t:
     fails = [json.loads(l) for l in open(t + "/fa7") if l.strip()]
     for row in fails:
         if row["conclusion"] == "failure":
-            row["jobs"].append(dict(row["jobs"][0], id=row["id"] * 10 + 1, name="deploy", conclusion="skipped",
-                                    labels=[], started_at=row["jobs"][0]["completed_at"]))
+            # build failed, so the measured job, test, was skipped
+            row["jobs"] = [dict(row["jobs"][0], name="build"),
+                           dict(row["jobs"][0], id=row["id"] * 10 + 1, name=row["jobs"][0]["name"],
+                                conclusion="skipped", labels=[], started_at=row["jobs"][0]["completed_at"])]
     open(t + "/skip", "w").write("".join(json.dumps(x) + "\n" for x in fails))
-    r = run([M, "compare", "--before", t + "/sb", "--after", t + "/skip", "--label", "ubuntu-latest", "--json"])
-    if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
-        bad.append("compare: failed runs with a skipped job dropped out under --label\n" + r.stdout + r.stderr)
+    for flags in (["--label", "ubuntu-latest"], ["--label", "ubuntu-latest", "--job", "test"]):
+        r = run([M, "compare", "--before", t + "/sb", "--after", t + "/skip", "--json"] + flags)
+        if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
+            bad.append("compare: failed runs with a skipped job dropped out under %s\n%s%s"
+                       % (" ".join(flags), r.stdout, r.stderr))
+    # Under --label, a run where no job shows a runner can't be one of the 5.
+    nolab = [json.loads(l) for l in open(t + "/sa") if l.strip()][:4]
+    extra = dict(nolab[0], id=4999)
+    extra["jobs"] = [dict(j, labels=[]) for j in extra["jobs"]]
+    open(t + "/nolab", "w").write("".join(json.dumps(x) + "\n" for x in nolab + [extra]))
+    r = run([M, "compare", "--before", t + "/sb", "--after", t + "/nolab", "--label", "ubuntu-latest", "--json"])
+    if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_enough_runs":
+        bad.append("compare: a run with no runner counted toward 5 under --label\n" + r.stdout + r.stderr)
     # The larger side's typical slowest of 5 is the median of its 5-run maxima: with one
     # 10-minute run in 6, five of the six 5-run draws hold it.
     fake_runs(t + "/xb", [60] * 4 + [600], 8000)

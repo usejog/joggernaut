@@ -51,7 +51,7 @@ in `references/measuring.md`.
 
 ## Steps
 
-1. **Baseline.** If there is no `.joggernaut/baseline.md`, record a baseline as `references/measuring.md` says. Note each job's setup seconds from `measure.py split`.
+1. **Baseline.** If there is no `.joggernaut/baseline.md`, or its commands didn't fetch with `--created` up to a time, record a baseline as `references/measuring.md` says. Note each job's setup seconds from `measure.py split`.
 2. **Hit rate per key.** For a sample of runs on pull requests and on the
    default branch (about 20 of each), read only the cache lines of each job's
    log:

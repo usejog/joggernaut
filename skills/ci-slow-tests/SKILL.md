@@ -50,7 +50,7 @@ in `references/measuring.md`.
 
 ## Steps
 
-1. **Baseline.** If there is no `.joggernaut/baseline.md`, record a baseline as `references/measuring.md` says. Record the suite time, the slowest shard, and the tests that ran,
+1. **Baseline.** If there is no `.joggernaut/baseline.md`, or its commands didn't fetch with `--created` up to a time, record a baseline as `references/measuring.md` says. Record the suite time, the slowest shard, and the tests that ran,
    by name.
 2. **Time every test** from the report CI already writes (JUnit XML, or the
    runner's own durations: `pytest --durations=0`, `go test -json`,

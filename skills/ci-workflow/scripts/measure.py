@@ -640,11 +640,17 @@ def outside_cohort(r, a, cache):
     # A job skipped because an earlier one failed never got a runner, so it has no
     # labels; judge the runner by the jobs that ran, or a failed run would drop out of
     # the cohort and its failure out of the count.
-    ran = [j for j in latest_jobs(r) if j.get("labels")]
-    if a.label and not a.job and not all(a.label in j["labels"] for j in ran):
+    if not a.label:
+        return None
+    jobs = [j for j in (r.get("jobs", []) if a.job else latest_jobs(r)) if j.get("labels")]
+    if not jobs:
+        return "no job ran on a runner"  # nothing shows which runner it would have used
+    if not a.job and not all(a.label in j["labels"] for j in jobs):
         return "not every job on runner %s" % a.label
-    if a.label and a.job and not any(a.label in (j.get("labels") or [])
-                                     for j in r.get("jobs", []) if j.get("name") == a.job):
+    # The measured job, or if it never ran (skipped after an earlier job failed),
+    # the jobs that did run, must have been on the runner.
+    measured = [j for j in jobs if j.get("name") == a.job] or jobs
+    if a.job and not any(a.label in j["labels"] for j in measured):
         return "job %s not on runner %s" % (a.job, a.label)
     return None
 
@@ -781,9 +787,9 @@ def cmd_compare(a):
             for j in latest_jobs(r):
                 if a.job and j.get("name") != a.job:
                     continue
-                if a.label and a.label not in (j.get("labels") or []):
-                    continue
-                seen.setdefault(j.get("name"), set()).add(tuple(sorted(j.get("labels") or [])))
+                if not j.get("labels") or (a.label and a.label not in j["labels"]):
+                    continue  # no labels: skipped, never on a runner
+                seen.setdefault(j.get("name"), set()).add(tuple(sorted(j["labels"])))
         return seen
     jb, ja = job_labels(rb), job_labels(ra)
     for side, seen in (("before", jb), ("after", ja)):

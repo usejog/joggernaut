@@ -50,7 +50,7 @@ in `references/measuring.md`.
 
 ## Steps
 
-1. **Baseline.** If there is no `.joggernaut/baseline.md`, record a baseline as `references/measuring.md` says. From `measure.py split`, note each job's setup and running
+1. **Baseline.** If there is no `.joggernaut/baseline.md`, or its commands didn't fetch with `--created` up to a time, record a baseline as `references/measuring.md` says. From `measure.py split`, note each job's setup and running
    seconds, the job that finishes last, runner-minutes per run, and pushes per
    pull request.
 2. **Pick one change**: the one that saves the most wait on the slowest
