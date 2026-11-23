@@ -18,6 +18,11 @@
   <img alt="rule: keep every test" src="https://img.shields.io/badge/rule-keep_every_test-brightgreen">
 </p>
 
+<div align="center">
+<sub>INSTALLS INTO</sub>
+<table><tr><td align="center" width="96"><a href="#install"><img src="assets/agents/claude.svg" width="40" height="40" alt="Claude Code"></a><br><sub>Claude Code</sub></td><td align="center" width="96"><a href="#install"><img src="assets/agents/codex.svg" width="40" height="40" alt="Codex"></a><br><sub>Codex</sub></td><td align="center" width="96"><a href="#install"><img src="assets/agents/googlegemini.svg" width="40" height="40" alt="Gemini CLI"></a><br><sub>Gemini CLI</sub></td><td align="center" width="96"><a href="#install"><img src="assets/agents/cursor.svg" width="40" height="40" alt="Cursor"></a><br><sub>Cursor</sub></td><td align="center" width="96"><a href="#install"><img src="assets/agents/opencode.svg" width="40" height="40" alt="OpenCode"></a><br><sub>OpenCode</sub></td><td align="center" width="96"><a href="#install"><img src="assets/agents/githubcopilot.svg" width="40" height="40" alt="GitHub Copilot CLI"></a><br><sub>Copilot CLI</sub></td><td align="center" width="96"><a href="#install"><img src="assets/agents/amp.svg" width="40" height="40" alt="Amp"></a><br><sub>Amp</sub></td><td align="center" width="96"><a href="#install"><img src="assets/agents/goose.svg" width="40" height="40" alt="goose"></a><br><sub>goose</sub></td></tr></table>
+</div>
+
 We read 554 public posts about slow CI and about 85 write-ups and pull
 requests, and kept the teams' results that show numbers before and after. Joggernaut turns those fixes into skills for Claude Code, Codex and
 other agents. Your agent checks which ones apply to your own GitHub Actions
