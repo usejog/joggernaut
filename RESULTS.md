@@ -5,9 +5,9 @@ There are no rows yet.
 
 A row needs a public pull request whose description or comments show the runs
 before and after, measured the ci-measure way: at least 5 comparable runs a
-side, the median and the tail, the tests that ran compared by name, and the
-verdict as `compare` printed it, with its run count. Slower and "no measurable change" results
-are welcome too.
+side, the median and the slowest runs, the tests that ran compared by name,
+and the verdict as `compare` printed it, with its run count. Slower, mixed
+and "no measurable change" results are welcome too.
 Open a pull request adding your row; a maintainer checks the link before
 merging it.
 

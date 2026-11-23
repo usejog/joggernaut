@@ -44,7 +44,7 @@ For a person: bigger runners (cost money), a merge queue
 Say yes to a fix and the matching skill opens one pull request for it. Once
 5 runs have passed after the merge, ask your agent to **measure the fix**:
 `ci-measure` compares them with the runs from before, says how many runs its
-verdict rests on, and says when more runs would settle a small change. It
+verdict rests on, and says when a small change needs more runs to show. It
 also checks by name, from the JUnit reports CI saves, that every test still
 ran. Where CI saves no
 report it can only count tests, and says the check is unverified.
@@ -138,7 +138,7 @@ repository's AGENTS.md or CLAUDE.md.
 | Skill | Use it when | What it measures |
 |---|---|---|
 | [ci-diagnose](skills/ci-diagnose/SKILL.md) | "Why is CI slow?" Start here; read-only | PR wait; waiting, setup and running per job; minutes in failed, timed-out or cancelled runs and in catch-up runs |
-| [ci-measure](skills/ci-measure/SKILL.md) | Before a fix, and "did that help?" | 5+ runs a side, median with an exact interval, and the tail; the tests that ran, by name |
+| [ci-measure](skills/ci-measure/SKILL.md) | Before a fix, and "did that help?" | 5+ runs a side, median with an exact interval, and the slowest runs; the tests that ran, by name |
 | [ci-cache](skills/ci-cache/SKILL.md) | Dependencies reinstall on every PR; a cache never hits | Hit rate per cache key; setup seconds per job |
 | [ci-workflow](skills/ci-workflow/SKILL.md) | Short jobs each repeat setup; old runs keep going after a push | PR wait; runner-minutes per PR |
 | [ci-slow-tests](skills/ci-slow-tests/SKILL.md) | The test step is most of the wait | Suite time; slowest shard; how many tests ran |

@@ -237,6 +237,61 @@ r = run([M, "compare", "--before", "ci-history/before.jsonl", "--after", "ci-his
          "--min-runs", "30"], cwd=E + "/ci-measure/repo")
 if "not enough runs yet" not in r.stdout:
     bad.append("compare: expected not enough runs\n" + r.stdout)
+# Runs with chosen durations (seconds) and outcomes, in the format fetch writes.
+def fake_runs(path, secs, base_id, outcome="success"):
+    from datetime import datetime, timedelta
+    row0 = json.loads(open(E + "/ci-measure/repo/ci-history/before.jsonl").readline())
+    t0 = datetime(2026, 10, 1, 9, 0, 0)
+    with open(path, "a") as f:
+        for i, s in enumerate(secs):
+            start = t0 + timedelta(hours=i)
+            end = (start + timedelta(seconds=s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            row = dict(row0, id=base_id + i, conclusion=outcome,
+                       created_at=start.strftime("%Y-%m-%dT%H:%M:%SZ"), run_started_at=start.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            row["jobs"] = [dict(row0["jobs"][0], id=(base_id + i) * 10, conclusion=outcome,
+                                started_at=row["run_started_at"], completed_at=end)]
+            f.write(json.dumps(row) + "\n")
+
+
+def verdict(before, after):
+    r = run([M, "compare", "--before", before, "--after", after, "--json"])
+    return json.loads(r.stdout) if r.returncode == 0 else {"error": r.stderr}
+
+
+with tempfile.TemporaryDirectory() as t:
+    # Most runs faster but the median slower is mixed, not "median faster".
+    fake_runs(t + "/mb", [60] * 11 + [120] * 10, 1000)
+    fake_runs(t + "/ma", [30] * 10 + [61] * 11, 2000)
+    v = verdict(t + "/mb", t + "/ma")
+    if v.get("verdict_code") != "mixed":
+        bad.append("compare: most runs faster with a slower median should be mixed: %r" % v.get("verdict"))
+    fake_runs(t + "/sb", [600, 610, 620, 630, 640], 3000)
+    fake_runs(t + "/sa", [700, 705, 712, 720, 731], 4000)
+    v = verdict(t + "/sb", t + "/sa")
+    if v.get("verdict") != "median slower (5 runs a side)":
+        bad.append("compare: 5 slower runs a side should be median slower: %r" % v.get("verdict"))
+    # Whole-second ties: identical times are no change, at any count.
+    fake_runs(t + "/tb", [600] * 5, 5000)
+    fake_runs(t + "/ta", [600] * 5, 6000)
+    if verdict(t + "/tb", t + "/ta").get("verdict_code") != "no_change_yet":
+        bad.append("compare: identical tied times should be no measurable change")
+    # The failure-rate test on the real path: 5 passed before; 5 passed and 6 or 7 failed after.
+    for fails, want in ((6, "faster"), (7, "not_valid")):
+        fake_runs(t + "/fa%d" % fails, [500, 505, 510, 515, 520], 7000 + 100 * fails)
+        fake_runs(t + "/fa%d" % fails, [400] * fails, 7050 + 100 * fails, "failure")
+        v = verdict(t + "/sb", t + "/fa%d" % fails)
+        if v.get("verdict_code") != want:
+            bad.append("compare: %d failed after against 0 before should be %s: %r" % (fails, want, v))
+# Tails compare like with like: with no change, 150 runs before and 5 after, the after
+# side's slowest run must not look better nearly every time (a max of 150 against a max of 5).
+better = 0
+for _ in range(400):
+    b = [rng.lognormvariate(6, 0.3) for _ in range(150)]
+    c = [rng.lognormvariate(6, 0.3) for _ in range(5)]
+    label, tb, tc = mm.tails(b, c)
+    better += tc < tb
+if label != "slowest run" or not 0.3 < better / 400.0 < 0.7:
+    bad.append("tails: with no change, the 5-run side looked better in %d of 400 draws" % better)
 # Five runs a side are enough for a verdict, named with its count; four are not.
 with tempfile.TemporaryDirectory() as t:
     for name, src, keep in (("b5", "before", 5), ("a5", "after", 5), ("b4", "before", 4), ("a4", "after", 4)):

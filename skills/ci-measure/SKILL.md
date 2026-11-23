@@ -29,8 +29,8 @@ change, and checks by name that no test stopped running.
    value is flagged for a person.
 3. **Show the diff and the numbers, one change per pull request.** The pull
    request opens with the baseline and a few runs of the branch, marked
-   provisional. Once 5 runs a side have finished after the merge, post the
-   result as a comment, faster or not. Never add savings up: a fix off the
+   provisional. Once 5 runs have passed after the merge, post the result as
+   a comment, faster or not. Never add savings up: a fix off the
    slowest path doesn't shorten the wait.
 4. **Never run fewer tests before a merge, and ask before anything costs
    money.** The full suite gates every merge. Bigger runners, new providers and
@@ -115,16 +115,18 @@ baseline now (step 3.3): a lost test fails the change before it merges.
      --after .joggernaut/after.jsonl --workflow "CI" --label ubuntu-latest [--job "test"]
    ```
 
-   It prints the medians, the tail (the slowest run below 20 runs a side,
-   the slowest 5% from 20; provisional below 100), the Hodges-Lehmann
-   estimate of the change with its exact 95% interval, every run it left out
+   It prints the medians, the slowest runs (the slowest run below 20 runs a
+   side, the slowest 5% from 20; provisional below 100), the Hodges-Lehmann
+   estimate of the change with its exact 95% interval, the runs it left out
    and why, the failure rate and the runner-minutes per run on each side, and
-   one verdict with the run count: **median faster**, **median slower**, **no
-   measurable change yet** (more runs can tighten it), **not enough runs
-   yet**, or **not valid** when more runs fail after than chance explains.
-   `references/measuring.md` says why this method holds at 5 runs a side.
-   Report the verdict as printed, with the tail beside it, since the median
-   can improve while the tail gets worse. If any run failed after the change,
+   one verdict with the run count: **median faster**, **median slower**,
+   **mixed** (most runs moved one way, the median didn't), **no measurable
+   change yet** (more runs can tighten it), **not enough runs yet**, or **not
+   valid** when more runs fail after than chance explains.
+   `references/measuring.md` says why this method holds at 5 runs a side, and
+   how to measure again without fooling yourself. Report the verdict as
+   printed, with the slowest runs beside it, since the median can improve
+   while the tail gets worse. If any run failed after the change,
    name the cause of each before reporting a speedup: at a few runs a side,
    only a large rise in failures counts as beyond chance.
 3. Compare the tests, by name:
@@ -149,8 +151,8 @@ baseline now (step 3.3): a lost test fails the change before it merges.
 End with a short receipt the person may share (the numbers below are a
 made-up example). Print it whatever the verdict, slower and "no measurable
 change" included; never post it anywhere yourself. Leave out the repository
-name and pull request link unless the person asks for them. Name the tail as
-`compare` printed it: below 20 runs a side, the slowest run.
+name and pull request link unless the person asks for them. Name the slowest
+runs as `compare` printed them: below 20 runs a side, the slowest run.
 
 ```
 Joggernaut receipt
@@ -174,7 +176,7 @@ request yourself.
 | "The branch ran faster." | One run is noise. Call it provisional; the verdict needs 5 comparable runs a side. |
 | "It's faster locally." | A local timing is never the result. Measure CI's own runs, on the same runner label. |
 | "Same test count, so nothing was lost." | Compare names: a removed test and an added one keep the count. With only a count, say "count only". |
-| "The median improved." | Print the tail and the failed runs beside it; the tail can get worse. |
+| "The median improved." | Print the slowest runs and the failed runs beside it; the tail can get worse. |
 | "Three minutes saved in each of five jobs." | Never add savings up. Only the measured wait counts. |
 | "Faster, with one test skipped for now." | Fewer tests, more skips or a new failure fails the change, however fast. |
 
@@ -185,7 +187,7 @@ This is reasoning from how CI works, not a measurement.
 - CI times vary run to run with machines, caches and load. Comparing two
   single runs measures the noise as often as the change. An exact rank
   interval over 5 or more runs a side separates the two, and says when it
-  can't yet: then more runs narrow it.
+  can't yet: then a larger count, chosen before looking again, narrows it.
 - A local machine differs from a CI runner in cores, disk, network and cache
   state, so a local speedup may not exist on CI at all.
 - Dropping a test makes CI look faster, so speed alone can't tell a

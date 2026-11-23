@@ -89,13 +89,24 @@ def pct(xs, p):
     return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
 
 
-def tail(xs, n):
-    """The tail of a side's times, named for what it is: under TAIL_RUNS runs (n is the
-    smaller side's count, so both sides name the same thing) a slowest 5% is just the
-    slowest run, so it is called that."""
-    if n < TAIL_RUNS:
+def tail(xs):
+    """One sample's tail, named for what it is: under TAIL_RUNS runs a slowest 5% is
+    just the slowest run, so it is called that."""
+    if len(xs) < TAIL_RUNS:
         return "slowest run", (max(xs) if xs else None)
     return "slowest 5%", pct(xs, 0.95)
+
+
+def tails(before, after):
+    """Both sides' tails, like with like. From TAIL_RUNS runs a side, each side's slowest
+    5%. Below, the smaller side's slowest run, and for the larger side where the slowest
+    of that many of its runs typically falls (its k/(k+1) point, for k runs): the
+    slowest of 150 runs is an outlier the slowest of 5 almost never matches."""
+    k = min(len(before), len(after))
+    if k >= TAIL_RUNS:
+        return "slowest 5%", pct(before, 0.95), pct(after, 0.95)
+    at = lambda xs: max(xs) if len(xs) == k else pct(xs, k / (k + 1.0))
+    return "slowest run", at(before), at(after)
 
 
 def fmt(s):
@@ -329,7 +340,7 @@ def cmd_split(a):
     # PR wait over successful runs, as compare measures it.
     walls = [w for w in (run_wall(r) for r in runs if r.get("conclusion") == "success") if w is not None]
     out = {"runs": len(runs), "wait_median": median(walls), "wait_p95": pct(walls, 0.95),
-           "p95_provisional": len(walls) < P95_FIRM}
+           "wait_tail": list(tail(walls)), "p95_provisional": len(walls) < P95_FIRM}
     # With several workflows in one file, a pull request waits for all of them:
     # per commit, from the first run's start to the last job done, where every run passed.
     names = {r.get("name") for r in runs}
@@ -358,6 +369,7 @@ def cmd_split(a):
     out["workflows"] = sorted(n or "" for n in names)
     out["wait_all_workflows_median"] = median(cross) if cross else None
     out["wait_all_workflows_p95"] = pct(cross, 0.95) if cross else None
+    out["wait_all_workflows_tail"] = list(tail(cross)) if cross else None
     out["wait_all_workflows_commits"] = len(cross)
     # Runs a day, over the span the file covers: what a saving per run is multiplied by.
     starts = sorted(ts(r["created_at"]) for r in runs if r.get("created_at"))
@@ -465,16 +477,17 @@ def cmd_split(a):
     print("runs read: %d%s, over %.1f days%s" % (
         len(runs), " (workflow %s)" % a.workflow if a.workflow else "", out["span_days"],
         ", about %s pushes a day" % out["runs_per_day"] if out["runs_per_day"] else " (under a day: no daily rate)"))
-    label, value = tail(walls, len(walls))
+    label, value = out["wait_tail"]
     print("PR wait (run start to last job done, %d successful runs): median %s, %s %s%s"
           % (len(walls), fmt(out["wait_median"]), label, fmt(value),
              " (provisional: under %d runs)" % P95_FIRM if out["p95_provisional"] else ""))
     if len(names) > 1:
         if cross:
-            label, value = tail(cross, len(cross))
+            label, value = out["wait_all_workflows_tail"]
             print("PR wait across workflows (%d in the file; per commit, the first run of each that ran,"
-                  " all passed; %d commits): median %s, %s %s"
-                  % (len(names), len(cross), fmt(out["wait_all_workflows_median"]), label, fmt(value)))
+                  " all passed; %d commits): median %s, %s %s%s"
+                  % (len(names), len(cross), fmt(out["wait_all_workflows_median"]), label, fmt(value),
+                     " (provisional: under %d commits)" % P95_FIRM if len(cross) < P95_FIRM else ""))
         else:
             print("PR wait across workflows: no commit has passing runs of two or more workflows here")
     sp = out["slowest_path_split"]
@@ -518,11 +531,12 @@ def mann_whitney_counts(m, n, upto):
     m, n = min(m, n), max(m, n)
     c = [1] + [0] * upto
     for i in range(1, m + 1):
+        top = min(i * n, upto)  # the product so far has degree i * n; past it, zeros
         a = n + i
-        if a <= upto:  # times (1 - q^a)
-            c[a:] = list(map(sub, c[a:], c[:upto + 1 - a]))
+        if a <= top:  # times (1 - q^a)
+            c[a:top + 1] = list(map(sub, c[a:top + 1], c[:top + 1 - a]))
         for r in range(i):  # divided by (1 - q^i): running sums i apart
-            c[r::i] = list(accumulate(c[r::i]))
+            c[r:top + 1:i] = list(accumulate(c[r:top + 1:i]))
     return c
 
 
@@ -550,7 +564,7 @@ def shift_interval(before, after, alpha=Fraction(1, 20)):
     est = (d[(len(d) - 1) // 2] + d[len(d) // 2]) / 2.0
     if k == 0:
         return est, -math.inf, math.inf, 1.0
-    return est, d[k - 1], d[len(d) - k], 1 - 2 * below / float(total)
+    return est, d[k - 1], d[len(d) - k], 1 - 2 * below / total  # int / int: no float overflow
 
 
 def workflow_matches(r, wf):
@@ -625,9 +639,9 @@ def durations(runs, a, side, excluded):
 
 def fails_rose(fb, fa):
     """One-sided Fisher exact test at 5%: did the failure rate rise beyond chance?
-    Exact, so it holds at a few runs a side, where a normal approximation doesn't.
-    At 5 a side it has little power: 0 of 5 failing before against 4 of 5 after is
-    the smallest rise it calls beyond chance."""
+    Exact, so it holds at a few runs a side, where a normal approximation doesn't,
+    but it has little power there: with 5 runs before, none failed, and 5 passed
+    after, it takes 7 failed after (7 of 12) to count."""
     (xb, nb), (xa, na) = fb, fa
     if not nb or not na or xa * nb <= xb * na:
         return False
@@ -636,6 +650,11 @@ def fails_rose(fb, fa):
     # Chance of at least xa failures after, given k failures in all.
     tail = sum(math.comb(na, i) * math.comb(nb, k - i) for i in range(xa, min(k, na) + 1))
     return Fraction(tail, denom) < Fraction(1, 20)
+
+
+def fails_needed(fb, na):
+    """The fewest failures in na finished runs after that fails_rose counts, or None."""
+    return next((x for x in range(na + 1) if fails_rose(fb, (x, na))), None)
 
 
 def cmd_compare(a):
@@ -715,8 +734,7 @@ def cmd_compare(a):
         return (len(bad), len(done))
     what = ("job %s" % a.job) if a.job else "run (start to last job done)"
     fewer = min(len(before), len(after))
-    label, before_tail = tail(before, fewer)
-    after_tail = tail(after, fewer)[1]
+    label, before_tail, after_tail = tails(before, after)
     res = {"measure": what, "before_runs": len(before), "after_runs": len(after),
            "before_median": median(before), "after_median": median(after),
            "before_p95": pct(before, 0.95), "after_p95": pct(after, 0.95),
@@ -748,18 +766,29 @@ def cmd_compare(a):
         runs = "%d runs before, %d after" % (len(before), len(after))
         sides = "%d before and %d after" % (len(before), len(after))
     if fewer < a.min_runs:
+        res["verdict_code"] = "not_enough_runs"
         res["verdict"] = "not enough runs yet (%s; %d a side needed)" % (runs, a.min_runs)
     elif fails_rose(fb, fa):
+        res["verdict_code"] = "not_valid"
         res["verdict"] = "not valid: more runs fail after (%d of %d) than before (%d of %d)" % (fa + fb)
     else:
         est, lo, hi, conf = shift_interval(before, after)
-        res["shift_estimate"], res["interval_95"] = est, [lo, hi]
-        res["interval_confidence"] = round(conf, 4)
-        if hi < 0:
-            res["verdict"] = "median faster (%s)" % runs
-        elif lo > 0:
-            res["verdict"] = "median slower (%s)" % runs
+        res["shift_estimate"], res["shift_interval_95"] = est, [lo, hi]
+        res["shift_interval_confidence"] = round(conf, 4)
+        moved = median(after) - median(before)
+        # The interval says the after runs tend to be faster (or slower). It speaks for
+        # the median only when the medians moved the same way; a change that speeds most
+        # runs and slows the middle one is reported as mixed.
+        if hi < 0 and moved < 0:
+            res["verdict_code"], res["verdict"] = "faster", "median faster (%s)" % runs
+        elif lo > 0 and moved > 0:
+            res["verdict_code"], res["verdict"] = "slower", "median slower (%s)" % runs
+        elif hi < 0 or lo > 0:
+            res["verdict_code"] = "mixed"
+            res["verdict"] = "mixed: after runs tend to be %s, but the median isn't (%s)" % (
+                "faster" if hi < 0 else "slower", runs)
         else:
+            res["verdict_code"] = "no_change_yet"
             res["verdict"] = "no measurable change yet with %s; more runs can tighten this" % sides
     if a.json:
         print(json.dumps(res, indent=2))
@@ -769,18 +798,18 @@ def cmd_compare(a):
     print("after:  %d runs, median %s, %s %s" % (len(after), fmt(res["after_median"]), label, fmt(after_tail)))
     if res["p95_provisional"]:
         print("%s: provisional, under %d runs a side" % (label, P95_FIRM))
+    need = fails_needed(fb, fa[1])
     print("failed runs: before %d of %d, after %d of %d%s%s" % (fb + fa + (
         " (higher after, within chance: report it)" if rate(fa) > rate(fb) and not fails_rose(fb, fa) else "",
-        "; under %d runs a side, only a large rise shows as beyond chance" % TAIL_RUNS
-        if min(fb[1], fa[1]) < TAIL_RUNS else "")))
+        "; beyond chance from %d of %d after" % (need, fa[1]) if need is not None and fa[0] < need else "")))
     if mb and ma:
         print("runner-minutes per run (every job and attempt, cancelled runs included, rounded up per job):"
               " median %g before, %g after" % (median(mb), median(ma)))
         if res["runner_minutes_a_day_before"] and res["runner_minutes_a_day_after"]:
             print("runner-minutes a day: %d before, %d after (also moves with how many runs a day there are)"
                   % (res["runner_minutes_a_day_before"], res["runner_minutes_a_day_after"]))
-    if "interval_95" in res:
-        lo, hi = res["interval_95"]
+    if "shift_interval_95" in res:
+        lo, hi = res["shift_interval_95"]
         print("change, Hodges-Lehmann estimate %s; exact 95%% interval (Mann-Whitney): %s to %s"
               % (fmt(res["shift_estimate"]), fmt(lo), fmt(hi)))
     print("verdict: " + res["verdict"])

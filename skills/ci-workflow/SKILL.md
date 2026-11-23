@@ -29,8 +29,8 @@ changing what runs.
    value is flagged for a person.
 3. **Show the diff and the numbers, one change per pull request.** The pull
    request opens with the baseline and a few runs of the branch, marked
-   provisional. Once 5 runs a side have finished after the merge, post the
-   result as a comment, faster or not. Never add savings up: a fix off the
+   provisional. Once 5 runs have passed after the merge, post the result as
+   a comment, faster or not. Never add savings up: a fix off the
    slowest path doesn't shorten the wait.
 4. **Never run fewer tests before a merge, and ask before anything costs
    money.** The full suite gates every merge. Bigger runners, new providers and
