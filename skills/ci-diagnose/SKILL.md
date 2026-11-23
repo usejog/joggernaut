@@ -53,9 +53,10 @@ in `references/measuring.md`.
 
 1. **Saved history first.** If the repository already has run history saved
    (a `runs.jsonl` someone gives you, or `.joggernaut/before.jsonl`), use it
-   for the diagnosis and go to step 3. It becomes the baseline a fix is
-   measured against only if it was fetched up to a time with `--created`,
-   as below; otherwise say so, and fetch the baseline that way before a fix. Otherwise check access: `gh auth status`, then
+   for the diagnosis and go to step 3. Before a fix, fetch the baseline it
+   will be measured against as in step 2, into `.joggernaut/before.jsonl`:
+   a saved file can't show it was read with every run finished. With no
+   saved history, check access: `gh auth status`, then
    `gh api rate_limit`. Stop if fewer than 300 core requests are left; say
    when they reset. Use GET calls only.
 2. **Pull the runs.** Find the workflows that run on pull requests

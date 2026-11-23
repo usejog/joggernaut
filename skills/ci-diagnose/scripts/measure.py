@@ -60,7 +60,10 @@ def ts(value):
         die("unreadable timestamp %r; use YYYY-MM-DDTHH:MM:SSZ" % value)
     frac = float(m.group(2)) if m.group(2) else 0.0
     off = (m.group(3) or "+00:00").replace(":", "")
-    return datetime.strptime(m.group(1) + off, "%Y-%m-%dT%H:%M:%S%z").timestamp() + frac
+    try:
+        return datetime.strptime(m.group(1) + off, "%Y-%m-%dT%H:%M:%S%z").timestamp() + frac
+    except ValueError:
+        die("unreadable timestamp %r; use YYYY-MM-DDTHH:MM:SSZ" % value)
 
 
 def secs(start, end):
@@ -259,7 +262,8 @@ def cmd_fetch(a):
         want = (total or 0) if whole else min(total or 0, a.limit)
         if len(runs) < want:
             die("GitHub listed %d of the %d runs asked for (it lists at most 1,000 for a filtered"
-                " query); choose a shorter window" % (len(runs), want))
+                " query); %s" % (len(runs), want, "choose a shorter window" if whole
+                                 else "lower --limit to 1,000 or less"))
         runs = runs[: a.limit]
         going = [r for r in runs if r.get("status") != "completed"]
         if going:
@@ -633,7 +637,11 @@ def outside_cohort(r, a, cache):
         return "event %s" % r.get("event")
     if a.cache and cache.get(str(r["id"])) != a.cache:
         return "cache %s" % (cache.get(str(r["id"])) or "state unknown")
-    if a.label and not a.job and not all(a.label in (j.get("labels") or []) for j in latest_jobs(r)):
+    # A job skipped because an earlier one failed never got a runner, so it has no
+    # labels; judge the runner by the jobs that ran, or a failed run would drop out of
+    # the cohort and its failure out of the count.
+    ran = [j for j in latest_jobs(r) if j.get("labels")]
+    if a.label and not a.job and not all(a.label in j["labels"] for j in ran):
         return "not every job on runner %s" % a.label
     if a.label and a.job and not any(a.label in (j.get("labels") or [])
                                      for j in r.get("jobs", []) if j.get("name") == a.job):
@@ -752,8 +760,8 @@ def cmd_compare(a):
             out = set()
             for r in rs:
                 for j in latest_jobs(r):
-                    if not a.job or j.get("name") == a.job:
-                        out.add(tuple(sorted(j.get("labels") or [])))
+                    if (not a.job or j.get("name") == a.job) and j.get("labels"):
+                        out.add(tuple(sorted(j["labels"])))
             return out
         if labels(rb) != labels(ra):
             die("runner labels differ between before and after; pass --label (and --job) "

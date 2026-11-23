@@ -18,7 +18,7 @@ few hours ago, so every run up to it has finished.
 ```sh
 MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request --limit 150 \
   --created '<=YYYY-MM-DDTHH:MM:SSZ' \
-  --out .joggernaut/before.jsonl   # several workflows: before-<name>.jsonl each
+  --out .joggernaut/before.jsonl &&   # several workflows: before-<name>.jsonl each
 MEASURE split --in .joggernaut/before.jsonl
 ```
 
@@ -36,12 +36,14 @@ change now, not after merge.
 
 ## After merge
 
+Keep only runs that tested the fix: pull requests into the same branch (not
+ones that check out the PR head), or commits with the fix in their history.
+If `fetch` refuses, stop: `compare` would read an older file, so the `&&`
+below runs it only after a fetch that succeeded.
+
 ```sh
 MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request \
-  --created 'MERGE-TIME..WINDOW-END' --out .joggernaut/after.jsonl   # times as YYYY-MM-DDTHH:MM:SSZ
-# if fetch refused, stop: compare would read an older file. Keep only runs that
-# tested the fix: pull requests into the same branch (not ones that check out
-# the PR head), or commits with the fix in their history
+  --created 'MERGE-TIME..WINDOW-END' --out .joggernaut/after.jsonl &&   # times as YYYY-MM-DDTHH:MM:SSZ
 MEASURE compare --before .joggernaut/before.jsonl --after .joggernaut/after.jsonl \
   --label RUNNER-LABEL [--job NAME]     # always pass the runner label; add --job when jobs run on different runners
 MEASURE tests --before JUNIT-BEFORE --after JUNIT-AFTER   # each downloaded into a new, empty folder
