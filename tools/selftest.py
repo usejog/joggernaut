@@ -137,6 +137,8 @@ except OverflowError:
     bad.append("fails_rose: overflows on large samples")
 if not mm.fails_rose((0, 20), (6, 20)):
     bad.append("fails_rose: 0/20 against 6/20 should count as a rise")
+if mm.fails_rose((1, 10), (5, 10)) or not mm.fails_rose((1, 10), (6, 10)):
+    bad.append("fails_rose: 1 of 10 against 5 of 10 is within chance (p = 0.070); 6 of 10 is not")
 if not mm.fails_rose((0, 5), (4, 5)) or mm.fails_rose((0, 5), (3, 5)):
     bad.append("fails_rose: at 5 a side, 0 against 4 failures is the smallest rise beyond chance")
 # The exact interval. The Mann-Whitney null counts match brute force over every order.

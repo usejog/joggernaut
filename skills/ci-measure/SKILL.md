@@ -29,8 +29,9 @@ change, and checks by name that no test stopped running.
    value is flagged for a person.
 3. **Show the diff and the numbers, one change per pull request.** The pull
    request opens with the baseline and a few runs of the branch, marked
-   provisional. Once 5 runs have passed after the merge, post the result as
-   a comment, faster or not. Never add savings up: a fix off the
+   provisional. After it merges, pick a window of time, and once at least 5
+   runs in it have passed and every run started in it has finished, post the
+   result as a comment, faster or not. Never add savings up: a fix off the
    slowest path doesn't shorten the wait.
 4. **Never run fewer tests before a merge, and ask before anything costs
    money.** The full suite gates every merge. Bigger runners, new providers and
@@ -92,16 +93,22 @@ baseline now (step 3.3): a lost test fails the change before it merges.
 
 ### 3. After the change merges
 
-1. Fetch only runs after the merge:
-   `python3 scripts/measure.py fetch ... --created '>=YYYY-MM-DDTHH:MM:SSZ' --out .joggernaut/after.jsonl`.
+1. Fetch only runs created in a window after the merge, chosen before you
+   look (a day or two, say), and only once every run created in it has
+   finished: fast runs finish first, so a window read early holds its
+   fastest runs and can pass for a speedup. `fetch` warns when runs in the
+   window are still going.
+   `python3 scripts/measure.py fetch ... --created 'MERGE-TIME..WINDOW-END' --out .joggernaut/after.jsonl`
+   (times as `YYYY-MM-DDTHH:MM:SSZ`).
    A `pull_request` run tests the pull request merged into its base as the
    base was when the run started, so runs on pull requests into the same
    branch, created after the merge, include the fix. Leave out pull requests
    into other branches, workflows that check out the pull request's head
    instead of the merge commit, and `push` runs on branches without the fix
    (`git merge-base --is-ancestor FIX_SHA RUN_SHA` tells you).
-   You need at least 5 comparable runs a side. If there aren't 5 yet, report
-   "not enough runs yet", write the exact commands into the pull request so
+   You need at least 5 comparable runs a side. If the window ends with fewer,
+   report "not enough runs yet", write the exact commands into the pull
+   request so
    anyone can finish the measurement, and stop; never trigger runs to fill
    the count without asking. Comparable means the
    same workflow, event and runner label, and successful runs only. Count
@@ -189,8 +196,8 @@ This is reasoning from how CI works, not a measurement.
 - CI times vary run to run with machines, caches and load. Comparing two
   single runs measures the noise as often as the change. An exact rank
   interval over 5 or more runs a side separates the two, and says when it
-  can't yet: then a larger count, chosen before looking again, can narrow
-  it.
+  can't yet. A larger count can narrow it; one chosen after seeing the first
+  result is exploratory, and both results are reported.
 - A local machine differs from a CI runner in cores, disk, network and cache
   state, so a local speedup may not exist on CI at all.
 - Dropping a test makes CI look faster, so speed alone can't tell a

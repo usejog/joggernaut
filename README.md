@@ -41,13 +41,15 @@ Off the slowest path (runner-minutes, not wait)
 For a person: bigger runners (cost money), a merge queue
 ```
 
-Say yes to a fix and the matching skill opens one pull request for it. Once
-5 runs have passed after the merge, ask your agent to **measure the fix**:
-`ci-measure` compares them with the runs from before, says how many runs its
-verdict rests on, and says when a small change needs more runs to show. It
-also checks by name, from the JUnit reports CI saves, that every test still
-ran. Where CI saves no
-report it can only count tests, and says the check is unverified.
+Say yes to a fix and the matching skill opens one pull request for it. A day
+or so after the merge, once at least 5 runs have passed and every run started
+in that time has finished, ask your agent to **measure the fix**. (Fast runs
+finish first, so stopping at the fifth to finish would flatter the fix.)
+`ci-measure` compares those runs with the runs from before, says how many
+runs its verdict rests on, and says when a small change needs more runs to
+show. It also checks by name, from the JUnit reports CI saves, that every
+test still ran. Where CI saves no report it can only count tests, and says
+the check is unverified.
 
 ## Start
 

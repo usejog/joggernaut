@@ -226,6 +226,16 @@ def cmd_fetch(a):
         runs.extend(batch)
         page += 1
     runs = runs[: a.limit]
+    if a.created:
+        # Fast runs finish first: a window read while some of its runs are still going
+        # holds its fastest runs and can pass for a speedup. Count the unfinished ones.
+        going = sum(gh_get("%s?%s" % (base, q.replace("status=completed&per_page=100",
+                                                      "status=%s&per_page=1" % st))).get("total_count", 0)
+                    for st in ("queued", "waiting", "in_progress"))
+        if going:
+            print("measure.py: %d run(s) created in this window haven't finished; the fastest finish"
+                  " first, so wait for them (or end the window earlier) before comparing" % going,
+                  file=sys.stderr)
     if len(runs) + 10 > left:
         die("%d runs need about %d requests; %d left" % (len(runs), len(runs) + 10, left))
     prepare_out(a.out)
@@ -993,7 +1003,8 @@ def main(argv=None):
     f.add_argument("--event", default="pull_request")
     f.add_argument("--branch")
     f.add_argument("--limit", type=int, default=150)
-    f.add_argument("--created", help="GitHub date filter, e.g. '>=2026-11-20' for runs after a merge")
+    f.add_argument("--created", help="GitHub date filter, e.g. '2026-11-20T15:00:00Z..2026-11-22T15:00:00Z'"
+                   " for the runs created in a window after a merge")
     f.add_argument("--out", default="runs.jsonl")
 
     s = sub.add_parser("split", help="waiting, setup, running; failed minutes; flakes")

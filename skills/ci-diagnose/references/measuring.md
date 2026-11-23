@@ -36,13 +36,19 @@ change now, not after merge.
 
 ```sh
 MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request \
-  --created '>=YYYY-MM-DDTHH:MM:SSZ' --out .joggernaut/after.jsonl   # the merge time
+  --created 'MERGE-TIME..WINDOW-END' --out .joggernaut/after.jsonl   # times as YYYY-MM-DDTHH:MM:SSZ
 # keep only runs that tested the fix: pull requests into the same branch (not
 # ones that check out the PR head), or commits with the fix in their history
 MEASURE compare --before .joggernaut/before.jsonl --after .joggernaut/after.jsonl \
   --label RUNNER-LABEL [--job NAME]     # always pass the runner label; add --job when jobs run on different runners
 MEASURE tests --before JUNIT-BEFORE --after JUNIT-AFTER   # each downloaded into a new, empty folder
 ```
+
+Choose the window before looking (a day or two after the merge, say), and
+fetch it only once every run created in it has finished; `fetch` warns when
+some are still going. Fast runs finish first, so stopping at the fifth run to
+finish keeps the fastest of the window and can pass for a speedup with no
+change at all.
 
 `compare` needs at least 5 successful comparable runs a side and reports the
 failure rate on both sides. If more runs fail after than chance explains (a
@@ -51,7 +57,7 @@ you report it. Report its verdict as printed, with the run count it names, for
 example "median faster (5 runs a side)". `tests` fails if any test stopped
 running, was newly skipped or newly fails.
 
-**If there aren't 5 runs a side yet**, say "not enough runs yet", write the
+**If the window has fewer than 5 a side**, say "not enough runs yet", write the
 exact commands above into the pull request so anyone can finish the
 measurement, and stop. Never trigger runs to fill the count without asking:
 runs cost money.
@@ -103,18 +109,21 @@ side it can, but only if all 16 pairs agree. At 5 a side, 2 of the 25 pairs
 may disagree, so 5 is the fewest that leaves room for ordinary noise.
 `--min-runs` refuses less than 5 and takes more.
 
+At any count, the 95% assumes each run is an independent draw, so that with
+no change, which runs came before and which after is down to chance. Runs that
+share one busy hour, or one slow runner pool, move together, and five of them
+are worth less than five spread out. Let the after window run over more than a
+day when you can, and say so when it didn't.
+
 Few runs still cost something:
 
-- The 95% also assumes each run is an independent draw, so that with no
-  change, which runs came before and which after is down to chance. Runs
-  that share one busy hour, or one slow runner pool, move together, and five
-  of them are worth less than five spread out. Let the after runs spread over
-  more than a day when you can, and say so when they didn't.
 - The slowest 5% of under 20 runs is just the slowest run, so below 20 runs
   on the smaller side that side shows its "slowest run". The side with more
   runs shows its "typical slowest of 5" (for 5 runs on the other side): the
   median of the slowest of 5 drawn from its runs, so the two compare like
-  with like. Both are provisional below 100 runs a side.
+  with like. Both are provisional below 100 runs a side, and which side's is
+  lower is weak evidence on its own: with 9 runs against 5, the 5-run side
+  shows the lower one 9 times in 14 with no change at all.
 - The failure-rate test has little power with few runs: with 5 runs before,
   none failed, and 5 passed after, it takes 7 failed after to count as beyond
   chance. `compare` prints how many failed runs, beside the ones that
