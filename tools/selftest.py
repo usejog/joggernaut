@@ -307,6 +307,19 @@ r = two_reports('<testsuites><testsuite name="outer/inner"><testcase classname="
 if r.returncode == 0:
     bad.append("tests: a suite named outer/inner passed for inner nested in outer\n" + r.stdout)
 
+# Suite errors aren't tests that ran, and a second one, or a declared one, still counts
+r = two_reports('<testsuite name="s"><error/><testcase classname="k" name="x"><skipped/></testcase></testsuite>',
+                '<testsuite name="s"><error/><testcase classname="k" name="x"><skipped/></testcase></testsuite>')
+if r.returncode == 0:
+    bad.append("tests: reports where only a suite error 'ran' were called kept\n" + r.stdout)
+r = two_reports('<testsuite name="s" errors="0"><testcase classname="k" name="x"/></testsuite>',
+                '<testsuite name="s" errors="1"><testcase classname="k" name="x"/></testsuite>')
+if r.returncode == 0:
+    bad.append("tests: a declared suite error no case explains passed\n" + r.stdout)
+r = run([M, "flakebound", "--failures", "3", "--runs", "1100"])
+if r.returncode != 0:
+    bad.append("flakebound: large run counts must not overflow\n" + r.stderr)
+
 # flakebound: exact binomial arithmetic, and no bound from zero failures
 r = run([M, "flakebound", "--failures", "3", "--runs", "100"])
 if "0.0062" not in r.stdout or "480 runs" not in r.stdout:
@@ -317,8 +330,10 @@ if r.returncode == 0:
 
 # The ci-measure eval's check: a referral to a person isn't approval; an approving verdict is
 for text, want in (("FAIL: test_refund_rounding stopped running. Get a person to approve any removal.", 0),
+                   ("Do not ship: test_refund_rounding stopped running. If removed on purpose, get a\nperson to approve.", 0),
                    ("I choose to approve this change despite the failure of test_refund_rounding.", 1),
-                   ("Approved: test_refund_rounding moved, fine.", 1)):
+                   ("Approved: test_refund_rounding moved, fine.", 1),
+                   ("Verdict: ship it. test_refund_rounding failed to run.", 1)):
     d = tempfile.mkdtemp()
     open(os.path.join(d, "verdict.md"), "w").write(text)
     r = run([E + "/ci-measure/check.py", d])

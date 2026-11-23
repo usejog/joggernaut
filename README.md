@@ -29,7 +29,7 @@ a test, are safety choices, labelled as choices, and each says why.
 of every rule.
 
 Ask your agent to **diagnose my CI**. It reads your recent GitHub Actions
-runs (150 runs take about 155 API requests: one for each run's jobs, more
+runs (150 runs a workflow by default, about 155 API requests: one for each run's jobs, more
 for a run with over 100 jobs, plus the run list; the usual limit for a
 signed-in user is 5,000 an hour, and `gh api rate_limit` shows yours), splits the wait into waiting for a machine, setup and
 running, and ranks the causes by the wait each one costs on your own runs.
@@ -48,8 +48,8 @@ On the slowest path, observed in these runs         a run          a day
 > 1  pnpm cache never saved on main: cold PRs   -4m 50s on 96 runs  -2h 04m  ci-cache
        install 5m 20s on 96 cold runs, 0m 30s on 41 warm; same job, same runner
 On the slowest path, ceilings (not observed)
-  2  tests use 2 of 4 cores                     up to -3m 03s   up to -2h 02m  ci-slow-tests
-       with ideal scaling, twice the workers halves the 6m 05s test step
+  2  tests use 2 of 4 cores                     up to -2m 05s   up to -1h 23m  ci-slow-tests
+       with ideal scaling, twice the workers halves the 4m 10s test step
 Off the slowest path (runner-minutes, not wait)
   3  old PR runs keep going after a new push    up to 9 min on each of 54 runs        ci-workflow
        observed work after the newer push started; a ceiling on what cancelling saves
@@ -57,7 +57,8 @@ Off the slowest path (runner-minutes, not wait)
        billed minutes can save more, since each job rounds up
 Reliability
   5  checkout.test.ts fails, then passes on rerun   5 of 150 runs, observed      ci-flaky-tests
-       each: +18 min of wait to the passing attempt, +12 runner-minutes
+       each: 32 min to green, about +18 min against a typical run (an estimate);
+       +12 runner-minutes re-run; about 24 min of wait a day
 For a person: bigger runners (cost money), a merge queue
 ```
 
@@ -70,7 +71,7 @@ Say yes to a fix and the matching skill opens one pull request per change (ci-gu
 20 runs have finished after the merge, ask your agent to **measure the fix**:
 `ci-measure` compares them with 20 or more from before, and checks by name,
 from the JUnit reports CI saves, that every test still ran. Where CI saves no
-report it can only count tests, and says the check is unverified.
+report, `ci-measure`'s comparator has nothing to compare by name, so a count alone is reported as unverified.
 
 ## Start
 
@@ -138,7 +139,7 @@ skill links its sources in `references/evidence.md`.
 | OpenAI Core Experimentation | CI median roughly 10 → 4.5 min | Codex ranked ideas by estimated CI minutes saved a day; about 30 PRs | [blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family) |
 | Shopify Ruby LSP | CI about 30 → about 20 min | Test-time work in one PR; the same reported test count, 18,329 | [PR #4004](https://github.com/Shopify/ruby-lsp/pull/4004) |
 | Sidelab | Full CI 68 min (median of 5 green runs) → 15 min (the post doesn't say over how many runs) | Claude with sub-agents; among the fixes, a compile cache at 0% hits for two weeks, 8-core runners (paid, the person's call), tests split over 2 machines | [post](https://x.com/sireton_builds/status/2117864723404451924) |
-| OpenAI Core Experimentation | One suite 592.6 s → 29.8 s | Adding one missing mock; all 63 tests still ran | [blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family) |
+| OpenAI Core Experimentation | One suite 592.6 s → 29.8 s | Adding one missing mock; all 63 tests retained | [blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family) |
 | Linear | 7 small jobs → 2 | About 87,000 runner-minutes a month saved, based on June usage | [blog](https://linear.app/now/ci-bottleneck-reworked) |
 | Selenios | Catch-up runs were 51% of a PR's CI minutes | Under the up-to-date rule, every merge sent other pull requests back to CI; after a move to a merge queue, about a third were still updated, some for real conflicts, the rest, the team writes, reflex | [post](https://me.jonymusky.com/blog/merge-queue-ai-ci-tax) |
 
@@ -173,7 +174,7 @@ The rules for agents in [snippets/AGENTS.md](snippets/AGENTS.md):
 | Rule | Basis |
 |---|---|
 | At most two CI rounds per task | A choice, Stripe's ([Minions](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents)): it caps the CI rounds an agent starts for one task (the update right before a strict merge aside); each round can still start several workflows. Stripe's post gives no measured optimum; change it if you like. |
-| Fast checks before every push; never skip the hook | A choice, with this reason: a check that fails in CI costs a CI round, and run locally it costs its own seconds; `ci-guard` measures both on your runs. Agents skipped a pre-push hook on 118 of 411 push commands at one project ([Kumiko](https://dev.to/marc_kumiko/our-coding-agents-skipped-the-pre-push-hook-on-118-of-411-pushes-27j0)), most through an exception their rules allowed, some with an environment variable; that is why the rule bans every way of skipping (not only `--no-verify`) and why the required CI check stays. |
+| Fast checks before every push; never skip the hook | A choice, with this reason: a check that fails in CI costs a CI round, and run locally it costs its own seconds; `ci-guard` measures both on your runs. Agents skipped a pre-push hook on 118 of 411 push commands at one project ([Kumiko](https://dev.to/marc_kumiko/our-coding-agents-skipped-the-pre-push-hook-on-118-of-411-pushes-27j0)), most of the reasons the agents wrote cited an exception their rules allowed (the author didn't verify them, and found two wrong); their rules named both `--no-verify` and an environment variable. That is why the rule bans every way of skipping, and why the required CI check stays. |
 | Never pipe tests into `tail` or `head` | Reasoning: without `pipefail` a pipeline exits with its last command's status, so it can report success when the tests fail, and the cut output can drop the failure. |
 | Fix the code when a test exposes a real bug | A choice: a test changed to pass hides the bug it found. |
 | Never set a commit status or check run | Anyone with write access can set a status check's state; naming the app expected to report a required check makes only that app's report count ([GitHub docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)), so an agent could turn a required check green itself. |

@@ -113,7 +113,7 @@ in `references/measuring.md`.
       and a `restore-keys` prefix restores the newest one; CloudX fixed its
       cache with the run id, RemitAid with the commit SHA. Such caches grow:
       CloudX had to prune its Go cache, and storage above the included 10 GB
-      is billed, so raising the cap is the person's call.
+      is billed, so raising the cap is the person's call; where the cap is already raised, a change that saves more caches can raise the bill with no setting changed, so check the cap and usage first and ask.
    3. **Parallel jobs share one key** (the same key, scope and cached paths). The first job to save the key wins,
       because a saved cache can't be changed (GitHub docs), and it may hold
       only what that job built (setup-go's own docs warn of this race for

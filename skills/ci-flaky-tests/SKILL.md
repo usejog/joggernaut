@@ -55,14 +55,13 @@ in `references/measuring.md`.
 No retry (in the runner, the test or the workflow), no added or longer
 `sleep`, no longer timeout, no skip, `xfail`, quarantine or `.only`, no
 mocking the thing under test, no loosened assertion, no fewer workers to hide
-a race. Each of these makes the test stop failing without making the code
-right. A change to the worker count belongs to ci-slow-tests, as its own measured change; the flaky test must still pass the strain reproduction at the original worker count. If the only fix you can find is one of these, stop and report instead.
+a race. Each of these can hide a failure or drop coverage without making the code right. A change to the worker count belongs to ci-slow-tests, as its own measured change; the flaky test must still pass the strain reproduction at the original worker count. If the only fix you can find is one of these, stop and report instead.
 
 ## Steps
 
 1. **Find the flakes from history.** If there is no
    `.joggernaut/before.jsonl`, fetch it first as `references/measuring.md`
-   says. `python3 scripts/measure.py split --in .joggernaut/before.jsonl` lists jobs that failed and then passed on a
+   says. `python3 scripts/measure.py split --in .joggernaut/before.jsonl` lists jobs that failed and then passed on (`--json` lists them all; the text shows ten) a
    rerun of the same commit. Where CI keeps JUnit reports, name the tests.
    Rank by occurrences times the observed cost of each (as ci-diagnose's Reliability section gives it).
 2. **Reproduce before changing anything.** Run the one test many times,
@@ -93,7 +92,7 @@ right. A change to the worker count belongs to ci-slow-tests, as its own measure
    run may find the one you left.
 5. **Prove it with the same repetition.** Run the reproduction again,
    unchanged, with enough runs that an unchanged flake would have failed at
-   least once with 95% probability: at least 3/p runs, since an unchanged
+   least once with 95% probability. `flakebound` (below) gives the exact count; 3/p is a quick, conservative stand-in, since an unchanged
    flake failing at rate p then passes them all with chance (1-p)^(3/p),
    under e^-3, about 5%. That assumes independent runs and a known p, and
    p is only estimated, so take it low: fix the size n of one estimation
@@ -132,7 +131,7 @@ This is reasoning from how CI works, not a measurement.
   removes it.
 - A test that waits a fixed time races the machine's speed. Waiting for the
   event itself is as fast on a quick machine and still right on a slow one.
-- A fix is shown only by repetition at least as strong as what showed the
+- A fix is shown by a deterministic test that forces the failing order and fails on the old code, or by repetition at least as strong as what showed the
   flake: if it failed 1 run in 20, a few green runs say nothing, and even
   many only bound the rate.
 
