@@ -138,6 +138,40 @@ except OverflowError:
     bad.append("fails_rose: overflows on large samples")
 if not mm.fails_rose((0, 20), (6, 20)):
     bad.append("fails_rose: 0/20 against 6/20 should count as a rise")
+if mm.fails_rose((1, 10), (5, 10)) or not mm.fails_rose((1, 10), (6, 10)):
+    bad.append("fails_rose: 1 of 10 against 5 of 10 is within chance (p = 0.070); 6 of 10 is not")
+if not mm.fails_rose((0, 5), (4, 5)) or mm.fails_rose((0, 5), (3, 5)):
+    bad.append("fails_rose: at 5 a side, 0 against 4 failures is the smallest rise beyond chance")
+# The exact interval. The Mann-Whitney null counts match brute force over every order.
+import itertools
+import math
+from fractions import Fraction
+for m in range(1, 7):
+    for n in range(1, 7):
+        want = [0] * (m * n + 1)
+        for after_at in itertools.combinations(range(m + n), n):
+            # u counts (before, after) pairs where the after run is the slower one
+            want[sum(1 for p in after_at for q in range(m + n) if q < p and q not in after_at)] += 1
+        if mm.mann_whitney_counts(m, n, m * n) != want:
+            bad.append("mann_whitney_counts(%d, %d) differs from brute force" % (m, n))
+# Textbook two-sided 5% critical values of U (Mann and Whitney's table): reject when U <= c.
+import random
+rng = random.Random(7)
+for (m, n), c in {(4, 4): 0, (4, 6): 2, (4, 8): 4, (5, 5): 2, (5, 7): 5, (5, 10): 8, (6, 6): 5,
+                  (7, 7): 8, (8, 8): 13, (10, 10): 23, (20, 20): 127}.items():
+    xs, ys = [rng.random() for _ in range(m)], [rng.random() for _ in range(n)]
+    est, lo, hi, conf = mm.shift_interval(xs, ys)
+    d = sorted(y - x for x in xs for y in ys)
+    if (lo, hi) != (d[c], d[-c - 1]):
+        bad.append("shift_interval: %d and %d a side should use U <= %d" % (m, n, c))
+if mm.shift_interval([1, 2, 3], [4, 5, 6])[1:3] != (-math.inf, math.inf):
+    bad.append("shift_interval: 3 a side can't give a 95% interval")
+# A published worked example: X = (0, 2.2, 5.5, 10.1), Y = (3.2, 7.7, 12.4, 18.9),
+# 90% interval [-2.4, 16.7] at coverage 1 - 4/70 (clinicalbiostats.com, "Hodges-Lehmann
+# Estimates and Rank-Based Intervals"); the median of the 16 printed differences is 6.2.
+est, lo, hi, conf = mm.shift_interval([0, 2.2, 5.5, 10.1], [3.2, 7.7, 12.4, 18.9], Fraction(1, 10))
+if (round(est, 6), round(lo, 6), round(hi, 6), round(conf, 6)) != (6.2, -2.4, 16.7, round(1 - 4 / 70, 6)):
+    bad.append("shift_interval: the worked example gives %r" % ((est, lo, hi, conf),))
 k = mm.KEY.search("Cache not found for input keys: pnpm-Linux-9b2d, pnpm-Linux-")
 if not k or k.group(1) != "pnpm-Linux-9b2d":
     bad.append("cachelog: key not read from 'input keys:'")
@@ -206,6 +240,367 @@ r = run([M, "compare", "--before", "ci-history/before.jsonl", "--after", "ci-his
          "--min-runs", "30"], cwd=E + "/ci-measure/repo")
 if "not enough runs yet" not in r.stdout:
     bad.append("compare: expected not enough runs\n" + r.stdout)
+# Runs with chosen durations (seconds) and outcomes, in the format fetch writes.
+def fake_runs(path, secs, base_id, outcome="success"):
+    from datetime import datetime, timedelta
+    row0 = json.loads(open(E + "/ci-measure/repo/ci-history/before.jsonl").readline())
+    t0 = datetime(2026, 10, 1, 9, 0, 0)
+    with open(path, "a") as f:
+        for i, s in enumerate(secs):
+            start = t0 + timedelta(hours=i)
+            end = (start + timedelta(seconds=s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            row = dict(row0, id=base_id + i, conclusion=outcome,
+                       created_at=start.strftime("%Y-%m-%dT%H:%M:%SZ"), run_started_at=start.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            row["jobs"] = [dict(row0["jobs"][0], id=(base_id + i) * 10, conclusion=outcome,
+                                started_at=row["run_started_at"], completed_at=end)]
+            f.write(json.dumps(row) + "\n")
+
+
+def verdict(before, after):
+    r = run([M, "compare", "--before", before, "--after", after, "--json"])
+    return json.loads(r.stdout) if r.returncode == 0 else {"error": r.stderr}
+
+
+with tempfile.TemporaryDirectory() as t:
+    # Most runs faster but the median slower is mixed, not "median faster".
+    fake_runs(t + "/mb", [60] * 11 + [120] * 10, 1000)
+    fake_runs(t + "/ma", [30] * 10 + [61] * 11, 2000)
+    v = verdict(t + "/mb", t + "/ma")
+    if v.get("verdict_code") != "mixed":
+        bad.append("compare: most runs faster with a slower median should be mixed: %r" % v.get("verdict"))
+    fake_runs(t + "/sb", [600, 610, 620, 630, 640], 3000)
+    fake_runs(t + "/sa", [700, 705, 712, 720, 731], 4000)
+    v = verdict(t + "/sb", t + "/sa")
+    if v.get("verdict") != "median slower (5 runs a side)":
+        bad.append("compare: 5 slower runs a side should be median slower: %r" % v.get("verdict"))
+    # Whole-second ties: identical times are no change, at any count.
+    fake_runs(t + "/tb", [600] * 5, 5000)
+    fake_runs(t + "/ta", [600] * 5, 6000)
+    if verdict(t + "/tb", t + "/ta").get("verdict_code") != "no_change_yet":
+        bad.append("compare: identical tied times should be no measurable change")
+    # The failure-rate test on the real path: 5 passed before; 5 passed and 6 or 7 failed after.
+    # 6 failures is within chance at 5 a side, but any rise in failures withholds a clean "faster".
+    for fails, want in ((6, "faster_more_failures"), (7, "not_valid")):
+        fake_runs(t + "/fa%d" % fails, [500, 505, 510, 515, 520], 7000 + 100 * fails)
+        fake_runs(t + "/fa%d" % fails, [400] * fails, 7050 + 100 * fails, "failure")
+        v = verdict(t + "/sb", t + "/fa%d" % fails)
+        if v.get("verdict_code") != want:
+            bad.append("compare: %d failed after against 0 before should be %s: %r" % (fails, want, v))
+    # A failed build whose next job was skipped (no runner, so no labels) still counts
+    # under --label: 7 failed beside 5 passed is not valid.
+    fails = [json.loads(l) for l in open(t + "/fa7") if l.strip()]
+    for row in fails:
+        if row["conclusion"] == "failure":
+            # build failed, so the measured job, test, was skipped
+            row["jobs"] = [dict(row["jobs"][0], name="build"),
+                           dict(row["jobs"][0], id=row["id"] * 10 + 1, name=row["jobs"][0]["name"],
+                                conclusion="skipped", labels=[], started_at=row["jobs"][0]["completed_at"])]
+    open(t + "/skip", "w").write("".join(json.dumps(x) + "\n" for x in fails))
+    for flags in (["--label", "ubuntu-latest"], ["--label", "ubuntu-latest", "--job", "test"]):
+        r = run([M, "compare", "--before", t + "/sb", "--after", t + "/skip", "--json"] + flags)
+        if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
+            bad.append("compare: failed runs with a skipped job dropped out under %s\n%s%s"
+                       % (" ".join(flags), r.stdout, r.stderr))
+    # A build on one runner fails and the measured test, meant for another, is skipped:
+    # the failure still counts under that other runner's label.
+    def relabel(src, dst, labels):
+        rows2 = [json.loads(l) for l in open(src) if l.strip()]
+        for row in rows2:
+            for j in row["jobs"]:
+                if j["labels"]:
+                    j["labels"] = labels if j["name"] != "build" else ["ubuntu-latest"]
+        open(dst, "w").write("".join(json.dumps(x) + "\n" for x in rows2))
+    relabel(t + "/sb", t + "/sbw", ["windows-latest"])
+    relabel(t + "/skip", t + "/skipw", ["windows-latest"])
+    r = run([M, "compare", "--before", t + "/sbw", "--after", t + "/skipw", "--json",
+             "--label", "windows-latest", "--job", "test"])
+    if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
+        bad.append("compare: a failed build on another runner dropped out under --job --label\n" + r.stdout + r.stderr)
+    # Unknown runners resolve against a speedup: a green run whose measured job was skipped
+    # doesn't dilute the failures, and a same-name job on another runner doesn't clear a
+    # failed run whose measured job never ran.
+    skipw = [json.loads(l) for l in open(t + "/skipw") if l.strip()]
+    failed_row = next(x for x in skipw if x["conclusion"] == "failure")
+    docs = dict(failed_row, id=8800, conclusion="success",
+                jobs=[dict(failed_row["jobs"][0], conclusion="success"), failed_row["jobs"][1]])
+    twin = [dict(x, jobs=x["jobs"] + [dict(x["jobs"][0], id=x["id"] * 10 + 2, name=failed_row["jobs"][1]["name"],
+                                          conclusion="success")]) if x["conclusion"] == "failure" else x
+            for x in skipw]
+    for name, rows2 in (("docs", skipw + [docs]), ("twin", twin)):
+        open(t + "/" + name, "w").write("".join(json.dumps(x) + "\n" for x in rows2))
+        r = run([M, "compare", "--before", t + "/sbw", "--after", t + "/" + name, "--json",
+                 "--label", "windows-latest", "--job", "test"])
+        v = json.loads(r.stdout) if r.returncode == 0 else {}
+        if (v.get("failed_after") or [0])[0] != 7 or v.get("verdict_code") not in ("not_valid", "faster_more_failures"):
+            bad.append("compare: %s case hid the failures under --job --label: %r" % (name, v.get("verdict")))
+    # Same-name matrix legs: the leg on the asked runner is timed, whichever is listed first.
+    def legs(src, dst, ubuntu_secs, first_ubuntu):
+        rows2 = []
+        for row in (json.loads(l) for l in open(src) if l.strip()):
+            win = row["jobs"][0]
+            start = win["started_at"]
+            end = (datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=ubuntu_secs)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            ubu = dict(win, id=win["id"] + 1, labels=["ubuntu-latest"], completed_at=end)
+            row["jobs"] = [ubu, dict(win, labels=["windows-latest"])] if first_ubuntu else [dict(win, labels=["windows-latest"]), ubu]
+            rows2.append(row)
+        open(dst, "w").write("".join(json.dumps(x) + "\n" for x in rows2))
+    from datetime import datetime, timedelta
+    legs(t + "/sb", t + "/legb", 900, False)
+    legs(t + "/sb", t + "/lega0", 300, True)
+    lega = [dict(json.loads(l), id=json.loads(l)["id"] + 50000) for l in open(t + "/lega0") if l.strip()]
+    open(t + "/lega", "w").write("".join(json.dumps(x) + "\n" for x in lega))
+    r = run([M, "compare", "--before", t + "/legb", "--after", t + "/lega", "--json",
+             "--label", "windows-latest", "--job", "test"])
+    v = json.loads(r.stdout) if r.returncode == 0 else {}
+    if v.get("verdict_code") != "no_change_yet" or v.get("after_runs") != 5:
+        bad.append("compare: the windows leg wasn't the one timed: %r\n%s" % (v.get("verdict"), r.stderr))
+    # Under --label, runs that failed at startup (no jobs, no runner) still count as failures.
+    started = [json.loads(l) for l in open(t + "/fa7") if l.strip() and json.loads(l)["conclusion"] == "success"]
+    early = [dict(started[0], id=7900 + i, conclusion="startup_failure", jobs=[]) for i in range(7)]
+    open(t + "/early", "w").write("".join(json.dumps(x) + "\n" for x in started + early))
+    r = run([M, "compare", "--before", t + "/sb", "--after", t + "/early", "--label", "ubuntu-latest", "--json"])
+    if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
+        bad.append("compare: startup failures dropped out of the count under --label\n" + r.stdout + r.stderr)
+    # The failure check reads every run of the workflow: a cache filter can't drop startup
+    # failures that never reached the cache, and a failure before doesn't buy a clean "faster".
+    json.dump({str(x["id"]): "hit" for x in started + [json.loads(l) for l in open(t + "/sb") if l.strip()]},
+              open(t + "/hits.json", "w"))
+    r = run([M, "compare", "--before", t + "/sb", "--after", t + "/early", "--json",
+             "--cache", "hit", "--cache-state", t + "/hits.json"])
+    v = json.loads(r.stdout) if r.returncode == 0 else {}
+    if v.get("verdict_code") != "not_valid":
+        bad.append("compare: --cache hit hid startup failures: %r\n%s" % (v.get("verdict"), r.stderr))
+    sb1 = [json.loads(l) for l in open(t + "/sb") if l.strip()]
+    open(t + "/sb1", "w").write("".join(json.dumps(x) + "\n" for x in sb1 + [dict(sb1[0], id=3999, conclusion="failure")]))
+    r = run([M, "compare", "--before", t + "/sb1", "--after", t + "/fa7", "--json"])
+    v = json.loads(r.stdout) if r.returncode == 0 else {}
+    if (v.get("verdict_code"), v.get("failed_before"), v.get("failed_after")) != ("faster_more_failures", [1, 6], [7, 12]):
+        bad.append("compare: a failure before beside 7 after: %r" % v.get("verdict"))
+    # The failure check looks at every job and attempt whatever --job says: a green run
+    # with a failed sibling job, and a run cancelled after its first attempt failed, count.
+    green = [json.loads(l) for l in open(t + "/fa7") if l.strip() and json.loads(l)["conclusion"] == "success"]
+    odd = []
+    for i in range(7):
+        x = dict(green[0], id=9100 + i)
+        x["jobs"] = [green[0]["jobs"][0], dict(green[0]["jobs"][0], id=91000 + i, name="experimental", conclusion="failure")]
+        odd.append(x)
+    for i in range(7):
+        x = dict(green[0], id=9200 + i, conclusion="cancelled", run_attempt=2)
+        x["jobs"] = [dict(green[0]["jobs"][0], run_attempt=1, conclusion="failure"),
+                     dict(green[0]["jobs"][0], id=92000 + i, run_attempt=2, conclusion="cancelled")]
+        odd.append(x)
+    for name, extra, flags in (("sibling", odd[:7], ["--job", "test"]), ("cancelled", odd[7:], [])):
+        open(t + "/" + name, "w").write("".join(json.dumps(x) + "\n" for x in green + extra))
+        r = run([M, "compare", "--before", t + "/sb", "--after", t + "/" + name, "--json"] + flags)
+        v = json.loads(r.stdout) if r.returncode == 0 else {}
+        if v.get("failed_after") != [7, 12] or v.get("verdict_code") != "not_valid":
+            bad.append("compare: the %s failures weren't counted: %r %r" % (name, v.get("failed_after"), v.get("verdict")))
+    # Whole runs timed on two pools under differently named jobs: refused, not a speedup.
+    def pools(src, dst, slow):
+        rows2 = [json.loads(l) for l in open(src) if l.strip()]
+        for i, x in enumerate(rows2):
+            pool = "slow" if i < slow else "fast"
+            x["jobs"] = [dict(j, name="test-" + pool, labels=["self-hosted", pool]) for j in x["jobs"]]
+        open(dst, "w").write("".join(json.dumps(x) + "\n" for x in rows2))
+    pools(t + "/sb", t + "/poolb", 4)
+    pools(t + "/sa", t + "/poola", 1)
+    r = run([M, "compare", "--before", t + "/poolb", "--after", t + "/poola", "--label", "self-hosted"])
+    if r.returncode == 0 or "different sets of runners" not in r.stderr:
+        bad.append("compare: a shift between runner pools passed\n" + r.stdout + r.stderr)
+    # A job that ran with no labels (routed by group) is no evidence of the runner.
+    nogroup = [json.loads(l) for l in open(t + "/sa") if l.strip()]
+    for x in nogroup:
+        x["jobs"] = x["jobs"] + [dict(x["jobs"][0], id=x["id"] * 10 + 3, name="build", labels=[])]
+    open(t + "/nogroup", "w").write("".join(json.dumps(x) + "\n" for x in nogroup))
+    r = run([M, "compare", "--before", t + "/sb", "--after", t + "/nogroup", "--label", "ubuntu-latest", "--json"])
+    if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_enough_runs":
+        bad.append("compare: a job with no labels counted as on the runner\n" + r.stdout + r.stderr)
+    # --base leaves out unplaced runs whether they passed or failed: with placed and
+    # unplaced runs in the same proportions, the failure rate is the placed runs' rate.
+    def based(src, dst, base_id):
+        rows2 = []
+        for i, x in enumerate(json.loads(l) for l in open(src) if l.strip()):
+            for placed in (True, False):
+                rows2.append(dict(x, id=base_id + 2 * i + placed, pull_request_bases=["main"] if placed else []))
+        open(dst, "w").write("".join(json.dumps(x) + "\n" for x in rows2))
+    based(t + "/sb1", t + "/baseb", 60000)
+    based(t + "/fa6", t + "/basea", 70000)
+    r = run([M, "compare", "--before", t + "/baseb", "--after", t + "/basea", "--base", "main", "--json"])
+    v = json.loads(r.stdout) if r.returncode == 0 else {}
+    if v.get("failed_before") != [1, 6] or v.get("failed_after") != [6, 11] or v.get("before_runs") != 5:
+        bad.append("compare: --base changed the failure rate or the timed runs: %r %r %r\n%s"
+                   % (v.get("failed_before"), v.get("failed_after"), v.get("before_runs"), r.stderr))
+    # Under --label, a run where no job shows a runner can't be one of the 5.
+    nolab = [json.loads(l) for l in open(t + "/sa") if l.strip()][:4]
+    extra = dict(nolab[0], id=4999)
+    extra["jobs"] = [dict(j, labels=[]) for j in extra["jobs"]]
+    open(t + "/nolab", "w").write("".join(json.dumps(x) + "\n" for x in nolab + [extra]))
+    r = run([M, "compare", "--before", t + "/sb", "--after", t + "/nolab", "--label", "ubuntu-latest", "--json"])
+    if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_enough_runs":
+        bad.append("compare: a run with no runner counted toward 5 under --label\n" + r.stdout + r.stderr)
+    # The larger side's typical slowest of 5 is the median of its 5-run maxima: with one
+    # 10-minute run in 6, five of the six 5-run draws hold it.
+    fake_runs(t + "/xb", [60] * 4 + [600], 8000)
+    fake_runs(t + "/xa", [60] * 5 + [600], 8100)
+    v = verdict(t + "/xb", t + "/xa")
+    if v.get("before_tail") != ["slowest run", 600] or v.get("after_tail") != ["typical slowest of 5", 600]:
+        bad.append("compare: typical slowest of 5 should be 600 s: %r %r" % (v.get("before_tail"), v.get("after_tail")))
+# The typical slowest of k against brute force over every k-run draw.
+for _ in range(300):
+    n = rng.randint(2, 9); k = rng.randint(1, n - 1)
+    xs = [rng.randint(1, 20) for _ in range(n)]
+    maxes = sorted(max(c) for c in itertools.combinations(xs, k))
+    if mm.tails(xs, xs[:k])[0] != ("typical slowest of %d" % k, maxes[(len(maxes) - 1) // 2]):
+        bad.append("tails: typical slowest of %d of %r should be %r" % (k, xs, maxes[(len(maxes) - 1) // 2]))
+        break
+# fetch, against a fake gh: a window is written only when every run in it has finished and
+# all of it fits under --limit; without a window (a diagnosis) the finished runs are kept.
+FAKE_GH = r'''#!/usr/bin/env python3
+import json, os, re, sys
+runs = json.load(open(os.environ["FAKE_RUNS"]))
+path = sys.argv[-1]
+if path == "rate_limit":
+    print(json.dumps({"resources": {"core": {"remaining": 5000, "reset": 0}}}))
+elif "/pulls?" in path:
+    from urllib.parse import unquote
+    head = unquote(re.search(r"[?&]head=([^&]+)", path).group(1))
+    print(json.dumps(json.loads(os.environ.get("FAKE_PULLS") or "{}").get(head, [])))
+elif "/jobs" in path:
+    rid = int(re.search(r"/runs/(\d+)/jobs", path).group(1))
+    print(json.dumps([{"jobs": [r for r in runs if r["id"] == rid][0]["jobs"]}]))
+else:
+    keep = [r for r in runs if "status=completed" not in path or r["status"] == "completed"]
+    m = re.search(r"[?&]created=([^&]+)", path)
+    if m:
+        from urllib.parse import unquote
+        value = unquote(m.group(1))
+        lo, _, hi = value.rpartition("..") if ".." in value or value.startswith("<") else (value, "", value)
+        hi = hi.lstrip("<=")
+        hi = hi + "T23:59:59Z" if len(hi) == 10 else hi  # a bare date takes its whole day
+        keep = [r for r in keep if (not lo or r["created_at"] >= lo) and r["created_at"] <= hi]
+    page = int(re.search(r"[?&]page=(\d+)", path).group(1))
+    total = int(os.environ.get("FAKE_TOTAL") or len(keep))  # GitHub lists at most 1,000
+    shift = int(os.environ.get("FAKE_SHIFT") or 0)  # new runs arrived: later pages start earlier
+    first = max(0, (page - 1) * 100 - shift)
+    print(json.dumps({"total_count": total, "workflow_runs": keep[first:first + 100]}))
+'''
+with tempfile.TemporaryDirectory() as t:
+    os.makedirs(t + "/bin")
+    open(t + "/bin/gh", "w").write(FAKE_GH)
+    os.chmod(t + "/bin/gh", 0o755)
+    rows = [dict(r, pull_requests=[{"number": n} for n in r["pull_requests"]])
+            for r in (json.loads(l) for l in open(E + "/ci-measure/repo/ci-history/after.jsonl") if l.strip())][:6]
+    env = dict(os.environ, PATH=t + "/bin" + os.pathsep + os.environ["PATH"], FAKE_RUNS=t + "/runs.json")
+
+    calls = itertools.count()
+
+    # Outside every window below: a run still going, which only a lost --created would see.
+    outside = dict(rows[0], id=99, created_at="2026-09-01T09:00:00Z", status="in_progress")
+
+    def fetch(statuses, *extra):
+        listed = [dict(r, status=s) for r, s in zip(rows, statuses)]
+        for row in listed:
+            if row["status"] is None:
+                del row["status"]
+        json.dump(listed + [outside], open(t + "/runs.json", "w"))
+        out = t + "/out/%d.jsonl" % next(calls)
+        r = subprocess.run([sys.executable, M, "fetch", "--repo", "o/r", "--workflow", "ci.yml", "--out", out]
+                           + list(extra), cwd=t, env=env, capture_output=True, text=True)
+        return r, (sum(1 for _ in open(out)) if os.path.exists(out) else None)
+    window = ("--created", "2026-10-01T00:00:00Z..2026-10-08T00:00:00Z")
+    r, n = fetch(["completed"] * 5 + ["in_progress"], *window)
+    if r.returncode == 0 or n is not None or "haven't finished" not in r.stderr:
+        bad.append("fetch: a window with a run still going was written\n" + r.stdout + r.stderr)
+    r, n = fetch(["completed"] * 6, "--limit", "5", *window)
+    if r.returncode == 0 or n is not None:
+        bad.append("fetch: a window larger than --limit was written\n" + r.stdout + r.stderr)
+    r, n = fetch(["completed"] * 6, *window)
+    if r.returncode != 0 or n != 6:
+        bad.append("fetch: a finished window should be written whole (%r runs)\n%s" % (n, r.stderr))
+    r, n = fetch(["completed"] * 6, "--limit", "5", "--created", "2026-10-06")
+    if r.returncode == 0 or n is not None:
+        bad.append("fetch: a one-day window larger than --limit was written\n" + r.stdout + r.stderr)
+    env["FAKE_TOTAL"] = "1200"
+    r, n = fetch(["completed"] * 6, "--limit", "2000", *window)
+    env["FAKE_TOTAL"] = ""
+    if r.returncode == 0 or n is not None or "listed 6 of" not in r.stderr:
+        bad.append("fetch: a window GitHub listed only in part was written\n" + r.stderr)
+    r, n = fetch(["completed"] * 5 + [None], *window)
+    if r.returncode == 0 or n is not None:
+        bad.append("fetch: a run with no status was taken as finished")
+    # Pages that overlap as new runs arrive: each run is kept once.
+    many = [dict(rows[0], id=5000 + i, created_at="2026-10-06T%02d:%02d:00Z" % (23 - i // 60, 59 - i % 60))
+            for i in range(120)]
+    json.dump([dict(r, status="completed") for r in many], open(t + "/many.json", "w"))
+    out = t + "/out/many.jsonl"
+    r = subprocess.run([sys.executable, M, "fetch", "--repo", "o/r", "--workflow", "ci.yml", "--out", out],
+                       cwd=t, env=dict(env, FAKE_RUNS=t + "/many.json", FAKE_SHIFT="7"),
+                       capture_output=True, text=True)
+    ids = [json.loads(l)["id"] for l in open(out)] if os.path.exists(out) else []
+    if r.returncode != 0 or len(ids) != 120 or len(set(ids)) != 120:
+        bad.append("fetch: overlapping pages gave %d runs, %d distinct\n%s" % (len(ids), len(set(ids)), r.stderr))
+    # A closed pull request drops off its runs: fetch finds its branch from the run's head
+    # branch, in any state; a fork's run records none and is never looked up.
+    shut = [dict(r, status="completed", pull_requests=[], head_repository={"full_name": "o/r"}) for r in rows]
+    shut[1]["head_repository"] = {"full_name": "fork/r"}
+    json.dump(shut, open(t + "/shut.json", "w"))
+    pulls = {"o:" + shut[0]["head_branch"]: [{"base": {"ref": "main"}}],
+             "o:" + shut[1]["head_branch"]: [{"base": {"ref": "main"}}]}
+    out = t + "/out/shut.jsonl"
+    r = subprocess.run([sys.executable, M, "fetch", "--repo", "o/r", "--workflow", "ci.yml", "--out", out] + list(window),
+                       cwd=t, env=dict(env, FAKE_RUNS=t + "/shut.json", FAKE_PULLS=json.dumps(pulls)),
+                       capture_output=True, text=True)
+    got = [json.loads(l)["pull_request_bases"] for l in open(out)] if os.path.exists(out) else []
+    if r.returncode != 0 or not got or got[0] != ["main"] or got[1] != []:
+        bad.append("fetch: a closed pull request's branch wasn't found, or a fork's was: %r\n%s" % (got[:2], r.stderr))
+    r, n = fetch(["completed"] * 5 + ["queued"])
+    if r.returncode != 0 or n != 5:
+        bad.append("fetch: without a window, the finished runs should be written (%r runs)\n%s" % (n, r.stderr))
+    # A baseline up to a past time keeps the newest --limit runs; all must have finished.
+    r, n = fetch(["completed"] * 6, "--limit", "4", "--created", "<=2026-10-08T00:00:00Z")
+    if r.returncode != 0 or n != 4:
+        bad.append("fetch: a baseline up to a past time should keep its newest 4 runs (%r)\n%s" % (n, r.stderr))
+    r, n = fetch(["in_progress"] + ["completed"] * 5, "--limit", "4", "--created", "<=2026-10-08T00:00:00Z")
+    if r.returncode == 0 or n is not None:
+        bad.append("fetch: a baseline with a run still going was written")
+    for open_window in (">=2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z..2999-01-01"):
+        r, n = fetch(["completed"] * 6, "--created", open_window)
+        if r.returncode == 0 or n is not None:
+            bad.append("fetch: a window that hasn't ended (%s) was written" % open_window)
+# Tails compare like with like: with no change, 150 runs before and 5 after, the after
+# side's slowest run must not look better nearly every time (a max of 150 against a max of 5).
+better = 0
+for _ in range(400):
+    b = [rng.lognormvariate(6, 0.3) for _ in range(150)]
+    c = [rng.lognormvariate(6, 0.3) for _ in range(5)]
+    (lb, tb), (lc, tc) = mm.tails(b, c)
+    better += tc < tb
+if (lb, lc) != ("typical slowest of 5", "slowest run") or not 0.3 < better / 400.0 < 0.7:
+    bad.append("tails: with no change, the 5-run side looked better in %d of 400 draws" % better)
+# Five runs a side are enough for a verdict, named with its count; four are not.
+with tempfile.TemporaryDirectory() as t:
+    for name, src, keep in (("b5", "before", 5), ("a5", "after", 5), ("b4", "before", 4), ("a4", "after", 4)):
+        lines = [l for l in open(E + "/ci-measure/repo/ci-history/%s.jsonl" % src) if l.strip()][:keep]
+        open(t + "/" + name, "w").write("".join(lines))
+    lines = [json.loads(l) for l in open(t + "/b5")]
+    open(t + "/same5", "w").write("".join(json.dumps(dict(x, id=x["id"] + 10 ** 9)) + "\n" for x in lines))
+    r = run([M, "compare", "--before", t + "/b5", "--after", t + "/a5"])
+    if "verdict: median faster (5 runs a side)" not in r.stdout or "slowest run" not in r.stdout:
+        bad.append("compare: 5 runs a side should give a verdict with its count\n" + r.stdout + r.stderr)
+    r = run([M, "compare", "--before", t + "/b5", "--after", t + "/same5"])
+    if "verdict: no measurable change yet with 5 a side; more runs can tighten this" not in r.stdout:
+        bad.append("compare: the same 5 runs should say more runs can tighten it\n" + r.stdout + r.stderr)
+    r = run([M, "compare", "--before", t + "/b4", "--after", t + "/a4"])
+    if "verdict: not enough runs yet" not in r.stdout or "median" in r.stdout or "slowest" in r.stdout:
+        bad.append("compare: 4 runs a side should not get a verdict\n" + r.stdout + r.stderr)
+    # 24 runs before against 5 after: the larger side's tail is named for what it is.
+    r = run([M, "compare", "--before", E + "/ci-measure/repo/ci-history/before.jsonl", "--after", t + "/a5"])
+    if ("before: 24 runs" not in r.stdout or "typical slowest of 5" not in r.stdout.split("after:")[0]
+            or "slowest run" not in r.stdout.split("after:")[1]):
+        bad.append("compare: unequal sides should show the larger side's typical slowest of 5\n" + r.stdout + r.stderr)
+    r = run([M, "compare", "--before", t + "/b4", "--after", t + "/a4", "--min-runs", "4"])
+    if r.returncode == 0:
+        bad.append("compare: --min-runs 4 should be refused\n" + r.stdout)
 r = run([M, "tests", "--before", "ci-history/junit-before", "--after", "ci-history/junit-after"],
         cwd=E + "/ci-measure/repo")
 if r.returncode == 0 or "test_refund_rounding" not in r.stdout:
@@ -492,8 +887,12 @@ for rec in src:
 rerun = tempfile.mktemp(suffix=".jsonl")
 open(rerun, "w").write("".join(json.dumps(x) + "\n" for x in src))
 r = run([M, "compare", "--before", "ci-history/before.jsonl", "--after", rerun], cwd=E + "/ci-measure/repo")
-if "median faster" in r.stdout:
-    bad.append("compare: timed-out first attempts still earned a speed verdict\n" + r.stdout)
+if r.returncode != 0 or "verdict: not enough runs yet" not in r.stdout:
+    bad.append("compare: timed-out first attempts should leave too few runs, not a verdict\n" + r.stdout + r.stderr)
+r = run([M, "compare", "--before", "ci-history/before.jsonl", "--after", "ci-history/after.jsonl",
+         "--event", "push"], cwd=E + "/ci-measure/repo")
+if r.returncode != 0 or "verdict: not enough runs yet" not in r.stdout:
+    bad.append("compare: no comparable runs at all should say not enough runs\n" + r.stdout + r.stderr)
 
 # every check.py fails on its untouched sample (the planted cause is there)
 for case in sorted(glob.glob(E + "/ci-*/")):
