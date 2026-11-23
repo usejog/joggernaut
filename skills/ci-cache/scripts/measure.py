@@ -159,10 +159,10 @@ def prepare_out(path):
         die("git couldn't say whether %s is tracked; not writing it" % path)
     folder = os.path.dirname(path)
     # A symlink anywhere on the way inside this folder could point the write at a tracked file.
-    if ".." in path.replace("\\", "/").split("/"):
+    if os.pardir in path.replace("\\", "/").split("/"):
         die("%s contains '..'; give the output path without it" % path)
     rel = os.path.relpath(os.path.abspath(path), os.path.abspath("."))
-    if not rel.startswith(".."):
+    if rel.split(os.sep)[0] != os.pardir:
         here = os.path.abspath(".")
         for part in rel.split(os.sep):
             here = os.path.join(here, part)
@@ -473,7 +473,8 @@ def cmd_split(a):
         return
     print("runs read: %d%s, over %.1f days%s" % (
         len(runs), " (workflow %s)" % a.workflow if a.workflow else "", out["span_days"],
-        ", about %s pushes a day" % out["runs_per_day"] if out["runs_per_day"] is not None else " (under a day: no daily rate)"))
+        ", about %s pushes a day" % out["runs_per_day"] if out["runs_per_day"]
+        else " (no pull-request runs)" if out["runs_per_day"] == 0 else " (under a day: no daily rate)"))
     print("PR wait (run start to last job done, %d successful runs): median %s, slowest 5%% %s%s"
           % (len(walls), fmt(out["wait_median"]), fmt(out["wait_p95"]),
              " (provisional: under %d runs)" % P95_FIRM if out["p95_provisional"] else ""))
@@ -776,6 +777,10 @@ SHARD = re.compile(r"((?:shard|part|chunk|split|slice|group|batch|worker|index|n
 NOT_RUN = {"notrun", "skipped", "suppressed", "disabled", "ignored", "pending"}
 FAILED_TAGS = {"failure", "error", "flakyFailure", "flakyError", "rerunFailure", "rerunError"}
 FAILED_WORDS = {"failed", "failure", "fail", "error", "errored", "broken"}
+ASSERT_TAGS = {"failure", "flakyFailure", "rerunFailure"}
+ERROR_TAGS = {"error", "flakyError", "rerunError"}
+ASSERT_WORDS = {"failed", "failure", "fail"}
+ERROR_WORDS = {"error", "errored", "broken"}
 
 
 def junit_results(path):
@@ -814,34 +819,38 @@ def junit_results(path):
           chain.reverse()
           suite_path = [s.get("name") or "" for s in chain]
           suite_file = next((s.get("file") for s in reversed(chain) if s.get("file")), "")
-          # Errors on the suite itself are counted apart from tests (they aren't tests that ran).
-          direct = sum(1 for c in suite if local(c.tag) in FAILED_TAGS)
-          if direct:
-              k = json.dumps([where, suite_path, suite_file])
-              errs[k] = errs.get(k, 0) + direct
+          # Errors on the suite itself are counted apart from tests (they aren't tests that ran),
+          # by kind, so one kind replacing another shows.
+          for c in suite:
+              if local(c.tag) in FAILED_TAGS:
+                  k = json.dumps([where, suite_path, suite_file, local(c.tag), c.get("type") or ""])
+                  errs[k] = errs.get(k, 0) + 1
           for tc in [c for c in suite if local(c.tag) == "testcase"]:
             cases += 1
             kids = {local(c.tag) for c in tc}
             status = (tc.get("status") or "").lower()
             result = (tc.get("result") or "").lower()
-            if kids & FAILED_TAGS or status in FAILED_WORDS or result in FAILED_WORDS:
+            # failed: an assertion failed, so the body ran. errored: only an error (a setup or
+            # collection failure), so it may not have run. Both are failures.
+            if kids & ASSERT_TAGS or status in ASSERT_WORDS or result in ASSERT_WORDS:
                 out = "failed"
+            elif kids & ERROR_TAGS or status in ERROR_WORDS or result in ERROR_WORDS:
+                out = "errored"
             elif "skipped" in kids or status in NOT_RUN or result in NOT_RUN:
                 out = "skipped"
             else:
                 out = "passed"
-            # A pass or an assertion failure shows a test body ran; an <error> alone (pytest's
-            # collection failure, a setup error) doesn't.
-            if out == "passed" or kids & {"failure", "flakyFailure", "rerunFailure"}:
+            if out in ("passed", "failed"):
                 executed[0] += 1
             add([where, suite_path, tc.get("classname") or "", tc.get("file") or suite_file or "",
                  tc.get("name") or ""], out)
         if not cases:
             die("no test cases in %s; is it a JUnit report?" % f)
         # Every container's declared totals, the root and nested <testsuites> included. Per
-        # container: its declared errors and failures, and how many of them no case or suite
-        # error inside it explains. A rise in either counts as a suite error. Declared skips the
-        # cases don't mark make it impossible to tell which ran.
+        # container, errors and failures apart: the declared count, and how many no case or
+        # suite element inside explains (retry history, such as <flakyFailure>, explains none).
+        # A rise in any counts as a suite error. Declared skips the cases don't mark make it
+        # impossible to tell which ran.
         def count(e, k):
             v = (e.get(k) or "").strip()
             if not v:
@@ -850,10 +859,6 @@ def junit_results(path):
                 die("%s: unreadable %s=%r; the comparison is unverified" % (f, k, e.get(k)))
             return int(v)
 
-        def case_failed(c):
-            return bool({local(g.tag) for g in c} & FAILED_TAGS
-                        or (c.get("status") or "").lower() in FAILED_WORDS
-                        or (c.get("result") or "").lower() in FAILED_WORDS)
         containers = [x for x in root.iter() if local(x.tag) in ("testsuite", "testsuites")]
         for e in containers:
             chain, x = [], e
@@ -862,22 +867,23 @@ def junit_results(path):
                     chain.append(x.get("name") or local(x.tag))
                 x = parent.get(x)
             path_ = chain[::-1]
+            efile = e.get("file") or ""
             if local(e.tag) == "testsuites":
-                direct = sum(1 for c in e if local(c.tag) in FAILED_TAGS)
-                if direct:
-                    k = json.dumps([where, path_, "(errors on the report)"])
-                    errs[k] = errs.get(k, 0) + direct
-            declared = count(e, "errors") + count(e, "failures")
+                for c in e:
+                    if local(c.tag) in FAILED_TAGS:
+                        k = json.dumps([where, path_, efile, "(on the report) " + local(c.tag), c.get("type") or ""])
+                        errs[k] = errs.get(k, 0) + 1
             inner = list(e.iter())
-            explained = (sum(1 for c in inner if local(c.tag) == "testcase" and case_failed(c))
-                         + sum(1 for s in inner if local(s.tag) in ("testsuite", "testsuites")
-                               for c in s if local(c.tag) in FAILED_TAGS))
-            for label, n in (("(declared errors and failures)", declared),
-                             ("(declared errors and failures no case explains)", max(0, declared - explained))):
-                if n:
-                    k = json.dumps([where, path_, label])
-                    errs[k] = errs.get(k, 0) + n
             cases_in = [c for c in inner if local(c.tag) == "testcase"]
+            holders = cases_in + [s for s in inner if local(s.tag) in ("testsuite", "testsuites")]
+            for kind, attr in (("error", "errors"), ("failure", "failures")):
+                declared = count(e, attr)
+                explained = sum(1 for h in holders for c in h if local(c.tag) == kind)
+                for label, n in (("(declared %s)" % attr, declared),
+                                 ("(declared %s no case explains)" % attr, max(0, declared - explained))):
+                    if n:
+                        k = json.dumps([where, path_, efile, label])
+                        errs[k] = errs.get(k, 0) + n
             marked = sum(1 for c in cases_in if ({local(g.tag) for g in c} & {"skipped"})
                          or (c.get("status") or "").lower() in NOT_RUN or (c.get("result") or "").lower() in NOT_RUN)
             if count(e, "skipped") + count(e, "disabled") > marked:
@@ -896,15 +902,13 @@ def cmd_tests(a):
     (b, eb, xb), (c, ec, xc) = junit_results(a.before), junit_results(a.after)
     if not b or not c:
         die("no test cases found in %s" % (a.before if not b else a.after))
-    ran = lambda outs: sum(1 for o in outs if o != "skipped")
-    failed = lambda outs: sum(1 for o in outs if o == "failed")
-    if not sum(ran(v) for v in b.values()):
-        die("no test ran in %s (every case skipped); nothing to compare, so this verifies nothing"
-            % a.before)
+    # A test ran when it passed or an assertion failed; an error alone doesn't show it ran.
+    ran = lambda outs: sum(1 for o in outs if o in ("passed", "failed"))
+    failed = lambda outs: sum(1 for o in outs if o in ("failed", "errored"))
     if not xb:
-        die("no case in %s shows a test body ran (only errors, such as a collection failure);"
-            " the comparison is unverified" % a.before)
-    stopped, newly_skipped, new_fail = [], [], []
+        die("no case in %s shows a test ran (every case skipped, or only errors such as a collection"
+            " failure); nothing to compare, so this verifies nothing" % a.before)
+    stopped, newly_skipped, newly_errored, new_fail = [], [], [], []
     for t in sorted(set(b) | set(c)):
         ob, oc = b.get(t, []), c.get(t, [])
         lost = ran(ob) - ran(oc)
@@ -912,6 +916,8 @@ def cmd_tests(a):
             stopped.append((t, lost, len(ob)))
             if oc.count("skipped") > ob.count("skipped"):
                 newly_skipped.append(t)
+            elif oc.count("errored") > ob.count("errored"):
+                newly_errored.append(t)
         if failed(oc) > failed(ob):
             new_fail.append((t, failed(oc) - failed(ob)))
     suite_errors = [(s, ec[s] - eb.get(s, 0)) for s in sorted(ec) if ec[s] > eb.get(s, 0)]
@@ -928,7 +934,8 @@ def cmd_tests(a):
     else:
         print("tests that ran: before %d, after %d" % (res["ran_before"], res["ran_after"]))
         for t, k, n in stopped:
-            print("  stopped running: " + label(t, k, n) + ("  (now skipped)" if t in newly_skipped else ""))
+            print("  stopped running: " + label(t, k, n) + ("  (now skipped)" if t in newly_skipped else
+                                                             "  (now only an error)" if t in newly_errored else ""))
         for t, k in new_fail:
             print("  new failure: " + show_test(t) + ("" if k == 1 else " (%d more copies)" % k))
         for s, k in suite_errors:
@@ -939,15 +946,19 @@ def cmd_tests(a):
 
 # ---------------------------------------------------------------- cachelog
 
+# Each message is matched from the start of its line (after the timestamp), restore lines
+# first, so text inside a key can't pass for a message. The exact-hit save message is the
+# actions/cache form, "Cache hit occurred on the primary key K, not saving cache.", or
+# setup-java's, which names its cache: "on the maven-wrapper primary key".
 CACHE_OUTCOMES = [
     (re.compile(r"^\s*key:\s+\S", re.I), "requested"),
-    # actions/cache and setup-node say "on the primary key X"; setup-java names the cache first.
-    (re.compile(r"cache hit occurred on (the |\S+ )?primary key .*not saving cache", re.I), "save: skipped (exact hit)"),
+    (re.compile(r"^\s*(cache restored from key|restored from cache key)\b", re.I), "restore: hit"),
+    (re.compile(r"^\s*(cache (is )?not found|no cache found)\b", re.I), "restore: miss"),
+    (re.compile(r"^\s*cache hit occurred on (the )?(\S+ )?primary key [^,]*, not saving cache\.?\s*$", re.I),
+     "save: skipped (exact hit)"),
+    (re.compile(r"^\s*cache saved\b", re.I), "save: saved"),
+    (re.compile(r"^\s*(failed to save|unable to reserve cache)\b", re.I), "save: failed"),
     (re.compile(r"not saving cache", re.I), "save: skipped, reason unknown"),
-    (re.compile(r"cache hit occurred|cache restored from key|restored from cache key", re.I), "restore: hit"),
-    (re.compile(r"cache (is )?not found|no cache found", re.I), "restore: miss"),
-    (re.compile(r"cache saved", re.I), "save: saved"),
-    (re.compile(r"failed to save|unable to reserve cache", re.I), "save: failed"),
 ]
 # A key ends at a comma or the line's end (actions/cache refuses commas in keys); it may hold spaces.
 KEY = re.compile(r"(?:input keys|key):?\s+([^,]+?)\s*(?:,|$)", re.I)
@@ -983,12 +994,13 @@ def cmd_cachelog(a):
 # ---------------------------------------------------------------- flakebound
 
 def cmd_flakebound(a):
-    """Exact binomial interval, its end found numerically. From x failures in a batch of n runs
-    whose size was fixed beforehand: the low end of a two-sided 95% interval for the
-    failure rate (the rate at which x or more failures has a 2.5% chance), and the
-    runs a re-test needs so that a flake that still failed at that rate would fail at
-    least once with 95% probability."""
-    from decimal import Decimal, getcontext
+    """Exact binomial interval. From x failures in a batch of n runs whose size was fixed
+    beforehand: the low end of a two-sided 95% interval for the failure rate (the rate at
+    which x or more failures has a 2.5% chance), and the runs a re-test needs so that a
+    flake still failing at that rate would fail at least once with 95% probability.
+    Decimal arithmetic at 60 digits; the bound is taken from the low side, and the run
+    count is checked against it, so the count is never short."""
+    from decimal import Decimal as D, localcontext, ROUND_CEILING
     x, n = a.failures, a.runs
     if n < 1 or not 0 <= x <= n:
         die("need 0 <= failures <= runs and runs >= 1")
@@ -996,44 +1008,47 @@ def cmd_flakebound(a):
         print("no failures in %d runs: the rate's low end is 0, so no number of green runs"
               " can show a fix; reproduce it first" % n)
         sys.exit(1)
-    getcontext().prec = 50
-    D = Decimal
+    with localcontext() as ctx:
+        ctx.prec, ctx.Emin, ctx.Emax = 60, -999999999999999999, 999999999999999999
 
-    def at_least_x(p):
-        # P(X >= x), summed in log space over whichever side has fewer terms, so neither a
-        # long sum nor a tail far below a float's range goes wrong.
-        if p <= 0:
-            return 0.0
+        def at_least_x(p):
+            # P(X >= x), summed exactly by the binomial recurrence over the side with fewer terms.
+            q = 1 - p
+            if n - x + 1 <= x:
+                term, tot = p ** n, D(0)  # i = n
+                for i in range(n, x - 1, -1):
+                    tot += term
+                    term = term * D(i) / D(n - i + 1) * q / p
+                return tot
+            term, below = q ** n, D(0)  # i = 0
+            for i in range(0, x):
+                below += term
+                term = term * D(n - i) / D(i + 1) * p / q
+            return 1 - below
+
+        target = D("0.025")
+        if x == n:
+            p = target ** (D(1) / D(n))
+        elif x == 1:
+            p = 1 - (1 - target) ** (D(1) / D(n))
+        else:
+            lo, hi = D(0), D(x) / D(n)
+            for _ in range(200):
+                mid = (lo + hi) / 2
+                if mid == lo or mid == hi:
+                    break
+                lo, hi = (mid, hi) if at_least_x(mid) < target else (lo, mid)
+            p = lo
+        p = p.next_minus()  # step to the low side of any rounding
         if p >= 1:
-            return 1.0
-        lp, lq = math.log(p), math.log1p(-p)
-        lc = lambda i: math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1) + i * lp + (n - i) * lq
-        def logsum(idx):
-            ls = [lc(i) for i in idx]
-            top = max(ls)
-            return top + math.log(sum(math.exp(v - top) for v in ls))
-        if n - x + 1 <= x:
-            return math.exp(logsum(range(x, n + 1)))
-        return -math.expm1(logsum(range(0, x)))
-
-    if x == n:
-        p = float(D("0.025") ** (D(1) / D(n)))
-    elif x == 1:
-        p = -math.expm1(math.log(0.975) / n)  # 1 - 0.975^(1/n), the closed form
-    else:
-        lo, hi = 0.0, x / float(n)
-        for _ in range(200):
-            mid = (lo + hi) / 2
-            lo, hi = (mid, hi) if at_least_x(mid) < 0.025 else (lo, mid)
-        p = lo  # the side where x or more failures is still under 2.5%: never above the true end,
-        # so the run count below is never short (at worst one more than the least that works)
-    if p >= 1:
-        need = 1
-    else:
-        need = int((D("0.05").ln() / (1 - D(p)).ln()).to_integral_value(rounding="ROUND_CEILING"))
-        while (1 - D(p)) ** need > D("0.05"):
-            need += 1
-    print("failure rate: %d of %d; low end of its 95%% interval %.6g" % (x, n, p))
+            need = 1
+        else:
+            need = int((D("0.05").ln() / (1 - p).ln()).to_integral_value(rounding=ROUND_CEILING))
+            while (1 - p) ** need > D("0.05"):
+                need += 1
+            while need > 1 and (1 - p) ** (need - 1) <= D("0.05"):
+                need -= 1
+    print("failure rate: %d of %d; low end of its 95%% interval %s" % (x, n, "%.6g" % float(p)))
     print("re-test with at least %d runs: a flake still failing at that rate passes them all"
           " with chance under 5%%" % need)
 

@@ -69,10 +69,8 @@ in `references/measuring.md`.
    It prints one fixed label per cache line, with a short hash (8 hex
    digits) that names the key without printing it. Some setup actions don't
    print their key; then the outcome is unknown unless the step's
-   `cache-hit` output shows it (its meaning differs by action: setup-node sets it for any restore, setup-python only for an exact key; else record "restored, match unknown"). Keys are hashed after Unicode normalisation, in lower case, close to how actions/cache compares them but not identical in every script, so treat the hashes as hints: the action's own exact-hit line or `cache-hit` output decides, and where neither is there, record the match as unknown. `save: skipped, reason unknown` means a skipped save without the exact-hit message. `requested key#…` is the key the step asked for.
-   A `restore: hit` with the same hash is an exact hit, so is `save: skipped
-   (exact hit)`; a `restore: hit` with another hash is a partial match (a
-   prefix of the key, or `restore-keys`; GitHub docs). Where a job has
+   `cache-hit` output shows it (its meaning differs by action: setup-node sets it for any restore, setup-python only for an exact key; else record "restored, match unknown"). Keys are hashed after Unicode normalisation, in lower case, close to how actions/cache compares them but not identical in every script (ß and ss, for example). `save: skipped, reason unknown` means a skipped save without the exact-hit message. `requested key#…` is the key the step asked for.
+   `save: skipped (exact hit)` (the action's own exact-hit message) is an exact hit. A `restore: hit` with the requested key's hash suggests an exact hit, and with another hash suggests a partial match (a prefix of the key, or `restore-keys`; GitHub docs); the hashes are hints, so where no exact-hit message or `cache-hit` output settles it, record the match as unknown. Where a job has
    several cache steps and the lines can't be paired, record the outcome as
    unknown. Record, per key: exact hit, partial hit, miss or unknown, and
    whether the run saved a cache. List the caches that exist with

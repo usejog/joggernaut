@@ -99,7 +99,7 @@ in `references/measuring.md`.
    - the PR wait, at the median and the slowest 5% of successful runs, from
      the start of the run's final attempt to its last job done (time spent
      waiting for someone to rerun a failure isn't in it). With several
-     workflows in the file that line pools them; report the "PR wait across workflows" line instead, read as follows: for each commit it takes each workflow's first run within 24 hours of the commit's first, drops the commit if any of those failed (even if a later run passed), and times until their last job finished (an optional slow job counts; a workflow missing for a commit isn't in it). Report a pull-request-wide wait only when every required workflow is present. If branch protection requires only some
+     workflows in the file that line pools them; report the "PR wait across workflows" line instead, as the elapsed time for commits where two or more workflows were seen, read as follows: for each commit it takes each workflow's first run within 24 hours of the commit's first, drops the commit if any of those failed (even if a later run passed), and times until their last job finished (an optional slow job counts; a workflow missing for a commit isn't in it). Report a pull-request-wide wait only when every required workflow is present. If branch protection requires only some
      jobs (read `required_status_checks` as in ci-workflow; on 403 or 404,
      say it is unknown), the required checks can't pass before the slowest
      required job ends: say which job that is and rank on its path. Reviews,
@@ -175,7 +175,7 @@ in `references/measuring.md`.
    so give its cost per occurrence instead, observed: the runner-minutes of
    the failed attempt's jobs that ran again, and the extra wait (first
    attempt's start to the passing attempt's end, minus a typical passing
-   run; the subtraction is an estimate against the typical passing run, so show the actual interval too). Give a flake's daily cost as well, worked out on the push's last required finish as for the other causes (a flake in a workflow that doesn't finish last saves no wait); if it is larger than fix #1's, it becomes fix #1, or the order is undecided where its estimate is too uncertain. Show it under Reliability either way. Never add savings of different causes up: their effects can overlap (less than the sum), combine (more, as with two equally long paths) or move the slowest path. Show the runs
+   run; the subtraction is an estimate against the typical passing run, so show the actual interval too). Give a flake's daily cost as well, worked out on the push's last required finish as for the other causes (a flake in a workflow that doesn't finish last saves no wait, as long as its rerun doesn't hold a runner or slot another required job waits for); if it is larger than fix #1's, it becomes fix #1, or the order is undecided where its estimate is too uncertain. Show it under Reliability either way. Never add savings of different causes up: their effects can overlap (less than the sum), combine (more, as with two equally long paths) or move the slowest path. Show the runs
    and steps each number rests on.
 
    When the question is the bill, first name what is billed and rank within that: storage by stored volume over time, minutes by runner-minutes (hosted runner

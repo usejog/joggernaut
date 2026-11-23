@@ -92,7 +92,7 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    run may find the one you left.
 5. **Prove it with the same repetition.** Run the reproduction again,
    unchanged, with enough runs that an unchanged flake would have failed at
-   least once with 95% probability. `flakebound` (below) gives the exact count; 3/p is a quick, conservative stand-in, since an unchanged
+   least once with 95% probability, for independent runs, if its true rate is at least the low end below. `flakebound` (below) gives the exact count; 3/p is a quick, conservative stand-in, since an unchanged
    flake failing at rate p then passes them all with chance (1-p)^(3/p),
    under e^-3, about 5%. That assumes independent runs and a known p, and
    p is only estimated, so take it low: fix the size n of one estimation
@@ -131,7 +131,7 @@ This is reasoning from how CI works, not a measurement.
   removes it.
 - A test that waits a fixed time races the machine's speed. Waiting for the
   event itself is as fast on a quick machine and still right on a slow one.
-- A deterministic test that forces the failing order, fails on the old code and passes on the fix shows that cause is fixed. Green runs bound how often it can still fail, more tightly the more there are; step 5's count is the one that makes an unchanged flake show with 95% probability. If it failed 1 run in 20, a few green runs say little: with independent runs and a true rate of 5%, 20 more all pass about a third of the time (0.95^20 ≈ 0.36).
+- A deterministic test that forces the failing order, fails on the old code and passes on the fix shows that cause is fixed. Green runs bound how often it can still fail, more tightly the more there are; step 5's count makes an unchanged flake show with at least 95% probability, for independent runs, if its true rate is at least the low end `flakebound` gives. If it failed 1 run in 20, a few green runs say little: with independent runs and a true rate of 5%, 20 more all pass about a third of the time (0.95^20 ≈ 0.36).
 
 ## Why this works: what others measured
 

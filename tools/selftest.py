@@ -362,6 +362,41 @@ for x, n, want in (("999999", "1000000", "at least 1 runs"), ("1", "2002288363",
     r = run([M, "flakebound", "--failures", x, "--runs", n])
     if want not in r.stdout:
         bad.append("flakebound: %s of %s should give %s\n%s%s" % (x, n, want, r.stdout, r.stderr))
+for before, after, what in (
+        ('<testsuite name="s"><testcase classname="k" name="x"><failure/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="x"><error message="setup"/></testcase></testsuite>',
+         "a test that failed an assertion and now only errors"),
+        ('<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><failure/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><error/></testcase></testsuite>',
+         "a sibling passing while another test now only errors"),
+        ('<testsuite name="s" failures="1" errors="0"><testcase classname="k" name="x"><failure/></testcase>'
+         '<testcase classname="k" name="z"><flakyFailure/></testcase></testsuite>',
+         '<testsuite name="s" failures="0" errors="1"><testcase classname="k" name="x"/>'
+         '<testcase classname="k" name="z"><flakyFailure/></testcase></testsuite>',
+         "a fixed assertion offsetting a new unexplained error"),
+        ('<testsuites><testsuite name="mod" file="a.py" errors="1"><testcase classname="k" name="x"/></testsuite>'
+         '<testsuite name="mod" file="b.py" errors="0"><testcase classname="k" name="y"/></testsuite></testsuites>',
+         '<testsuites><testsuite name="mod" file="a.py" errors="0"><testcase classname="k" name="x"/></testsuite>'
+         '<testsuite name="mod" file="b.py" errors="1"><testcase classname="k" name="y"/></testsuite></testsuites>',
+         "a declared error moving between same-name suites in two files"),
+        ('<testsuite name="s"><error type="CleanupError"/><testcase classname="k" name="x"/></testsuite>',
+         '<testsuite name="s"><error type="SetupError"/><testcase classname="k" name="x"/></testsuite>',
+         "one kind of suite error replacing another")):
+    r = two_reports(before, after)
+    if r.returncode == 0:
+        bad.append("tests: %s passed\n%s" % (what, r.stdout))
+for x, n, want in (("2", "10000000", "at least 123683624 runs"), ("1", "33358860", "at least 3947190594 runs")):
+    r = run([M, "flakebound", "--failures", x, "--runs", n])
+    if want not in r.stdout:
+        bad.append("flakebound: %s of %s should give %s\n%s%s" % (x, n, want, r.stdout, r.stderr))
+# cachelog: messages match from the line's start, so text inside a key can't pass for one
+code = ("import importlib.util,sys;s=importlib.util.spec_from_file_location('m',sys.argv[1]);m=importlib.util.module_from_spec(s);"
+        "s.loader.exec_module(m);f=lambda l:[x for r,x in m.CACHE_OUTCOMES if r.search(l)][:1];"
+        "print(f('Cache restored from key: x cache hit occurred on the primary key old, not saving cache.'));"
+        "print(f('Cache hit occurred on the maven-wrapper primary key deps-1, not saving cache.'))")
+r = run(["-c", code, M])
+if r.stdout.split("\n")[:2] != ["['restore: hit']", "['save: skipped (exact hit)']"]:
+    bad.append("cachelog: message patterns misread\n" + r.stdout + r.stderr)
 r = run([M, "flakebound", "--failures", "1", "--runs", "61288"])
 if "7251910 runs" not in r.stdout:
     bad.append("flakebound: 1 of 61288 needs 7251910 runs (the exact threshold is just over 7251909)\n" + r.stdout)
@@ -386,17 +421,16 @@ r = run([M, "flakebound", "--failures", "0", "--runs", "50"])
 if r.returncode == 0:
     bad.append("flakebound: zero failures should give no bound\n" + r.stdout)
 
-# The ci-measure eval's check reads the decision from the Verdict line only
-for text, want in (("Verdict: FAIL\ntest_refund_rounding stopped running. Get a person to approve any removal.", 0),
-                   ("Verdict: FAIL\nDo not merge: test_refund_rounding stopped running; ship it only when restored.", 0),
-                   ("**Verdict:** FAIL\nThe change fails: test_refund_rounding is gone.", 1),
-                   ("Approved for merge.\n> Verdict: FAIL\ntest_refund_rounding", 1),
-                   ("Verdict: FAIL was the old assessment; test_refund_rounding is fine.", 1),
-                   ("Verdict: FAIL\ntest_refund_rounding_new stopped running.", 1),
-                   ("Verdict: PASS\nI do not reject this change even though test_refund_rounding stopped running.", 1),
-                   ("Verdict: PASS\nLGTM. The tool said FAIL because test_refund_rounding moved.", 1),
-                   ("The change fails: test_refund_rounding stopped running.", 1),
-                   ("Verdict: FAIL\nA test stopped running.", 1)):
+# The ci-measure eval's check reads the decision from an exact first line only
+for text, want in (("Verdict: FAIL\nStopped running: test_refund_rounding\nGet a person to approve any removal.", 0),
+                   ("Verdict: FAIL\nStopped running: tests.test_billing::test_refund_rounding\nDo not merge.", 0),
+                   ("Verdict: PASS\nStopped running: test_refund_rounding", 1),
+                   ("**Verdict:** FAIL\nStopped running: test_refund_rounding", 1),
+                   ("    Verdict: FAIL\nApproved for merge. test_refund_rounding passed.", 1),
+                   ("Approved for merge.\nVerdict: FAIL\nStopped running: test_refund_rounding", 1),
+                   ("Verdict: FAIL was the old assessment\nStopped running: test_refund_rounding", 1),
+                   ("Verdict: FAIL\nStopped running: test_refund_rounding_new", 1),
+                   ("Verdict: FAIL\nStopped running: test_other\ntest_refund_rounding still ran.", 1)):
     d = tempfile.mkdtemp()
     open(os.path.join(d, "verdict.md"), "w").write(text)
     r = run([E + "/ci-measure/check.py", d])
