@@ -10,9 +10,12 @@ d = sys.argv[1]
 fail = []
 cmd = [sys.executable, "-m", "unittest", "-v", "tests.test_debounce"]
 r = subprocess.run(cmd, cwd=d, capture_output=True, text=True)
-ran = len(re.findall(r" \.\.\. ok$", r.stderr, re.M))
-if ran != 3:
-    fail.append("%d of the 3 debounce tests passed in one run" % ran)
+# The three original tests must each pass, by name; an added test is fine.
+ORIGINAL = ("test_burst_sends_one_notification", "test_cancel_sends_nothing", "test_separate_bursts")
+passed = set(re.findall(r"^(test_\w+) \(.*\) \.\.\. ok$", r.stderr, re.M))
+missing = [n for n in ORIGINAL if n not in passed]
+if missing:
+    fail.append("these debounce tests didn't pass in one run: " + ", ".join(missing))
 plain = sum(subprocess.run(cmd, cwd=d, capture_output=True).returncode != 0 for _ in range(100))
 loaded = under_strain(cmd, d, 50)
 if plain or loaded:
