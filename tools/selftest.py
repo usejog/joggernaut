@@ -337,6 +337,31 @@ for before, after, what in (
     r = two_reports(before, after)
     if r.returncode == 0:
         bad.append("tests: %s passed\n%s" % (what, r.stdout))
+for before, after, what in (
+        ('<testsuite name="s" errors="1"><testcase classname="k" name="x"><error/></testcase></testsuite>',
+         '<testsuite name="s" errors="1"><testcase classname="k" name="x"/></testsuite>',
+         "a declared error no case explains any more"),
+        ('<testsuites><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuites>',
+         '<testsuites><error/><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuites>',
+         "a new error on the report root"),
+        ('<testsuites><testsuites name="n" errors="0"><testsuite name="s"><testcase classname="k" name="x"/>'
+         '</testsuite></testsuites></testsuites>',
+         '<testsuites><testsuites name="n" errors="1"><testsuite name="s"><testcase classname="k" name="x"/>'
+         '</testsuite></testsuites></testsuites>',
+         "a rise on a nested <testsuites>"),
+        ('<testsuite name="s" errors="0"><testcase classname="k" name="x"/></testsuite>',
+         '<testsuite name="s" errors=" 1 "><testcase classname="k" name="x"/></testsuite>',
+         "a declared error written with spaces"),
+        ('<testsuite name="s"><testcase classname="" name="t"><error message="collection failure"/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="" name="t"><error message="collection failure"/></testcase></testsuite>',
+         "reports where only a collection failure 'ran'")):
+    r = two_reports(before, after)
+    if r.returncode == 0:
+        bad.append("tests: %s passed\n%s" % (what, r.stdout))
+for x, n, want in (("999999", "1000000", "at least 1 runs"), ("1", "2002288363", "at least 236920979641 runs")):
+    r = run([M, "flakebound", "--failures", x, "--runs", n])
+    if want not in r.stdout:
+        bad.append("flakebound: %s of %s should give %s\n%s%s" % (x, n, want, r.stdout, r.stderr))
 r = run([M, "flakebound", "--failures", "1", "--runs", "61288"])
 if "7251910 runs" not in r.stdout:
     bad.append("flakebound: 1 of 61288 needs 7251910 runs (the exact threshold is just over 7251909)\n" + r.stdout)
@@ -364,7 +389,10 @@ if r.returncode == 0:
 # The ci-measure eval's check reads the decision from the Verdict line only
 for text, want in (("Verdict: FAIL\ntest_refund_rounding stopped running. Get a person to approve any removal.", 0),
                    ("Verdict: FAIL\nDo not merge: test_refund_rounding stopped running; ship it only when restored.", 0),
-                   ("**Verdict:** FAIL\nThe change fails: test_refund_rounding is gone.", 0),
+                   ("**Verdict:** FAIL\nThe change fails: test_refund_rounding is gone.", 1),
+                   ("Approved for merge.\n> Verdict: FAIL\ntest_refund_rounding", 1),
+                   ("Verdict: FAIL was the old assessment; test_refund_rounding is fine.", 1),
+                   ("Verdict: FAIL\ntest_refund_rounding_new stopped running.", 1),
                    ("Verdict: PASS\nI do not reject this change even though test_refund_rounding stopped running.", 1),
                    ("Verdict: PASS\nLGTM. The tool said FAIL because test_refund_rounding moved.", 1),
                    ("The change fails: test_refund_rounding stopped running.", 1),

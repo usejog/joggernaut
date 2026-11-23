@@ -29,7 +29,7 @@ a test, are safety choices, labelled as choices, and each says why.
 of every rule.
 
 Ask your agent to **diagnose my CI**. It reads your recent GitHub Actions
-runs (150 runs a workflow by default, about 155 API requests each: one for each run's jobs, more
+runs (by default 150 a workflow; fetching them costs about 155 API requests per workflow: one for each run's jobs, more
 for a run with over 100 jobs, plus the run list; the usual limit for a
 signed-in user is 5,000 an hour, and `gh api rate_limit` shows yours), splits the wait into waiting for a machine, setup and
 running, and ranks the causes by the wait each one costs on your own runs.

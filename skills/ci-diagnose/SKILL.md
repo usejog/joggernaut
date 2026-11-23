@@ -99,7 +99,7 @@ in `references/measuring.md`.
    - the PR wait, at the median and the slowest 5% of successful runs, from
      the start of the run's final attempt to its last job done (time spent
      waiting for someone to rerun a failure isn't in it). With several
-     workflows in the file that line pools them; report the "PR wait across workflows" line instead, read as the time until the first passing runs present for that commit finished (an optional slow job counts in it; a workflow missing for a commit isn't in it). Report a pull-request-wide wait only when every required workflow is present. If branch protection requires only some
+     workflows in the file that line pools them; report the "PR wait across workflows" line instead, read as follows: for each commit it takes each workflow's first run within 24 hours of the commit's first, drops the commit if any of those failed (even if a later run passed), and times until their last job finished (an optional slow job counts; a workflow missing for a commit isn't in it). Report a pull-request-wide wait only when every required workflow is present. If branch protection requires only some
      jobs (read `required_status_checks` as in ci-workflow; on 403 or 404,
      say it is unknown), the required checks can't pass before the slowest
      required job ends: say which job that is and rank on its path. Reviews,
@@ -243,7 +243,7 @@ request, and catch-up runs. It changes no tracked file, so there is no after.
 This is reasoning from how CI works, not a measurement.
 
 - A pull request's checks finish when the job that finishes last does, so
-  only time on that path shortens the wait; time saved elsewhere saves runner-minutes, and, with job durations and scheduling fixed, shortens the wait only by freeing a machine or a concurrency or matrix slot; contention for disk or a database shows only in `ci-measure`'s after.
+  only time on that path shortens the wait; time saved elsewhere saves runner-minutes, and shortens the wait only if freeing a machine, a concurrency or matrix slot, or shared disk or database capacity lets a required job start or run sooner; the before logs can hint at that (queue or lock waits), and `ci-measure`'s after measures it.
 - Every job pays three different costs (waiting for a machine, setting up,
   running), and each has different fixes. Splitting them first stops an
   agent from optimising tests when the time is in installs.

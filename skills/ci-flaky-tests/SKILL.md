@@ -131,7 +131,7 @@ This is reasoning from how CI works, not a measurement.
   removes it.
 - A test that waits a fixed time races the machine's speed. Waiting for the
   event itself is as fast on a quick machine and still right on a slow one.
-- A deterministic test that forces the failing order, fails on the old code and passes on the fix shows that cause is fixed. Only repetition as step 5 computes it bounds how often the flake can still fail: if it failed 1 run in 20, a few green runs say nothing, and as many again (20) all pass about a third of the time even if nothing changed.
+- A deterministic test that forces the failing order, fails on the old code and passes on the fix shows that cause is fixed. Green runs bound how often it can still fail, more tightly the more there are; step 5's count is the one that makes an unchanged flake show with 95% probability. If it failed 1 run in 20, a few green runs say little: with independent runs and a true rate of 5%, 20 more all pass about a third of the time (0.95^20 ≈ 0.36).
 
 ## Why this works: what others measured
 

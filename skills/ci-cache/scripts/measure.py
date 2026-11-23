@@ -158,12 +158,16 @@ def prepare_out(path):
     if rc != 1:
         die("git couldn't say whether %s is tracked; not writing it" % path)
     folder = os.path.dirname(path)
-    # A symlink anywhere on the way could point the write at a tracked file.
-    here = ""
-    for part in [x for x in os.path.normpath(path).split(os.sep) if x not in ("", ".")]:
-        here = os.path.join(here, part) if here else part
-        if os.path.islink(here):
-            die("%s is a symbolic link; write measurements to a real, untracked folder" % here)
+    # A symlink anywhere on the way inside this folder could point the write at a tracked file.
+    if ".." in path.replace("\\", "/").split("/"):
+        die("%s contains '..'; give the output path without it" % path)
+    rel = os.path.relpath(os.path.abspath(path), os.path.abspath("."))
+    if not rel.startswith(".."):
+        here = os.path.abspath(".")
+        for part in rel.split(os.sep):
+            here = os.path.join(here, part)
+            if os.path.islink(here):
+                die("%s is a symbolic link; write measurements to a real, untracked folder" % here)
     if folder:
         os.makedirs(folder, exist_ok=True)
     parts = os.path.normpath(path).split(os.sep)
@@ -456,15 +460,20 @@ def cmd_split(a):
                               for j in js):
                 k = (r.get("path") or r.get("name") or "", r.get("name") or "", name or "", labs)
                 flakes[k] = flakes.get(k, 0) + 1
-    out["rerun_flakes"] = sorted((("%s / %s [%s]" % (wf, job, ",".join(labs) or "no labels"), n)
-                                  for (_, wf, job, labs), n in flakes.items()), key=lambda kv: -kv[1])
+    shown = {}
+    for (path_, wf, job, labs) in flakes:
+        shown.setdefault((wf, job, labs), set()).add(path_)
+    # The workflow's file joins the name only where two files share a display name.
+    out["rerun_flakes"] = sorted((("%s%s / %s [%s]" % (wf, " (%s)" % path_ if len(shown[(wf, job, labs)]) > 1 else "",
+                                                        job, ",".join(labs) or "no labels"), n)
+                                  for (path_, wf, job, labs), n in flakes.items()), key=lambda kv: -kv[1])
 
     if a.json:
         print(json.dumps(out, indent=2))
         return
     print("runs read: %d%s, over %.1f days%s" % (
         len(runs), " (workflow %s)" % a.workflow if a.workflow else "", out["span_days"],
-        ", about %s pushes a day" % out["runs_per_day"] if out["runs_per_day"] else " (under a day: no daily rate)"))
+        ", about %s pushes a day" % out["runs_per_day"] if out["runs_per_day"] is not None else " (under a day: no daily rate)"))
     print("PR wait (run start to last job done, %d successful runs): median %s, slowest 5%% %s%s"
           % (len(walls), fmt(out["wait_median"]), fmt(out["wait_p95"]),
              " (provisional: under %d runs)" % P95_FIRM if out["p95_provisional"] else ""))
@@ -780,7 +789,7 @@ def junit_results(path):
     nothing. Copies are compared as counts, never by the order they were read.
     An error or failure recorded on a suite rather than a case counts as a
     failure of that suite."""
-    res, errs = {}, {}
+    res, errs, executed = {}, {}, [0]
 
     def add(fields, out):
         res.setdefault(json.dumps(fields), []).append(out)
@@ -821,33 +830,60 @@ def junit_results(path):
                 out = "skipped"
             else:
                 out = "passed"
+            # A pass or an assertion failure shows a test body ran; an <error> alone (pytest's
+            # collection failure, a setup error) doesn't.
+            if out == "passed" or kids & {"failure", "flakyFailure", "rerunFailure"}:
+                executed[0] += 1
             add([where, suite_path, tc.get("classname") or "", tc.get("file") or suite_file or "",
                  tc.get("name") or ""], out)
         if not cases:
             die("no test cases in %s; is it a JUnit report?" % f)
-        # Every suite's declared totals, the root's included: a rise in declared errors and
-        # failures counts even when no case shows it, and declared skips the cases don't mark
-        # make it impossible to tell which ran.
-        for e in [root] + [s for s in root.iter() if local(s.tag) == "testsuite" and s is not root]:
-            if local(e.tag) not in ("testsuite", "testsuites"):
-                continue
-            num = lambda k: int(e.get(k)) if (e.get(k) or "").isdigit() else 0
+        # Every container's declared totals, the root and nested <testsuites> included. Per
+        # container: its declared errors and failures, and how many of them no case or suite
+        # error inside it explains. A rise in either counts as a suite error. Declared skips the
+        # cases don't mark make it impossible to tell which ran.
+        def count(e, k):
+            v = (e.get(k) or "").strip()
+            if not v:
+                return 0
+            if not v.isdigit():
+                die("%s: unreadable %s=%r; the comparison is unverified" % (f, k, e.get(k)))
+            return int(v)
+
+        def case_failed(c):
+            return bool({local(g.tag) for g in c} & FAILED_TAGS
+                        or (c.get("status") or "").lower() in FAILED_WORDS
+                        or (c.get("result") or "").lower() in FAILED_WORDS)
+        containers = [x for x in root.iter() if local(x.tag) in ("testsuite", "testsuites")]
+        for e in containers:
             chain, x = [], e
             while x is not None:
-                if local(x.tag) == "testsuite":
-                    chain.append(x.get("name") or "")
+                if local(x.tag) in ("testsuite", "testsuites"):
+                    chain.append(x.get("name") or local(x.tag))
                 x = parent.get(x)
-            key = json.dumps([where, ["(report)"] + chain[::-1], "(declared errors and failures)"])
-            declared = num("errors") + num("failures")
-            if declared:
-                errs[key] = errs.get(key, 0) + declared
-            cases_in = [c for c in e.iter() if local(c.tag) == "testcase"]
+            path_ = chain[::-1]
+            if local(e.tag) == "testsuites":
+                direct = sum(1 for c in e if local(c.tag) in FAILED_TAGS)
+                if direct:
+                    k = json.dumps([where, path_, "(errors on the report)"])
+                    errs[k] = errs.get(k, 0) + direct
+            declared = count(e, "errors") + count(e, "failures")
+            inner = list(e.iter())
+            explained = (sum(1 for c in inner if local(c.tag) == "testcase" and case_failed(c))
+                         + sum(1 for s in inner if local(s.tag) in ("testsuite", "testsuites")
+                               for c in s if local(c.tag) in FAILED_TAGS))
+            for label, n in (("(declared errors and failures)", declared),
+                             ("(declared errors and failures no case explains)", max(0, declared - explained))):
+                if n:
+                    k = json.dumps([where, path_, label])
+                    errs[k] = errs.get(k, 0) + n
+            cases_in = [c for c in inner if local(c.tag) == "testcase"]
             marked = sum(1 for c in cases_in if ({local(g.tag) for g in c} & {"skipped"})
                          or (c.get("status") or "").lower() in NOT_RUN or (c.get("result") or "").lower() in NOT_RUN)
-            if num("skipped") + num("disabled") > marked:
+            if count(e, "skipped") + count(e, "disabled") > marked:
                 die("%s declares %d skipped but marks only %d cases skipped, so which ran can't be told;"
-                    " the comparison is unverified" % (f, num("skipped") + num("disabled"), marked))
-    return res, errs
+                    " the comparison is unverified" % (f, count(e, "skipped") + count(e, "disabled"), marked))
+    return res, errs, executed[0]
 
 
 def show_test(t):
@@ -857,7 +893,7 @@ def show_test(t):
 
 
 def cmd_tests(a):
-    (b, eb), (c, ec) = junit_results(a.before), junit_results(a.after)
+    (b, eb, xb), (c, ec, xc) = junit_results(a.before), junit_results(a.after)
     if not b or not c:
         die("no test cases found in %s" % (a.before if not b else a.after))
     ran = lambda outs: sum(1 for o in outs if o != "skipped")
@@ -865,6 +901,9 @@ def cmd_tests(a):
     if not sum(ran(v) for v in b.values()):
         die("no test ran in %s (every case skipped); nothing to compare, so this verifies nothing"
             % a.before)
+    if not xb:
+        die("no case in %s shows a test body ran (only errors, such as a collection failure);"
+            " the comparison is unverified" % a.before)
     stopped, newly_skipped, new_fail = [], [], []
     for t in sorted(set(b) | set(c)):
         ob, oc = b.get(t, []), c.get(t, [])
@@ -902,8 +941,9 @@ def cmd_tests(a):
 
 CACHE_OUTCOMES = [
     (re.compile(r"^\s*key:\s+\S", re.I), "requested"),
-    (re.compile(r"cache hit occurred on the primary key .*not saving cache", re.I), "save: skipped (exact hit)"),
-    (re.compile(r"not saving cache", re.I), "save: skipped"),
+    # actions/cache and setup-node say "on the primary key X"; setup-java names the cache first.
+    (re.compile(r"cache hit occurred on (the |\S+ )?primary key .*not saving cache", re.I), "save: skipped (exact hit)"),
+    (re.compile(r"not saving cache", re.I), "save: skipped, reason unknown"),
     (re.compile(r"cache hit occurred|cache restored from key|restored from cache key", re.I), "restore: hit"),
     (re.compile(r"cache (is )?not found|no cache found", re.I), "restore: miss"),
     (re.compile(r"cache saved", re.I), "save: saved"),
@@ -928,7 +968,9 @@ def cmd_cachelog(a):
                 k = KEY.search(text)
                 # A short hash names the key without printing it.
                 # actions/cache compares keys ignoring case, so the hash does too.
-                key = unicodedata.normalize("NFC", k.group(1)).casefold() if k else ""
+                # A hint only: actions/cache compares keys ignoring case and normalisation, which
+                # lower() after NFC approximates but doesn't match in every script.
+                key = unicodedata.normalize("NFC", k.group(1)).lower() if k else ""
                 tag = " key#" + hashlib.sha1(key.encode()).hexdigest()[:8] if k else ""
                 print(label + tag)
                 break
@@ -958,30 +1000,40 @@ def cmd_flakebound(a):
     D = Decimal
 
     def at_least_x(p):
-        # P(X >= x) = 1 - P(X < x): x terms, in high precision so small rates stay exact enough.
+        # P(X >= x), summed in log space over whichever side has fewer terms, so neither a
+        # long sum nor a tail far below a float's range goes wrong.
         if p <= 0:
-            return D(0)
-        pd, term, below = D(p), (1 - D(p)) ** n, D(0)
-        for i in range(x):
-            below += term
-            term = term * D(n - i) / D(i + 1) * pd / (1 - pd) if pd < 1 else D(0)
-        return 1 - below
+            return 0.0
+        if p >= 1:
+            return 1.0
+        lp, lq = math.log(p), math.log1p(-p)
+        lc = lambda i: math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1) + i * lp + (n - i) * lq
+        def logsum(idx):
+            ls = [lc(i) for i in idx]
+            top = max(ls)
+            return top + math.log(sum(math.exp(v - top) for v in ls))
+        if n - x + 1 <= x:
+            return math.exp(logsum(range(x, n + 1)))
+        return -math.expm1(logsum(range(0, x)))
 
     if x == n:
         p = float(D("0.025") ** (D(1) / D(n)))
+    elif x == 1:
+        p = -math.expm1(math.log(0.975) / n)  # 1 - 0.975^(1/n), the closed form
     else:
         lo, hi = 0.0, x / float(n)
         for _ in range(200):
             mid = (lo + hi) / 2
-            lo, hi = (mid, hi) if at_least_x(mid) < D("0.025") else (lo, mid)
-        p = lo  # the side where x or more failures is still under 2.5%: never above the true end
+            lo, hi = (mid, hi) if at_least_x(mid) < 0.025 else (lo, mid)
+        p = lo  # the side where x or more failures is still under 2.5%: never above the true end,
+        # so the run count below is never short (at worst one more than the least that works)
     if p >= 1:
         need = 1
     else:
         need = int((D("0.05").ln() / (1 - D(p)).ln()).to_integral_value(rounding="ROUND_CEILING"))
         while (1 - D(p)) ** need > D("0.05"):
             need += 1
-    print("failure rate: %d of %d; low end of its 95%% interval %.3g" % (x, n, p))
+    print("failure rate: %d of %d; low end of its 95%% interval %.6g" % (x, n, p))
     print("re-test with at least %d runs: a flake still failing at that rate passes them all"
           " with chance under 5%%" % need)
 
