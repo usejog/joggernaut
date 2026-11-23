@@ -124,17 +124,19 @@ If the change touched tests or test setup, run the break-it probe (step
    it; this rule doesn't look at that). Do that for each after-side run of
    a pull request, and leave
    out runs whose base lacks the fix, or whose checkout prints no such line
-   (mark those unknown); a run's time alone doesn't show it. An ancestor
+   (mark those unknown); a run's time alone doesn't show it. Keep a failed
+   run that never got to checkout (a startup failure, or a failed job before
+   it): it is never timed, and its failure counts, as on the before side. An ancestor
    fix may have been reverted since: also check that no revert of it is an ancestor of that run's BASE. Leave out pull requests
    into other branches, workflows that check out the pull request's head
    instead of the merge commit, and `push` runs on branches without the fix
    (`git merge-base --is-ancestor FIX_SHA RUN_SHA` tells you). Write the
    runs that stay into `.joggernaut/after-fix.jsonl`, one line each as
-   `fetch` wrote them. Fetch the baseline again with its recorded cut-off
-   (the same runs, each now read by this `fetch`), and keep in
-   `.joggernaut/before-fix.jsonl` only its pull requests into the same
-   branch, from the same workflow and checkout: `references/measuring.md`
-   gives the commands.
+   `fetch` wrote them. Fetch the baseline again by replaying its recorded
+   `fetch` command (the same runs, each now read by this `fetch`), and keep
+   in `.joggernaut/before-fix.jsonl` only its runs of the same branch, judged
+   the same way from each run's own checkout line or commit:
+   `references/measuring.md` gives the rule and the commands.
    If `fetch` refuses, stop there: anything after it would read an older
    file. You need at least 5 comparable runs a side. If the window ends with fewer,
    `compare` reports "not enough runs yet" and shows no timings; choose a

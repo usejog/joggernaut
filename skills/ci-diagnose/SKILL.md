@@ -88,8 +88,9 @@ in `references/measuring.md`.
    several, fetch them over the same dates (`--created 'OLDEST..CUTOFF'`,
    from the oldest run the busiest one returned to the same cut-off; raise
    `--limit` if `fetch` says the window holds more), so each covers the same
-   days, and join only the files from this fetch, by name (`cat .joggernaut/before-ci.jsonl
-   .joggernaut/before-lint.jsonl > .joggernaut/before.jsonl`): `split` then
+   days, and join only the files from this fetch, by name
+   (`cat .joggernaut/before-ci.jsonl .joggernaut/before-lint.jsonl >
+   .joggernaut/before.jsonl`): `split` then
    prints the PR wait across them per commit. That line counts a commit
    once every workflow it ran passed, timed from the first run's creation
    (so a rerun and the wait for it count), keeping each workflow's first run

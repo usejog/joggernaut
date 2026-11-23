@@ -639,23 +639,29 @@ def outside_cohort(r, a, cache):
         return "event %s" % r.get("event")
     if a.cache and cache.get(str(r["id"])) != a.cache:
         return "cache %s" % (cache.get(str(r["id"])) or "state unknown")
-    # A job skipped because an earlier one failed, or a run that failed before any job
-    # started, never got a runner, so it has no labels. Such a run can't be timed (the
-    # timing side checks the runner itself) but its failure still counts: leaving it out
-    # here would drop the failure from the count.
-    if not a.label:
-        return None
-    if a.job:
-        measured = [j for j in r.get("jobs", []) if j.get("name") == a.job and j.get("labels")]
-        if measured and not any(a.label in j["labels"] for j in measured):
-            return "job %s not on runner %s" % (a.job, a.label)
-        return None
-    jobs = [j for j in latest_jobs(r) if j.get("labels")]
-    if not jobs:
-        return "no job ran on a runner" if r.get("conclusion") == "success" else None
-    if not all(a.label in j["labels"] for j in jobs):
-        return "not every job on runner %s" % a.label
+    if a.label and not on_runner(r, a):
+        return ("job %s not on runner %s" % (a.job, a.label) if a.job
+                else "not every job on runner %s" % a.label)
     return None
+
+
+def on_runner(r, a):
+    """Whether a run belongs under --label. A job that never got a runner (skipped after
+    an earlier failure, or a run that failed before any job started) has no labels, so
+    the runner of a failure is often unknown. Resolve that against a speedup: a run that
+    passed counts only with evidence it ran on the runner (it is the one timed), and one
+    that failed counts unless its jobs show it ran on another."""
+    failed = failed_somewhere(r, a)
+    if a.job:
+        same = [j for j in r.get("jobs", []) if j.get("name") == a.job]
+        labelled = [j for j in same if j.get("labels")]
+        if any(a.label in j["labels"] for j in labelled):
+            return True
+        return failed and (not labelled or len(labelled) < len(same))
+    labelled = [j for j in latest_jobs(r) if j.get("labels")]
+    if not failed:
+        return bool(labelled) and all(a.label in j["labels"] for j in labelled)
+    return not labelled or any(a.label in j["labels"] for j in labelled)
 
 
 FAILED = ("failure", "timed_out", "startup_failure")

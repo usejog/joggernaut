@@ -314,6 +314,22 @@ with tempfile.TemporaryDirectory() as t:
              "--label", "windows-latest", "--job", "test"])
     if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
         bad.append("compare: a failed build on another runner dropped out under --job --label\n" + r.stdout + r.stderr)
+    # Unknown runners resolve against a speedup: a green run whose measured job was skipped
+    # doesn't dilute the failures, and a same-name job on another runner doesn't clear a
+    # failed run whose measured job never ran.
+    skipw = [json.loads(l) for l in open(t + "/skipw") if l.strip()]
+    failed_row = next(x for x in skipw if x["conclusion"] == "failure")
+    docs = dict(failed_row, id=8800, conclusion="success",
+                jobs=[dict(failed_row["jobs"][0], conclusion="success"), failed_row["jobs"][1]])
+    twin = [dict(x, jobs=x["jobs"] + [dict(x["jobs"][0], id=x["id"] * 10 + 2, name=failed_row["jobs"][1]["name"],
+                                          conclusion="success")]) if x["conclusion"] == "failure" else x
+            for x in skipw]
+    for name, rows2 in (("docs", skipw + [docs]), ("twin", twin)):
+        open(t + "/" + name, "w").write("".join(json.dumps(x) + "\n" for x in rows2))
+        r = run([M, "compare", "--before", t + "/sbw", "--after", t + "/" + name, "--json",
+                 "--label", "windows-latest", "--job", "test"])
+        if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
+            bad.append("compare: %s case hid the failures under --job --label\n%s%s" % (name, r.stdout, r.stderr))
     # Same-name matrix legs: the leg on the asked runner is timed, whichever is listed first.
     def legs(src, dst, ubuntu_secs, first_ubuntu):
         rows2 = []

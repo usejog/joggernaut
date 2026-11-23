@@ -37,28 +37,37 @@ change now, not after merge.
 
 ## After merge
 
-Fetch the baseline again with the cut-off it recorded (a time before the
-change merged): the same runs, each now read by this `fetch`, which refuses
-any still going. Then the window after the merge:
+Fetch the baseline again by replaying the exact `fetch` command it
+recorded (the same range, limit, workflow and event): the same runs, each
+now read by this `fetch`, which refuses any still going. Then the window
+after the merge:
 
 ```sh
-MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request --limit 150 \
-  --created '<=CUT-OFF' --out .joggernaut/before.jsonl &&
+MEASURE fetch ...the baseline's recorded options... --out .joggernaut/before.jsonl &&
 MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request \
   --created 'MERGE-TIME..WINDOW-END' --out .joggernaut/after.jsonl   # times as YYYY-MM-DDTHH:MM:SSZ
 ```
 
 If either `fetch` refuses, stop: anything after it would read an older file.
-Then keep, on both sides, only runs of pull requests into the branch the fix
-merged into (`gh api repos/OWNER/NAME/pulls/N --jq .base.ref`; a run from a
-fork lists no pull request number, so leave it out unless you can tell its
-base), from workflows that test the merge commit rather than the pull
-request's head. On the after side keep only runs whose base had the fix:
-the `HEAD is now at … Merge HEAD into BASE` line `actions/checkout` prints
-names the base, and `git merge-base --is-ancestor FIX_SHA BASE` checks it;
-leave out runs whose base lacks it or that print no such line. Write the
-kept runs, one line each as `fetch` wrote them, to `before-fix.jsonl` and
-`after-fix.jsonl`, and compare those:
+Then keep the runs that tested the fix's branch, judged from each run's own
+record the same way on both sides:
+
+- A `pull_request` run tests its merge commit with the base as it was when
+  the run started, and the `HEAD is now at … Merge HEAD into BASE` line
+  `actions/checkout` prints names that base: keep the run if BASE is on the
+  branch the fix merged into (`git merge-base --is-ancestor BASE
+  origin/BRANCH`). A `push` run tests its own commit: keep it if that
+  commit is on the branch.
+- Leave out workflows that check out the pull request's head instead of
+  the merge commit.
+- On the after side, also require the fix in that base or commit
+  (`git merge-base --is-ancestor FIX_SHA BASE`), with no revert of it there.
+- A run that passed but shows no such line is unknown: leave it out. A
+  failed run that never got to checkout (a startup failure, or a failed job
+  before it) stays on both sides: it is never timed, and its failure counts.
+
+Write the kept runs, one line each as `fetch` wrote them, to
+`before-fix.jsonl` and `after-fix.jsonl`, and compare those:
 
 ```sh
 MEASURE compare --before .joggernaut/before-fix.jsonl --after .joggernaut/after-fix.jsonl \
