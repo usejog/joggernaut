@@ -282,6 +282,21 @@ with tempfile.TemporaryDirectory() as t:
         v = verdict(t + "/sb", t + "/fa%d" % fails)
         if v.get("verdict_code") != want:
             bad.append("compare: %d failed after against 0 before should be %s: %r" % (fails, want, v))
+    # The larger side's typical slowest of 5 is the median of its 5-run maxima: with one
+    # 10-minute run in 6, five of the six 5-run draws hold it.
+    fake_runs(t + "/xb", [60] * 4 + [600], 8000)
+    fake_runs(t + "/xa", [60] * 5 + [600], 8100)
+    v = verdict(t + "/xb", t + "/xa")
+    if v.get("before_tail") != ["slowest run", 600] or v.get("after_tail") != ["typical slowest of 5", 600]:
+        bad.append("compare: typical slowest of 5 should be 600 s: %r %r" % (v.get("before_tail"), v.get("after_tail")))
+# The typical slowest of k against brute force over every k-run draw.
+for _ in range(300):
+    n = rng.randint(2, 9); k = rng.randint(1, n - 1)
+    xs = [rng.randint(1, 20) for _ in range(n)]
+    maxes = sorted(max(c) for c in itertools.combinations(xs, k))
+    if mm.tails(xs, xs[:k])[0] != ("typical slowest of %d" % k, maxes[(len(maxes) - 1) // 2]):
+        bad.append("tails: typical slowest of %d of %r should be %r" % (k, xs, maxes[(len(maxes) - 1) // 2]))
+        break
 # Tails compare like with like: with no change, 150 runs before and 5 after, the after
 # side's slowest run must not look better nearly every time (a max of 150 against a max of 5).
 better = 0

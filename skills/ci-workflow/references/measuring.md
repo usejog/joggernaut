@@ -59,11 +59,11 @@ runs cost money.
 **If the verdict is "no measurable change yet"**, the change may be real but
 smaller than the run-to-run noise at this count. Say so. The 95% holds for one
 comparison at a count chosen before looking. Each further look adds to the
-chance of a false verdict (two looks: up to about 10%), so if you measure
-again, choose the larger count first (20 a side, say), wait until it is there,
-and report every comparison you made, the first included. A verdict that only
-shows on a later look is weaker evidence; say so. Never run `compare` again and
-again until it says "faster".
+chance of a false verdict: with both counts chosen before the first look (5,
+then 20 a side, say), two looks stay under about 10%. A second count chosen
+after seeing the first result makes that comparison exploratory: report it as
+exploratory, beside every comparison you made, the first included. Never run
+`compare` again and again until it says "faster".
 
 ## How compare decides, and why 5
 
@@ -103,13 +103,18 @@ side it can, but only if all 16 pairs agree. At 5 a side, 2 of the 25 pairs
 may disagree, so 5 is the fewest that leaves room for ordinary noise.
 `--min-runs` refuses less than 5 and takes more.
 
-Few runs still cost something, and the output says what:
+Few runs still cost something:
 
+- The 95% also assumes each run is an independent draw, so that with no
+  change, which runs came before and which after is down to chance. Runs
+  that share one busy hour, or one slow runner pool, move together, and five
+  of them are worth less than five spread out. Let the after runs spread over
+  more than a day when you can, and say so when they didn't.
 - The slowest 5% of under 20 runs is just the slowest run, so below 20 runs
   on the smaller side that side shows its "slowest run". The side with more
-  runs shows its "typical slowest of 5" (for 5 runs on the other side): where
-  the slowest of that many of its runs typically falls, so the two compare
-  like with like. Both are provisional below 100 runs a side.
+  runs shows its "typical slowest of 5" (for 5 runs on the other side): the
+  median of the slowest of 5 drawn from its runs, so the two compare like
+  with like. Both are provisional below 100 runs a side.
 - The failure-rate test has little power with few runs: with 5 runs before,
   none failed, and 5 passed after, it takes 7 failed after to count as beyond
   chance. `compare` prints how many failed runs, beside the ones that

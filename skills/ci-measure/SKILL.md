@@ -80,8 +80,8 @@ steps below say what each command computes.
    another added.
 5. Write `.joggernaut/baseline.md`: the workflow, job and runner label
    measured, the run count, the median and the slowest runs as `split`
-   printed them, the test count, and the exact commands that reproduce it. Keep `.joggernaut/` out of commits
-   (add it to `.git/info/exclude`).
+   printed them, the test count, and the exact commands that reproduce it.
+   Keep `.joggernaut/` out of commits (add it to `.git/info/exclude`).
 
 ### 2. While the pull request is open
 
@@ -116,8 +116,8 @@ baseline now (step 3.3): a lost test fails the change before it merges.
    ```
 
    It prints the medians, the slowest runs (below 20 runs a side, the
-   slowest run, matched on the larger side; the slowest 5% from 20;
-   provisional below 100), the Hodges-Lehmann
+   smaller side's slowest run and the larger side's typical slowest of that
+   many; the slowest 5% from 20; provisional below 100), the Hodges-Lehmann
    estimate of the change with its exact 95% interval, the runs it left out
    and why, the failure rate and the runner-minutes per run on each side, and
    one verdict with the run count: **median faster**, **median slower**,
@@ -153,7 +153,8 @@ End with a short receipt the person may share (the numbers below are a
 made-up example). Print it whatever the verdict, slower and "no measurable
 change" included; never post it anywhere yourself. Leave out the repository
 name and pull request link unless the person asks for them. Name the slowest
-runs as `compare` printed them: below 20 runs a side, the slowest run.
+runs as `compare` printed them: below 20 runs a side, the slowest run, and
+for the side with more runs its typical slowest of that many.
 
 ```
 Joggernaut receipt

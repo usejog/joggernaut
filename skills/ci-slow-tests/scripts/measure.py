@@ -101,16 +101,19 @@ def tails(before, after):
     """Both sides' tails, like with like, each as (label, seconds). From TAIL_RUNS runs a
     side, each side's slowest 5%. Below, the smaller side's slowest run, and for the
     larger side where the slowest of that many of its runs typically falls (the median
-    of the slowest of k runs is its 0.5^(1/k) point): the slowest of 150 runs is an
-    outlier the slowest of 5 almost never matches."""
+    of the slowest of k of them): the slowest of 150 runs is an outlier the slowest of
+    5 almost never matches."""
     k = min(len(before), len(after))
     if k == 0 or k >= TAIL_RUNS:
         return tail(before), tail(after)
 
     def at(xs):
-        if len(xs) == k:
-            return "slowest run", max(xs)
-        return "typical slowest of %d" % k, pct(xs, 0.5 ** (1.0 / k))
+        # The median of the slowest of k runs drawn from these n: the j-th fastest, for
+        # the smallest j where at least half of the comb(n, k) draws have it as their
+        # slowest or beyond (comb(j, k) of them stay at or below it).
+        xs, n = sorted(xs), len(xs)
+        j = next(j for j in range(k, n + 1) if 2 * math.comb(j, k) >= math.comb(n, k))
+        return ("slowest run" if n == k else "typical slowest of %d" % k), xs[j - 1]
     return at(before), at(after)
 
 
@@ -652,10 +655,17 @@ def fails_rose(fb, fa):
     if not nb or not na or xa * nb <= xb * na:
         return False
     k, total = xb + xa, nb + na
-    denom = math.comb(total, k)
-    # Chance of at least xa failures after, given k failures in all.
-    tail = sum(math.comb(na, i) * math.comb(nb, k - i) for i in range(xa, min(k, na) + 1))
-    return Fraction(tail, denom) < Fraction(1, 20)
+    # Chance of at least xa failures after, given k failures in all: the orders with
+    # j <= xb of them before. Each term from the last, in exact integers, so a long
+    # history costs one comb per side, not two per term.
+    j = max(0, k - na)
+    term = math.comb(nb, j) * math.comb(na, k - j)
+    tail = term
+    while j < xb:
+        term = term * (nb - j) * (k - j) // ((j + 1) * (na - k + j + 1))
+        j += 1
+        tail += term
+    return tail * 20 < math.comb(total, k)
 
 
 def fails_needed(fb, passed):
