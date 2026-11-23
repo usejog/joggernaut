@@ -21,9 +21,11 @@ the reasoning under "Why this works: reasoning", or says it is a choice.
 <!-- rules:start -->
 ## The rules for any change to CI
 
-1. **Measure from CI's own runs, before and after.** At least 20 comparable
-   runs a side (same workflow, runner label, event and cache state), compared
-   at the median and the slowest 5%. A local timing is never the result.
+1. **Measure from CI's own runs, before and after.** At least 5 successful
+   comparable runs a side (same workflow, runner label, event and cache
+   state), compared at the median with an exact interval, the slowest run (the
+   slowest 5% from 20 runs) beside it. Give the verdict with its run count. A
+   local timing is never the result.
 2. **Never get faster by hiding failures.** No added retries, wider timeouts,
    sleeps, skipped or deleted tests, loosened assertions, `continue-on-error`,
    `|| true`, or fewer workers to mask a failure. No test may stop running or
@@ -31,9 +33,10 @@ the reasoning under "Why this works: reasoning", or says it is a choice.
    value is flagged for a person.
 3. **Show the diff and the numbers, one change per pull request.** The pull
    request opens with the baseline and a few runs of the branch, marked
-   provisional. After it merges, post the 20-run result as a comment, faster or
-   not. Never add savings up: a fix off the slowest path doesn't shorten the
-   wait.
+   provisional. After it merges, pick a window of time, and once at least 5
+   runs in it have passed and every run started in it has finished, post the
+   result as a comment, faster or not. Never add savings up: a fix off the
+   slowest path doesn't shorten the wait.
 4. **Never run fewer tests before a merge, and ask before anything costs
    money.** The full suite gates every merge. Bigger runners, new providers and
    paid services go on a list for a person to decide. Never quarantine a test.
@@ -51,8 +54,9 @@ in `references/measuring.md`.
 
 ## Steps
 
-1. **Measure the waste.** If there is no `.joggernaut/baseline.md`,
-   record a baseline as `references/measuring.md` says. From
+1. **Measure the waste.** If there is no `.joggernaut/baseline.md`, or its
+   commands didn't fetch with `--created` up to a time, record a baseline as
+   `references/measuring.md` says. From
    `measure.py split`: pushes per pull request (distinct commits seen per
    pull request in the fetched runs, so a pull request cut off by the
    window counts short), catch-up runs (merge commit messages; read a

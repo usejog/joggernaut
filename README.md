@@ -97,11 +97,15 @@ against runs without it, in your own history) or a ceiling (the most the
 fix could save, marked "up to"). Neither is yet a measured result of the
 fix: `ci-measure` measures that after it merges.
 
-Say yes to a fix and the matching skill opens one pull request per change (ci-guard's hook and rules are two). Once
-20 runs have finished after the merge, ask your agent to **measure the fix**:
-`ci-measure` compares them with 20 or more from before, and checks by name,
-from the JUnit reports CI saves, that every test still ran. Where CI saves no
-report it can only count tests, and says the check is unverified.
+Say yes to a fix and the matching skill opens one pull request per change
+(ci-guard's hook and rules are two). A day or so after the merge, once at
+least 5 runs have passed and every run started in that time has finished,
+ask your agent to **measure the fix**. (Fast runs finish first, so stopping
+at the fifth to finish would flatter the fix.) `ci-measure` compares those
+runs with the runs from before, says how many runs its verdict rests on, and
+says when a small change needs more runs to show. It also checks by name,
+from the JUnit reports CI saves, that every test still ran. Where CI saves
+no report it can only count tests, and says the check is unverified.
 
 ## Start
 
@@ -142,7 +146,7 @@ $ python3 ../../../skills/ci-measure/scripts/measure.py compare \
     --before ci-history/before.jsonl --after ci-history/after.jsonl
 before: 24 runs, median 11m 10s, slowest 5% 11m 39s
 after:  24 runs, median 7m 54s, slowest 5% 8m 18s
-verdict: median faster
+verdict: median faster (24 runs a side)
 $ python3 ../../../skills/ci-measure/scripts/measure.py tests \
     --before ci-history/junit-before --after ci-history/junit-after
 tests that ran: before 12, after 11
@@ -161,8 +165,8 @@ anyone's CI yet.
 
 ## The four rules every skill follows
 
-1. **Measure CI's own runs, before and after.** At least 20 comparable runs a
-   side. A local timing is never the result.
+1. **Measure CI's own runs, before and after.** At least 5 comparable runs a
+   side; more when the change is small. A local timing is never the result.
 2. **Keep every test running.** Don't hide a failure with a retry, a wider
    timeout, a skip or fewer workers. No test may stop running or newly fail.
 3. **One fix per pull request,** with the diff, the baseline and the
@@ -178,7 +182,7 @@ repository's AGENTS.md or CLAUDE.md.
 
 | Rule | Basis |
 |---|---|
-| 1. Measure CI's own runs | Reasoning: CI times vary from run to run, so one run can't separate a change from noise; a local machine differs from a runner in cores, disk and services. Measured: one team's suite went from 163 s to about 100 s locally, and from 14 to 13 minutes on CI ([Victor Mota](https://x.com/vimota/status/2036931300956021159)). |
+| 1. Measure CI's own runs | Reasoning: CI times vary from run to run, so one run can't separate a change from noise; a local machine differs from a runner in cores, disk and services. Measured: one team's suite went from 163 s to about 100 s locally, and from 14 to 13 minutes on CI ([Victor Mota](https://x.com/vimota/status/2036931300956021159)). Why 5 runs a side, reasoning: with the exact rank interval `compare` uses (Hodges-Lehmann, Mann-Whitney), 3 a side can never rule out "no change" at 95%, 4 only when every after run beats every before run, and 5 leaves room for ordinary noise; more runs can show a smaller change ([how compare decides](skills/ci-measure/references/measuring.md#how-compare-decides-and-why-5)). |
 | 2. Keep every test running | Reasoning: a skipped or deleted test can't fail, so speed alone can't tell a fix from a deletion, and a retry turns a sometimes-failing test green without changing the code. Observed: given the error and the code, "nearly all will add a retry or increase timeouts", Clipboard writes ([post](https://www.clipboard.com/resources/blog/agents-cant-iterate-against-tests-that-lie)); Shopify's 30 → 20 minute speedup reported the same test count, 18,329 ([PR #4004](https://github.com/Shopify/ruby-lsp/pull/4004)). |
 | 3. One fix per pull request; never add savings up | Reasoning: with two changes in one pull request, one before-and-after can't say which did what. Estimated savings can't simply be added: effects can overlap or add, and of two equally long paths, shortening one alone saves nothing. So each estimate stands alone, and the combined effect is left to `ci-measure`'s before and after. |
 | 4. Full suite before every merge; ask before spending money | A choice, with this reason: a test that doesn't run can't catch a bug. Others chose differently (Boardy runs only affected projects on pull requests and the full suite nightly; t3code allows a tracked quarantine), and skipping a test can delay finding a bug only that test would catch (Boardy hid a change from its affected-projects check on purpose, and all six shards skipped their tests and reported green). Spending is a person's decision, and it can be large: Boardy's CI bill went from $230 to $4,300 a month over an effort that included new runners and bigger machines ([Owen Gretzinger](https://x.com/owengretzinger/status/2116291924219060319)). |
@@ -207,7 +211,7 @@ issue.
 | Skill | Use it when | What it measures |
 |---|---|---|
 | [ci-diagnose](skills/ci-diagnose/SKILL.md) | "Why is CI slow?" Start here; read-only | PR wait; waiting, setup and running per job; minutes in failed, timed-out or cancelled runs and in catch-up runs |
-| [ci-measure](skills/ci-measure/SKILL.md) | Before a fix, and "did that help?" | 20+ runs a side, median and slowest 5%; the tests that ran, by name |
+| [ci-measure](skills/ci-measure/SKILL.md) | Before a fix, and "did that help?" | 5+ runs a side, median with an exact interval, and the slowest runs; the tests that ran, by name |
 | [ci-cache](skills/ci-cache/SKILL.md) | Dependencies reinstall on every PR; a cache never hits | Hit rate per cache key; setup seconds per job |
 | [ci-workflow](skills/ci-workflow/SKILL.md) | Short jobs each repeat setup; old runs keep going after a push | PR wait; runner-minutes per PR |
 | [ci-slow-tests](skills/ci-slow-tests/SKILL.md) | The test step is most of the wait | Suite time; slowest shard; how many tests ran |
@@ -325,7 +329,7 @@ before editing a tracked file or starting a fix.
 
 ```text
  ci-diagnose ──► ranked causes ──► one fixer skill ──► pull request ──► ci-measure
- read-only       wait saved a      cache, workflow,     diff + baseline   20+ runs a side,
+ read-only       wait saved a      cache, workflow,     diff + baseline   5+ runs a side,
  150 PR runs     day, slowest      slow tests, flaky,   (provisional)     tests compared
                  path only         guard                                  by name
 ```

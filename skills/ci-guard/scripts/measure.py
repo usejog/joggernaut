@@ -8,7 +8,7 @@ Subcommands
   fetch     pull completed runs and their jobs (GET calls only) into a JSONL file
   split     where the time goes: waiting, setup, running; slowest path; failed
             minutes; reruns that turned a job green
-  compare   before against after: medians, a bootstrap interval, and a verdict
+  compare   before against after: medians, an exact rank interval, and a verdict
   tests     which tests ran, by name, before and after (JUnit XML)
   cachelog  print only the cache lines of a job's log
 
@@ -20,7 +20,6 @@ import hashlib
 import json
 import math
 import os
-import random
 import re
 import subprocess
 import sys
@@ -28,9 +27,15 @@ import tempfile
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from fractions import Fraction
+from itertools import accumulate
+from operator import sub
 from urllib.parse import quote
 
-MIN_RUNS = 20
+# The fewest successful comparable runs a side. Below 4 a side no 95% interval
+# can rule out "no change"; at 4 only when every run after beats every run
+# before. 5 is the first count that leaves room for ordinary noise.
+MIN_RUNS = 5
+TAIL_RUNS = 20  # under this many runs, the tail shown is the slowest run, not the slowest 5%
 P95_FIRM = 100
 RATE_FLOOR = 300
 
@@ -52,10 +57,13 @@ def ts(value):
     v = value.replace("Z", "+00:00")
     m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?([+-]\d\d:?\d\d)?$", v)
     if not m:
-        die("unreadable timestamp %r" % value)
+        die("unreadable timestamp %r; use YYYY-MM-DDTHH:MM:SSZ" % value)
     frac = float(m.group(2)) if m.group(2) else 0.0
     off = (m.group(3) or "+00:00").replace(":", "")
-    return datetime.strptime(m.group(1) + off, "%Y-%m-%dT%H:%M:%S%z").timestamp() + frac
+    try:
+        return datetime.strptime(m.group(1) + off, "%Y-%m-%dT%H:%M:%S%z").timestamp() + frac
+    except ValueError:
+        die("unreadable timestamp %r; use YYYY-MM-DDTHH:MM:SSZ" % value)
 
 
 def secs(start, end):
@@ -84,6 +92,34 @@ def pct(xs, p):
     return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
 
 
+def tail(xs):
+    """One sample's tail, named for what it is: under TAIL_RUNS runs a slowest 5% is
+    just the slowest run, so it is called that."""
+    if len(xs) < TAIL_RUNS:
+        return "slowest run", (max(xs) if xs else None)
+    return "slowest 5%", pct(xs, 0.95)
+
+
+def tails(before, after):
+    """Both sides' tails, like with like, each as (label, seconds). From TAIL_RUNS runs a
+    side, each side's slowest 5%. Below, the smaller side's slowest run, and for the
+    larger side where the slowest of that many of its runs typically falls (the median
+    of the slowest of k of them): the slowest of 150 runs is an outlier the slowest of
+    5 almost never matches."""
+    k = min(len(before), len(after))
+    if k == 0 or k >= TAIL_RUNS:
+        return tail(before), tail(after)
+
+    def at(xs):
+        # The median of the slowest of k runs drawn from these n: the j-th fastest, for
+        # the smallest j where at least half of the comb(n, k) draws have it as their
+        # slowest or beyond (comb(j, k) of them stay at or below it).
+        xs, n = sorted(xs), len(xs)
+        j = next(j for j in range(k, n + 1) if 2 * math.comb(j, k) >= math.comb(n, k))
+        return ("slowest run" if n == k else "typical slowest of %d" % k), xs[j - 1]
+    return at(before), at(after)
+
+
 def fmt(s):
     if s is None:
         return "-"
@@ -95,8 +131,9 @@ def fmt(s):
     return "%s%dm %02ds" % (sign, m, r)
 
 
-def gh_get(path, paginate=False):
-    """GET only. Returns parsed JSON (a list of pages when paginating)."""
+def gh_get(path, paginate=False, missing=False):
+    """GET only. Returns parsed JSON (a list of pages when paginating); with missing,
+    None when the call fails instead of stopping."""
     cmd = ["gh", "api", "--method", "GET", "-H", "Accept: application/vnd.github+json", path]
     if paginate:
         cmd[2:2] = ["--paginate", "--slurp"]
@@ -105,6 +142,8 @@ def gh_get(path, paginate=False):
     except FileNotFoundError:
         die("gh is not installed; install the GitHub CLI and run `gh auth login`")
     except subprocess.CalledProcessError as e:
+        if missing and re.search(r"HTTP 40[4]|HTTP 422", e.stderr or ""):
+            return None
         first = (e.stderr or "").strip().splitlines()[:1]
         die("gh api %s failed: %s" % (path.split("?")[0], first[0] if first else e.returncode))
     return json.loads(out)
@@ -174,28 +213,72 @@ def prepare_out(path):
                 f.write("\n.joggernaut/\n")
 
 
+def window_end(created):
+    """The end of a --created window as a timestamp: None when it has no end (>=, >,
+    or ..*). A bare date ends with its day."""
+    if created.startswith(">"):
+        return None
+    end = created.split("..")[-1].lstrip("<=")
+    if end in ("", "*"):
+        return None
+    if re.match(r"^\d{4}-\d\d-\d\d$", end):
+        return ts(end + "T00:00:00Z") + 86400
+    return ts(end)
+
+
 def cmd_fetch(a):
+    if a.created:
+        end = window_end(a.created)
+        if end is None or end > datetime.now().timestamp():
+            die("the window %s hasn't ended; give a closed one that has (START..END, or <=END for a"
+                " baseline), so the runs in it are fixed before you look" % a.created)
     left = check_rate()
     base = "repos/%s/actions" % a.repo
     base += "/workflows/%s/runs" % a.workflow if a.workflow else "/runs"
-    q = "status=completed&per_page=100"
+    # With a time window, list every run in it, finished or not: fast runs finish
+    # first, so a window read while some of its runs are still going would keep its
+    # fastest runs and could pass for a speedup. Without one (a diagnosis), the newest
+    # finished runs.
+    q = "per_page=100" if a.created else "status=completed&per_page=100"
     if a.event:
         q += "&event=" + quote(a.event, safe="")
     if a.branch:
         q += "&branch=" + quote(a.branch, safe="")
     if a.created:
         q += "&created=" + quote(a.created, safe="")
-    runs, page = [], 1
+    runs, seen, page, total = [], set(), 1, None
     while len(runs) < a.limit:
         data = gh_get("%s?%s&page=%d" % (base, q, page))
-        batch = data.get("workflow_runs", [])
-        if not batch:
+        total = data.get("total_count") if total is None else total
+        batch = [r for r in data.get("workflow_runs", []) if r["id"] not in seen]
+        if not data.get("workflow_runs"):
             break
+        seen.update(r["id"] for r in batch)  # a run created mid-listing shifts the pages
         runs.extend(batch)
         page += 1
+    if a.created:
+        # A window (START..END, or one day) is read whole; <=END (a baseline) keeps the
+        # newest --limit runs up to END. Either way, every run kept must have finished.
+        whole = not a.created.lstrip().startswith("<")
+        if whole and ((total or 0) > a.limit or len(runs) > a.limit):
+            die("the window holds %d runs, more than --limit %d; raise --limit or choose a shorter"
+                " window, so the comparison sees all of it" % (max(total or 0, len(runs)), a.limit))
+        want = (total or 0) if whole else min(total or 0, a.limit)
+        if len(runs) < want:
+            die("GitHub listed %d of the %d runs asked for (it lists at most 1,000 for a filtered"
+                " query); %s" % (len(runs), want, "choose a shorter window" if whole
+                                 else "lower --limit to 1,000 or less"))
+        runs = runs[: a.limit]
+        going = [r for r in runs if r.get("status") != "completed"]
+        if going:
+            die("%d of the %d runs created in this window haven't finished (the fastest finish"
+                " first); fetch the same window again once they have, and don't end it earlier"
+                " to leave them out. A run stuck before it started (waiting for an approval or a"
+                " runner) won't finish: ask a person to cancel it, then fetch again"
+                % (len(going), len(runs)))
     runs = runs[: a.limit]
-    if len(runs) + 10 > left:
-        die("%d runs need about %d requests; %d left" % (len(runs), len(runs) + 10, left))
+    if 2 * len(runs) + 10 > left:
+        die("%d runs need up to %d requests; %d left" % (len(runs), 2 * len(runs) + 10, left))
     prepare_out(a.out)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(a.out) or ".", prefix=".measure-", suffix=".partial")
     out = os.fdopen(fd, "w")
@@ -211,6 +294,22 @@ def cmd_fetch(a):
                 os.unlink(tmp)
         raise
     print("wrote %d runs to %s" % (len(runs), a.out))
+
+
+def pr_bases(a, r):
+    """The branch each pull request of a run targeted. GitHub lists a run's pull request
+    only while it is open, so for one from this repository ask for the pull requests
+    from the run's head branch in any state (open, merged or closed). A fork's run
+    records none: the measuring guide leaves fork runs out on both sides."""
+    listed = r.get("pull_requests") or []
+    head_repo = (r.get("head_repository") or {}).get("full_name")
+    if (listed or not (r.get("event") or "").startswith("pull_request") or not r.get("head_branch")
+            or head_repo != a.repo):
+        return [(p.get("base") or {}).get("ref") for p in listed]
+    owner = a.repo.split("/")[0]
+    prs = gh_get("repos/%s/pulls?state=all&per_page=100&head=%s" % (
+        a.repo, quote("%s:%s" % (owner, r["head_branch"]), safe="")), missing=True) or []
+    return sorted({(p.get("base") or {}).get("ref") for p in prs})
 
 
 def write_runs(a, runs, out):
@@ -230,6 +329,7 @@ def write_runs(a, runs, out):
             "conclusion": r.get("conclusion"), "created_at": r.get("created_at"),
             "run_started_at": r.get("run_started_at"), "updated_at": r.get("updated_at"),
             "pull_requests": [p.get("number") for p in r.get("pull_requests") or []],
+            "pull_request_bases": pr_bases(a, r),
             "jobs": [{
                 "id": j["id"], "name": j.get("name"), "run_attempt": j.get("run_attempt", 1),
                 "conclusion": j.get("conclusion"), "created_at": j.get("created_at"),
@@ -316,7 +416,7 @@ def cmd_split(a):
     # PR wait over successful runs, as compare measures it.
     walls = [w for w in (run_wall(r) for r in runs if r.get("conclusion") == "success") if w is not None]
     out = {"runs": len(runs), "wait_median": median(walls), "wait_p95": pct(walls, 0.95),
-           "p95_provisional": len(walls) < P95_FIRM}
+           "wait_tail": list(tail(walls)), "p95_provisional": len(walls) < P95_FIRM}
     # With several workflows in one file, a pull request waits for all of them:
     # per commit, from the first run's start to the last job done, where every run passed.
     names = {r.get("name") for r in runs}
@@ -345,6 +445,8 @@ def cmd_split(a):
     out["workflows"] = sorted(n or "" for n in names)
     out["wait_all_workflows_median"] = median(cross) if cross else None
     out["wait_all_workflows_p95"] = pct(cross, 0.95) if cross else None
+    out["wait_all_workflows_tail"] = list(tail(cross)) if cross else None
+    out["wait_all_workflows_provisional"] = len(cross) < P95_FIRM
     out["wait_all_workflows_commits"] = len(cross)
     # Runs a day, over the span the file covers: what a saving per run is multiplied by.
     starts = sorted(ts(r["created_at"]) for r in runs if r.get("created_at"))
@@ -453,15 +555,17 @@ def cmd_split(a):
     print("runs read: %d%s, over %.1f days%s" % (
         len(runs), " (workflow %s)" % a.workflow if a.workflow else "", out["span_days"],
         ", about %s pushes a day" % out["runs_per_day"] if out["runs_per_day"] else " (under a day: no daily rate)"))
-    print("PR wait (run start to last job done, %d successful runs): median %s, slowest 5%% %s%s"
-          % (len(walls), fmt(out["wait_median"]), fmt(out["wait_p95"]),
+    label, value = out["wait_tail"]
+    print("PR wait (run start to last job done, %d successful runs): median %s, %s %s%s"
+          % (len(walls), fmt(out["wait_median"]), label, fmt(value),
              " (provisional: under %d runs)" % P95_FIRM if out["p95_provisional"] else ""))
     if len(names) > 1:
         if cross:
+            label, value = out["wait_all_workflows_tail"]
             print("PR wait across workflows (%d in the file; per commit, the first run of each that ran,"
-                  " all passed; %d commits): median %s, slowest 5%% %s"
-                  % (len(names), len(cross), fmt(out["wait_all_workflows_median"]),
-                     fmt(out["wait_all_workflows_p95"])))
+                  " all passed; %d commits): median %s, %s %s%s"
+                  % (len(names), len(cross), fmt(out["wait_all_workflows_median"]), label, fmt(value),
+                     " (provisional: under %d commits)" % P95_FIRM if out["wait_all_workflows_provisional"] else ""))
         else:
             print("PR wait across workflows: no commit has passing runs of two or more workflows here")
     sp = out["slowest_path_split"]
@@ -497,18 +601,63 @@ def cmd_split(a):
 
 # ---------------------------------------------------------------- compare
 
-def bootstrap_diff(before, after, n=2000, seed=7):
-    rng = random.Random(seed)
-    diffs = []
-    for _ in range(n):
-        b = [rng.choice(before) for _ in before]
-        c = [rng.choice(after) for _ in after]
-        diffs.append(median(c) - median(b))
-    return pct(diffs, 0.025), pct(diffs, 0.975)
+def mann_whitney_counts(m, n, upto):
+    """counts[u], u = 0..upto: how many of the comb(m + n, m) equally likely orders of
+    m runs before and n after (no ties) have exactly u (before, after) pairs where the
+    after run is the slower. These are the coefficients of the Gaussian binomial
+    [m + n choose m](q) = prod_{i=1..m} (1 - q^(n+i)) / (1 - q^i); integers, so exact."""
+    m, n = min(m, n), max(m, n)
+    c = [1] + [0] * upto
+    for i in range(1, m + 1):
+        top = min(i * n, upto)  # the product so far has degree i * n; past it, zeros
+        a = n + i
+        if a <= top:  # times (1 - q^a)
+            c[a:top + 1] = list(map(sub, c[a:top + 1], c[:top + 1 - a]))
+        for r in range(i):  # divided by (1 - q^i): running sums i apart
+            c[r:top + 1:i] = list(accumulate(c[r:top + 1:i]))
+    return c
+
+
+def shift_interval(before, after, alpha=Fraction(1, 20)):
+    """The Hodges-Lehmann estimate of how far the after times moved, with its exact
+    Mann-Whitney confidence interval (Bauer 1972), at least 1 - alpha.
+
+    Of the m * n differences (after - before), sorted D(1)..D(N), the interval is
+    [D(k), D(N + 1 - k)], with k the largest count where P(U <= k - 1) <= alpha / 2
+    under no change. Exact at any sample size; ties only raise its coverage.
+    Returns (estimate, low, high, confidence); low and high are infinite when the
+    samples are too small for any interval at this level."""
+    m, n = len(before), len(after)
+    total = math.comb(m + n, m)
+    # P(U <= k - 1) <= alpha / 2, in integers: below * 2 * den <= num * total.
+    alpha = Fraction(alpha)
+    limit, den2 = alpha.numerator * total, 2 * alpha.denominator
+    k = below = 0
+    for c in mann_whitney_counts(m, n, m * n // 2):
+        if (below + c) * den2 > limit:
+            break
+        below += c
+        k += 1
+    d = sorted(y - x for x in before for y in after)
+    est = (d[(len(d) - 1) // 2] + d[len(d) // 2]) / 2.0
+    if k == 0:
+        return est, -math.inf, math.inf, 1.0
+    return est, d[k - 1], d[len(d) - k], 1 - 2 * below / total  # int / int: no float overflow
 
 
 def workflow_matches(r, wf):
     return not wf or wf in (r.get("name"), os.path.basename(r.get("path") or ""))
+
+
+def on_base(r, base):
+    """With --base: a pull request run whose recorded target is that branch alone, or a
+    push to it. A run that can't be placed (a fork's, or one with no branch recorded) is
+    left out whether it passed or failed, so the gap can't shift the failure rate."""
+    if not base:
+        return True
+    if (r.get("event") or "").startswith("pull_request"):
+        return r.get("pull_request_bases") == [base]
+    return r.get("head_branch") == base
 
 
 def load_cache_state(a):
@@ -516,20 +665,47 @@ def load_cache_state(a):
 
 
 def outside_cohort(r, a, cache):
-    """Why a run isn't comparable (ignoring its outcome), or None."""
+    """Why a run can't be one of the timed runs (ignoring its outcome), or None. The
+    failure check doesn't use this: it counts every finished run of the workflow and
+    event, so no runner, job or cache filter can hide or dilute a failure."""
     if a.event and r.get("event") != a.event:
         return "event %s" % r.get("event")
+    if not on_base(r, a.base):
+        return "not on branch %s" % a.base
     if a.cache and cache.get(str(r["id"])) != a.cache:
         return "cache %s" % (cache.get(str(r["id"])) or "state unknown")
-    if a.label and not a.job and not all(a.label in (j.get("labels") or []) for j in latest_jobs(r)):
-        return "not every job on runner %s" % a.label
-    if a.label and a.job and not any(a.label in (j.get("labels") or [])
-                                     for j in r.get("jobs", []) if j.get("name") == a.job):
-        return "job %s not on runner %s" % (a.job, a.label)
+    if a.label and not on_runner(r, a):
+        return ("job %s not on runner %s" % (a.job, a.label) if a.job
+                else "not every job on runner %s (pass --job to measure one job)" % a.label)
     return None
 
 
+def executed(j):
+    """A job that ran, not one skipped (a skipped job never gets a runner)."""
+    return j.get("conclusion") != "skipped" and bool(j.get("started_at"))
+
+
+def on_runner(r, a):
+    """Evidence a run can be timed under --label: with --job, a job of that name ran on
+    the runner; without, every job that ran shows the label (a job that ran with no
+    labels, routed by runner group alone, is no evidence), and at least one ran."""
+    if a.job:
+        return any(a.label in (j.get("labels") or []) for j in r.get("jobs", [])
+                   if j.get("name") == a.job and executed(j))
+    ran = [j for j in latest_jobs(r) if executed(j)]
+    return bool(ran) and all(a.label in (j.get("labels") or []) for j in ran)
+
+
 FAILED = ("failure", "timed_out", "startup_failure")
+
+
+def run_failed(r):
+    """For the failure check, whatever is timed: the run failed, any job in any attempt
+    failed, or it was rerun. A run cancelled after an attempt failed still failed."""
+    jobs_failed = any(j.get("conclusion") in FAILED for j in r.get("jobs", []))
+    if r.get("conclusion") == "cancelled":
+        return jobs_failed
+    return r.get("conclusion") != "success" or (r.get("run_attempt") or 1) > 1 or jobs_failed
 
 
 def failed_somewhere(r, a):
@@ -555,15 +731,18 @@ def durations(runs, a, side, excluded):
         d = None
         if not why:
             if a.job:
-                js = [j for j in latest_jobs(r) if j.get("name") == a.job]
+                # By name and runner, so a matrix leg on another runner isn't taken for it.
+                js = [j for j in latest_jobs(r) if j.get("name") == a.job
+                      and (not a.label or a.label in (j.get("labels") or []))]
                 if not js:
-                    why = "no job %s" % a.job
+                    why = "no job %s%s" % (a.job, " on runner %s" % a.label if a.label else "")
+                elif len(js) > 1:
+                    why = "%d jobs named %s%s; can't tell which to time" % (
+                        len(js), a.job, " on runner %s" % a.label if a.label else "")
                 else:
                     j = js[0]
                     if j.get("conclusion") != "success":
                         why = "job %s" % j.get("conclusion")
-                    elif a.label and a.label not in (j.get("labels") or []):
-                        why = "runner %s" % ",".join(j.get("labels") or [])
                     else:
                         d = secs(j.get("started_at"), j.get("completed_at"))
             else:
@@ -579,15 +758,40 @@ def durations(runs, a, side, excluded):
 
 def fails_rose(fb, fa):
     """One-sided Fisher exact test at 5%: did the failure rate rise beyond chance?
-    Exact, so it holds at 20 runs a side, where a normal approximation doesn't."""
+    Exact, so it holds at a few runs a side, where a normal approximation doesn't,
+    but it has little power there: with 5 runs before, none failed, and 5 passed
+    after, it takes 7 failed after (7 of 12) to count."""
     (xb, nb), (xa, na) = fb, fa
     if not nb or not na or xa * nb <= xb * na:
         return False
     k, total = xb + xa, nb + na
-    denom = math.comb(total, k)
-    # Chance of at least xa failures after, given k failures in all.
-    tail = sum(math.comb(na, i) * math.comb(nb, k - i) for i in range(xa, min(k, na) + 1))
-    return Fraction(tail, denom) < Fraction(1, 20)
+    # Chance of at least xa failures after, given k failures in all: the orders with
+    # j <= xb of them before. Each term from the last, in exact integers, so a long
+    # history costs one comb per side, not two per term.
+    j = max(0, k - na)
+    term = math.comb(nb, j) * math.comb(na, k - j)
+    tail = term
+    while j < xb:
+        term = term * (nb - j) * (k - j) // ((j + 1) * (na - k + j + 1))
+        j += 1
+        tail += term
+    return tail * 20 < math.comb(total, k)
+
+
+def fails_needed(fb, passed):
+    """The fewest failed runs after, beside `passed` runs that passed, that fails_rose
+    counts as beyond chance; None if no number would (every run before failed)."""
+    if fb[0] >= fb[1]:
+        return None
+    rose = lambda x: fails_rose(fb, (x, passed + x))
+    hi = 1
+    while not rose(hi):  # the rate after climbs toward 1 > the rate before, so this ends
+        hi *= 2
+    lo = 0  # rose(lo) is false, rose(hi) true; the p-value falls as failures rise
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if rose(mid) else (mid, hi)
+    return hi
 
 
 def cmd_compare(a):
@@ -608,14 +812,15 @@ def cmd_compare(a):
         if len(ids) != len(set(ids)):
             die("the %s file repeats a run id" % side)
     if a.min_runs < MIN_RUNS:
-        die("--min-runs can't go below %d" % MIN_RUNS)
+        die("--min-runs can't go below %d: with fewer runs a side, a 95%% interval can"
+            " hardly or never rule out no change" % MIN_RUNS)
     if not a.label:
         def labels(rs):
             out = set()
             for r in rs:
                 for j in latest_jobs(r):
-                    if not a.job or j.get("name") == a.job:
-                        out.add(tuple(sorted(j.get("labels") or [])))
+                    if (not a.job or j.get("name") == a.job) and j.get("labels"):
+                        out.add(tuple(sorted(j["labels"])))
             return out
         if labels(rb) != labels(ra):
             die("runner labels differ between before and after; pass --label (and --job) "
@@ -635,9 +840,9 @@ def cmd_compare(a):
             for j in latest_jobs(r):
                 if a.job and j.get("name") != a.job:
                     continue
-                if a.label and a.label not in (j.get("labels") or []):
-                    continue
-                seen.setdefault(j.get("name"), set()).add(tuple(sorted(j.get("labels") or [])))
+                if not j.get("labels") or (a.label and a.label not in j["labels"]):
+                    continue  # no labels: skipped, never on a runner
+                seen.setdefault(j.get("name"), set()).add(tuple(sorted(j["labels"])))
         return seen
     jb, ja = job_labels(rb), job_labels(ra)
     for side, seen in (("before", jb), ("after", ja)):
@@ -650,38 +855,58 @@ def cmd_compare(a):
         if jb[name] != ja[name]:
             die("job %r ran on %s before and %s after; a runner change isn't a code speedup"
                 % (name, ",".join(next(iter(jb[name]))), ",".join(next(iter(ja[name])))))
+    if not a.job:
+        # Timing whole runs: every timed run must have run on the same set of runners, or
+        # a shift between pools (under differently named jobs) could pass for a speedup.
+        def runner_sets(rs):
+            return {frozenset(tuple(sorted(j.get("labels") or [])) for j in latest_jobs(r) if executed(j))
+                    for r in rs if workflow_matches(r, a.workflow) and r.get("conclusion") == "success"
+                    and not outside_cohort(r, a, cohort_cache)}
+        sets = runner_sets(rb) | runner_sets(ra)
+        if len(sets) > 1:
+            die("the timed runs ran on %d different sets of runners, so a shift in the mix could pass"
+                " for a speedup; pass --job to time one job, or --label with a label only one set has"
+                % len(sets))
     excluded = []
     before = durations(rb, a, "before", excluded)
     after = durations(ra, a, "after", excluded)
 
-    cache = load_cache_state(a)
+    # The failure check and the cost read every run of the workflow and event: the
+    # runner, job and cache filters choose only which runs are timed, so none of them can
+    # drop a failure whose runner or cache state is unknown, or add green runs that
+    # weren't timed.
+    in_workflow = lambda r: (workflow_matches(r, a.workflow) and (not a.event or r.get("event") == a.event)
+                             and on_base(r, a.base))
 
     def fail_rate(rs):
-        # The same cohort as the timings (workflow, event, cache state, runner),
-        # every finished run except ones a newer push cancelled. A failed or
-        # rerun first attempt counts as a failure even if the rerun passed.
-        rs = [r for r in rs if workflow_matches(r, a.workflow) and not outside_cohort(r, a, cache)]
-        done = [r for r in rs if r.get("conclusion") not in (None, "cancelled", "skipped", "neutral")]
-        bad = [r for r in done if failed_somewhere(r, a)]
+        # Every finished run except ones a newer push cancelled. A failed or rerun first
+        # attempt counts as a failure even if the rerun passed.
+        rs = [r for r in rs if in_workflow(r)]
+        done = [r for r in rs if r.get("conclusion") not in (None, "skipped", "neutral")
+                and (r.get("conclusion") != "cancelled" or run_failed(r))]
+        bad = [r for r in done if run_failed(r)]
         return (len(bad), len(done))
     what = ("job %s" % a.job) if a.job else "run (start to last job done)"
+    fewer = min(len(before), len(after))
+    before_tail, after_tail = tails(before, after)
     res = {"measure": what, "before_runs": len(before), "after_runs": len(after),
            "before_median": median(before), "after_median": median(after),
            "before_p95": pct(before, 0.95), "after_p95": pct(after, 0.95),
-           "p95_provisional": min(len(before), len(after)) < P95_FIRM,
+           "before_tail": list(before_tail), "after_tail": list(after_tail),
+           "p95_provisional": fewer < P95_FIRM,
            "excluded": excluded}
     fb, fa = fail_rate(rb), fail_rate(ra)
     res["failed_before"], res["failed_after"] = fb, fa
 
     def minutes(rs):
         # What the runs cost: every job and attempt, rounded up per job as GitHub bills,
-        # over the same cohort as the failure rate.
-        rs = [r for r in rs if workflow_matches(r, a.workflow) and not outside_cohort(r, a, cache)]
+        # over the same runs as the failure rate.
+        rs = [r for r in rs if in_workflow(r)]
         # Cancelled runs cost minutes too, and avoiding them is often the saving.
         return [run_minutes(r) for r in rs if r.get("conclusion") not in (None, "skipped", "neutral")]
 
     def per_day(rs, m):
-        rs = [r for r in rs if workflow_matches(r, a.workflow) and not outside_cohort(r, a, cache)]
+        rs = [r for r in rs if in_workflow(r)]
         days = [ts(r["created_at"]) for r in rs if r.get("created_at")]
         span = (max(days) - min(days)) / 86400.0 if len(days) > 1 else 0
         return round(sum(m) / span) if span >= 1 else None
@@ -689,38 +914,81 @@ def cmd_compare(a):
     res["runner_minutes_median_before"], res["runner_minutes_median_after"] = median(mb), median(ma)
     res["runner_minutes_a_day_before"], res["runner_minutes_a_day_after"] = per_day(rb, mb), per_day(ra, ma)
     rate = lambda f: f[0] / float(f[1]) if f[1] else 0.0
-    if min(len(before), len(after)) < a.min_runs:
-        res["verdict"] = "not enough runs yet"
+    if len(before) == len(after):
+        runs, sides = "%d runs a side" % len(before), "%d a side" % len(before)
+    else:
+        runs = "%d runs before, %d after" % (len(before), len(after))
+        sides = "%d before and %d after" % (len(before), len(after))
+    if fewer < a.min_runs:
+        res["verdict_code"] = "not_enough_runs"
+        res["verdict"] = "not enough runs yet (%s; %d a side needed)" % (runs, a.min_runs)
     elif fails_rose(fb, fa):
+        res["verdict_code"] = "not_valid"
         res["verdict"] = "not valid: more runs fail after (%d of %d) than before (%d of %d)" % (fa + fb)
     else:
-        lo, hi = bootstrap_diff(before, after)
-        res["interval_95"] = [lo, hi]
-        if hi < 0:
-            res["verdict"] = "median faster"
-        elif lo > 0:
-            res["verdict"] = "median slower"
+        est, lo, hi, conf = shift_interval(before, after)
+        res["shift_estimate"], res["shift_interval_95"] = est, [lo, hi]
+        res["shift_interval_confidence"] = round(conf, 4)
+        moved = median(after) - median(before)
+        # The interval says the after runs tend to be faster (or slower). It speaks for
+        # the median only when the medians moved the same way; a change that speeds most
+        # runs and slows the middle one is reported as mixed.
+        if hi < 0 and moved < 0 and rate(fa) > rate(fb):
+            # A higher failure rate after, even within chance, isn't a clean speedup: at a
+            # few runs a side the failure test can't rule out a real rise.
+            res["verdict_code"] = "faster_more_failures"
+            res["verdict"] = ("median faster (%s), but more runs failed after (%d of %d) than before"
+                              " (%d of %d): name each failure's cause before calling it faster"
+                              % ((runs,) + fa + fb))
+        elif hi < 0 and moved < 0:
+            res["verdict_code"], res["verdict"] = "faster", "median faster (%s)" % runs
+        elif lo > 0 and moved > 0:
+            res["verdict_code"], res["verdict"] = "slower", "median slower (%s)" % runs
+        elif hi < 0 or lo > 0:
+            res["verdict_code"] = "mixed"
+            res["verdict"] = "mixed: after runs tend to be %s, but the median isn't (%s)" % (
+                "faster" if hi < 0 else "slower", runs)
         else:
-            res["verdict"] = "no measurable change in the median"
+            res["verdict_code"] = "no_change_yet"
+            res["verdict"] = "no measurable change yet with %s; more runs can tighten this" % sides
+    hidden = res["verdict_code"] == "not_enough_runs"
+    if hidden:
+        # No timings until there are enough runs, so a longer window is chosen without
+        # seeing how the short one looked.
+        for k in ("before_median", "after_median", "before_p95", "after_p95", "before_tail", "after_tail",
+                  "runner_minutes_median_before", "runner_minutes_median_after",
+                  "runner_minutes_a_day_before", "runner_minutes_a_day_after"):
+            res[k] = None
     if a.json:
         print(json.dumps(res, indent=2))
         return
     print("measure: " + what + (" | cache: %s" % a.cache if a.cache else ""))
-    print("before: %d runs, median %s, slowest 5%% %s" % (len(before), fmt(res["before_median"]), fmt(res["before_p95"])))
-    print("after:  %d runs, median %s, slowest 5%% %s" % (len(after), fmt(res["after_median"]), fmt(res["after_p95"])))
-    if res["p95_provisional"]:
-        print("slowest 5%%: provisional, under %d runs a side" % P95_FIRM)
-    print("failed runs: before %d of %d, after %d of %d%s" % (fb + fa + (
-        " (higher after, within chance: report it)" if rate(fa) > rate(fb) and not fails_rose(fb, fa) else "",)))
-    if mb and ma:
+    if hidden:
+        print("before: %d runs\nafter:  %d runs\ntimings: not shown until there are %d a side, so a longer"
+              " window is chosen without seeing them" % (len(before), len(after), a.min_runs))
+    else:
+        print("before: %d runs, median %s, %s %s" % (len(before), fmt(res["before_median"]),
+                                                     before_tail[0], fmt(before_tail[1])))
+        print("after:  %d runs, median %s, %s %s" % (len(after), fmt(res["after_median"]),
+                                                     after_tail[0], fmt(after_tail[1])))
+    if res["p95_provisional"] and not hidden:
+        print("%s: provisional, under %d runs a side"
+              % ("slowest 5%" if fewer >= TAIL_RUNS else "slowest runs", P95_FIRM))
+    need = fails_needed(fb, fa[1] - fa[0])
+    print("failed runs: before %d of %d, after %d of %d%s%s" % (fb + fa + (
+        " (higher after, within chance: report it)" if rate(fa) > rate(fb) and not fails_rose(fb, fa) else "",
+        "; beyond chance from %d failed beside these %d" % (need, fa[1] - fa[0])
+        if need is not None and fa[0] < need else "")))
+    if mb and ma and not hidden:
         print("runner-minutes per run (every job and attempt, cancelled runs included, rounded up per job):"
               " median %g before, %g after" % (median(mb), median(ma)))
         if res["runner_minutes_a_day_before"] and res["runner_minutes_a_day_after"]:
             print("runner-minutes a day: %d before, %d after (also moves with how many runs a day there are)"
                   % (res["runner_minutes_a_day_before"], res["runner_minutes_a_day_after"]))
-    if "interval_95" in res:
-        lo, hi = res["interval_95"]
-        print("change in median, 95%% bootstrap interval: %s to %s" % (fmt(lo), fmt(hi)))
+    if "shift_interval_95" in res:
+        lo, hi = res["shift_interval_95"]
+        print("change, Hodges-Lehmann estimate %s; exact 95%% interval (Mann-Whitney): %s to %s"
+              % (fmt(res["shift_estimate"]), fmt(lo), fmt(hi)))
     print("verdict: " + res["verdict"])
     if excluded:
         print("left out (%d):" % len(excluded))
@@ -932,7 +1200,8 @@ def main(argv=None):
     f.add_argument("--event", default="pull_request")
     f.add_argument("--branch")
     f.add_argument("--limit", type=int, default=150)
-    f.add_argument("--created", help="GitHub date filter, e.g. '>=2026-11-20' for runs after a merge")
+    f.add_argument("--created", help="GitHub date filter, e.g. '2026-11-20T15:00:00Z..2026-11-22T15:00:00Z'"
+                   " for the runs created in a window after a merge")
     f.add_argument("--out", default="runs.jsonl")
 
     s = sub.add_parser("split", help="waiting, setup, running; failed minutes; flakes")
@@ -947,10 +1216,13 @@ def main(argv=None):
     c.add_argument("--workflow")
     c.add_argument("--job", help="compare one job's duration instead of the run's")
     c.add_argument("--event", default="pull_request")
+    c.add_argument("--base", help="keep only runs for this branch: pull requests into it (as fetch"
+                   " recorded) or pushes to it; unplaced runs are left out, passed or failed")
     c.add_argument("--label", help="runner label the job must have")
     c.add_argument("--cache-state", help="JSON file: run id -> hit or miss")
     c.add_argument("--cache", choices=["hit", "miss"], help="keep only runs with this cache state")
-    c.add_argument("--min-runs", type=int, default=MIN_RUNS)
+    c.add_argument("--min-runs", type=int, default=MIN_RUNS,
+                   help="successful comparable runs needed a side (default %d, the floor)" % MIN_RUNS)
     c.add_argument("--json", action="store_true")
 
     t = sub.add_parser("tests", help="tests that ran, by name, before and after")

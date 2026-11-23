@@ -23,9 +23,11 @@ the reasoning under "Why this works: reasoning", or says it is a choice.
 <!-- rules:start -->
 ## The rules for any change to CI
 
-1. **Measure from CI's own runs, before and after.** At least 20 comparable
-   runs a side (same workflow, runner label, event and cache state), compared
-   at the median and the slowest 5%. A local timing is never the result.
+1. **Measure from CI's own runs, before and after.** At least 5 successful
+   comparable runs a side (same workflow, runner label, event and cache
+   state), compared at the median with an exact interval, the slowest run (the
+   slowest 5% from 20 runs) beside it. Give the verdict with its run count. A
+   local timing is never the result.
 2. **Never get faster by hiding failures.** No added retries, wider timeouts,
    sleeps, skipped or deleted tests, loosened assertions, `continue-on-error`,
    `|| true`, or fewer workers to mask a failure. No test may stop running or
@@ -33,9 +35,10 @@ the reasoning under "Why this works: reasoning", or says it is a choice.
    value is flagged for a person.
 3. **Show the diff and the numbers, one change per pull request.** The pull
    request opens with the baseline and a few runs of the branch, marked
-   provisional. After it merges, post the 20-run result as a comment, faster or
-   not. Never add savings up: a fix off the slowest path doesn't shorten the
-   wait.
+   provisional. After it merges, pick a window of time, and once at least 5
+   runs in it have passed and every run started in it has finished, post the
+   result as a comment, faster or not. Never add savings up: a fix off the
+   slowest path doesn't shorten the wait.
 4. **Never run fewer tests before a merge, and ask before anything costs
    money.** The full suite gates every merge. Bigger runners, new providers and
    paid services go on a list for a person to decide. Never quarantine a test.
@@ -55,30 +58,40 @@ in `references/measuring.md`.
 
 1. **Saved history first.** If the repository already has run history saved
    (a `runs.jsonl` someone gives you, or `.joggernaut/before.jsonl`), use it
-   in place of `.joggernaut/before.jsonl` below and go to step 3. Otherwise
-   check access: `gh auth status`, then `gh api rate_limit`. Stop if fewer
-   than 300 core requests are left (a reserve this skill chooses, so other
-   tools sharing the token keep some); say when they reset. Use GET calls
-   only.
+   in place of `.joggernaut/before.jsonl` below for the diagnosis and go to
+   step 3. Before a fix, fetch the baseline it will be measured against as
+   in step 2: a saved file can't show it was read with every run finished.
+   With no saved history, check access: `gh auth status`, then
+   `gh api rate_limit`. Stop if fewer than 300 core requests are left (a
+   reserve this skill chooses, so other tools sharing the token keep some);
+   say when they reset. Use GET calls only.
 2. **Pull the runs.** If `git ls-files .joggernaut` lists anything, the
    folder is tracked: stop and ask before writing there. Find the workflows
    that run on pull requests (`gh api repos/OWNER/NAME/actions/workflows
    --paginate`, then read their `on:` blocks in `.github/workflows/*.yml`
    and `*.yaml`). If a required check comes from another event or app, say
    the diagnosis covers only the workflows fetched. Fetch each one by name,
-   150 runs each (a default: the number Boardy's audit used):
+   150 runs each (a default: the number Boardy's audit used), up to a
+   cut-off time you pick before looking, a few hours ago:
 
    ```sh
    python3 scripts/measure.py fetch --repo OWNER/NAME --workflow ci.yml \
-     --event pull_request --limit 150 --out .joggernaut/before-ci.jsonl
+     --event pull_request --limit 150 --created '<=YYYY-MM-DDTHH:MM:SSZ' \
+     --out .joggernaut/before-ci.jsonl
    ```
 
+   The cut-off leaves every run in the file finished: the file is also the
+   baseline a fix is measured against, and `fetch` refuses runs still
+   going, since the fast ones finish first.
+
    With one workflow, call the file `.joggernaut/before.jsonl`. With
-   several, fetch them over the same dates (`--created`, from the oldest
-   run the busiest one returned), so each covers the same days, and join
-   only the files from this fetch, by name (`cat .joggernaut/before-ci.jsonl
-   .joggernaut/before-lint.jsonl > .joggernaut/before.jsonl`): `split` then
-   prints the PR wait across them per commit. That line counts a commit
+   several, fetch them over the same dates (`--created 'OLDEST..CUTOFF'`,
+   from the oldest run the busiest one returned to the same cut-off; raise
+   `--limit` if `fetch` says the window holds more), so each covers the same
+   days, and join only the files from this fetch, by name
+   (`cat .joggernaut/before-ci.jsonl .joggernaut/before-lint.jsonl >
+   .joggernaut/before.jsonl`): `split` then prints the PR wait across them
+   per commit. That line counts a commit
    once every workflow it ran passed, timed from the first run's creation
    (so a rerun and the wait for it count), keeping each workflow's first run
    within 24 hours of that (a cut-off the script chooses, so a pull request reopened days later doesn't stretch the wait), and a commit's workflows may have tested different bases; a commit missing a required workflow can still
@@ -96,7 +109,8 @@ in `references/measuring.md`.
 3. **Split the time.**
    `python3 scripts/measure.py split --in .joggernaut/before.jsonl`. It
    reports:
-   - the PR wait, at the median and the slowest 5% of successful runs, from
+   - the PR wait, at the median and the slowest 5% of successful runs (the
+     slowest run, below 20; `split` says which), from
      the start of the run's final attempt to its last job done (time spent
      waiting for someone to rerun a failure isn't in it). With several
      workflows in the file that line pools them; report the "PR wait across
@@ -237,7 +251,7 @@ in `references/measuring.md`.
 
 ## What it measures
 
-PR wait at the median and slowest 5%, the waiting/setup/running split per job
+PR wait at the median and slowest 5% (the slowest run below 20 runs), the waiting/setup/running split per job
 and on the slowest path, minutes on failed or cancelled runs, pushes per pull
 request, and catch-up runs. It changes no tracked file, so there is no after.
 

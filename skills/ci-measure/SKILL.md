@@ -21,9 +21,11 @@ the reasoning under "Why this works: reasoning", or says it is a choice.
 <!-- rules:start -->
 ## The rules for any change to CI
 
-1. **Measure from CI's own runs, before and after.** At least 20 comparable
-   runs a side (same workflow, runner label, event and cache state), compared
-   at the median and the slowest 5%. A local timing is never the result.
+1. **Measure from CI's own runs, before and after.** At least 5 successful
+   comparable runs a side (same workflow, runner label, event and cache
+   state), compared at the median with an exact interval, the slowest run (the
+   slowest 5% from 20 runs) beside it. Give the verdict with its run count. A
+   local timing is never the result.
 2. **Never get faster by hiding failures.** No added retries, wider timeouts,
    sleeps, skipped or deleted tests, loosened assertions, `continue-on-error`,
    `|| true`, or fewer workers to mask a failure. No test may stop running or
@@ -31,9 +33,10 @@ the reasoning under "Why this works: reasoning", or says it is a choice.
    value is flagged for a person.
 3. **Show the diff and the numbers, one change per pull request.** The pull
    request opens with the baseline and a few runs of the branch, marked
-   provisional. After it merges, post the 20-run result as a comment, faster or
-   not. Never add savings up: a fix off the slowest path doesn't shorten the
-   wait.
+   provisional. After it merges, pick a window of time, and once at least 5
+   runs in it have passed and every run started in it has finished, post the
+   result as a comment, faster or not. Never add savings up: a fix off the
+   slowest path doesn't shorten the wait.
 4. **Never run fewer tests before a merge, and ask before anything costs
    money.** The full suite gates every merge. Bigger runners, new providers and
    paid services go on a list for a person to decide. Never quarantine a test.
@@ -70,8 +73,13 @@ steps below say what each command computes.
 
    ```sh
    python3 scripts/measure.py fetch --repo OWNER/NAME --workflow ci.yml \
-     --event pull_request --limit 150 --out .joggernaut/before.jsonl
+     --event pull_request --limit 150 --created '<=YYYY-MM-DDTHH:MM:SSZ' \
+     --out .joggernaut/before.jsonl
    ```
+
+   Pick the time before you look, a few hours ago, so every run up to it
+   has finished: `fetch` refuses runs still going, since fast runs finish
+   first and a set read early keeps the fast ones.
 
 3. Read where the time goes, so you measure the part the fix touches:
    `python3 scripts/measure.py split --in .joggernaut/before.jsonl`.
@@ -84,9 +92,9 @@ steps below say what each command computes.
    preservation is **unverified**: a count can't show one test lost and
    another added.
 5. Write `.joggernaut/baseline.md`: the workflow, job and runner label
-   measured, the run count, the median and slowest 5%, the test count, and the
-   exact commands that reproduce it. Keep `.joggernaut/` out of commits
-   (add it to `.git/info/exclude`).
+   measured, the run count, the median and the slowest runs as `split`
+   printed them, the test count, and the exact commands that reproduce it.
+   Keep `.joggernaut/` out of commits (add it to `.git/info/exclude`).
 
 ### 2. While the pull request is open
 
@@ -99,8 +107,13 @@ If the change touched tests or test setup, run the break-it probe (step
 
 ### 3. After the change merges
 
-1. Fetch only runs after the merge:
-   `python3 scripts/measure.py fetch ... --created '>=YYYY-MM-DDTHH:MM:SSZ' --out .joggernaut/after.jsonl`.
+1. Fetch only runs created in a window after the merge, chosen before you
+   look (a day or two, say), and only once every run created in it has
+   finished: fast runs finish first, so a window read early holds its
+   fastest runs and can pass for a speedup. `fetch` refuses a window that
+   hasn't ended, has runs still going, or holds more runs than `--limit`.
+   `python3 scripts/measure.py fetch ... --created 'MERGE-TIME..WINDOW-END' --out .joggernaut/after.jsonl`
+   (times as `YYYY-MM-DDTHH:MM:SSZ`).
    A `pull_request` run tests the pull request's merge commit with its base
    (GitHub docs: `GITHUB_SHA` is the last merge commit on
    `refs/pull/N/merge`). As a conservative selection rule, count a run as
@@ -111,13 +124,25 @@ If the change touched tests or test setup, run the break-it probe (step
    it; this rule doesn't look at that). Do that for each after-side run of
    a pull request, and leave
    out runs whose base lacks the fix, or whose checkout prints no such line
-   (mark those unknown); a run's time alone doesn't show it. An ancestor
+   (mark those unknown); a run's time alone doesn't show it. Keep a failed
+   run that stopped before that line (before checkout, or in it): it is
+   never timed, and its failure counts, as on the before side. `--base`
+   leaves out runs it can't place on the branch, fork runs included, on both
+   sides and whether they passed or failed (`references/measuring.md`). An ancestor
    fix may have been reverted since: also check that no revert of it is an ancestor of that run's BASE. Leave out pull requests
    into other branches, workflows that check out the pull request's head
    instead of the merge commit, and `push` runs on branches without the fix
-   (`git merge-base --is-ancestor FIX_SHA RUN_SHA` tells you).
-   You need at least 20 comparable runs. If there aren't 20 yet, report
-   "not enough runs yet", write the exact commands into the pull request so
+   (`git merge-base --is-ancestor FIX_SHA RUN_SHA` tells you). Write the
+   runs that stay into `.joggernaut/after-fix.jsonl`, one line each as
+   `fetch` wrote them. Fetch the baseline again by replaying its recorded
+   `fetch` command (the same runs, each now read by this `fetch`), and keep
+   in `.joggernaut/before-fix.jsonl` only its runs of the same branch, judged
+   the same way (the branch `fetch` recorded for the run, or a push run's):
+   `references/measuring.md` gives the rule and the commands.
+   If `fetch` refuses, stop there: anything after it would read an older
+   file. You need at least 5 comparable runs a side. If the window ends with fewer,
+   `compare` reports "not enough runs yet" and shows no timings; choose a
+   longer window, write the exact commands for it into the pull request so
    anyone can finish the measurement, and stop; never trigger runs to fill
    the count without asking. Comparable means the
    same workflow, event and runner label, and successful runs only. Count
@@ -127,20 +152,29 @@ If the change touched tests or test setup, run the break-it probe (step
 2. Compare:
 
    ```sh
-   python3 scripts/measure.py compare --before .joggernaut/before.jsonl \
-     --after .joggernaut/after.jsonl --workflow "CI" --label ubuntu-latest [--job "test"]
+   python3 scripts/measure.py compare --before .joggernaut/before-fix.jsonl \
+     --after .joggernaut/after-fix.jsonl --workflow "CI" --event pull_request \
+     --base main --label ubuntu-latest [--job "test"]
    ```
 
-   It prints the medians, the slowest 5% (marked provisional below 100 runs a
-   side), a 95% bootstrap interval on the change in the median, every run it
-   left out and why, the failure rate and the runner-minutes per run on each
-   side, and one verdict:
-   **median faster**, **median slower**, **no measurable change in the
-   median**, **not enough runs yet**, or **not valid** when more runs fail
-   after than chance explains. Report the verdict as printed, with the
-   slowest 5% beside it, since the median can improve while the tail gets
-   worse. If any run failed after the change, name the cause of each before
-   reporting a speedup.
+   It prints the medians, the slowest runs (below 20 runs a side, the
+   smaller side's slowest run and the larger side's typical slowest of that
+   many; the slowest 5% from 20; provisional below 100), the Hodges-Lehmann
+   estimate of the change with its exact 95% interval, the runs it left out
+   and why, the failure rate and the runner-minutes per run on each side, and
+   one verdict with the run count: **median faster** (with ", but more runs
+   failed after" when the failure rate rose within chance), **median slower**,
+   **mixed** (the runs tend one way, the median went the other or nowhere),
+   **no measurable change yet** (more runs can tighten it), **not enough runs
+   yet**, or **not valid** when more runs fail after than chance explains.
+   `references/measuring.md` says why this method holds at 5 runs a side, and
+   how to measure again without fooling yourself. Report the verdict as
+   printed, with the slowest runs beside it, since the median can improve
+   while the tail gets worse. If any run failed after the change,
+   name the cause of each before reporting a speedup: at a few runs a side,
+   only a large rise in failures counts as beyond chance. The failure rate
+   reads every finished run of the workflow and event; `--label`, `--job`
+   and `--cache` choose only the runs timed.
 3. Compare the tests, by name:
 
    ```sh
@@ -168,16 +202,18 @@ If the change touched tests or test setup, run the break-it probe (step
 End with a short receipt the person may share (the numbers below are a
 made-up example). Print it whatever the verdict, slower and "no measurable
 change" included; never post it anywhere yourself. Leave out the repository
-name and pull request link unless the person asks for them.
+name and pull request link unless the person asks for them. Name the slowest
+runs as `compare` printed them: below 20 runs a side, the slowest run, and
+for the side with more runs its typical slowest of that many.
 
 ```
 Joggernaut receipt
   PR wait, median: 14m 10s -> 9m 20s (24 runs before, 22 after)
   slowest 5%: 31m 02s -> 18m 40s (provisional)
   runner-minutes per run: 41 -> 27
-  failed runs: 1 of 25 before, 1 of 23 after
+  failed runs: 1 of 25 before, 0 of 22 after
   tests: 1,842 ran before, the same 1,842 after, by name; 0 new failures
-  verdict: median faster
+  verdict: median faster (24 runs before, 22 after)
   change: seed the pnpm cache from main
 ```
 
@@ -189,10 +225,10 @@ request yourself.
 
 | If you are about to say | Do this instead |
 |---|---|
-| "The branch ran faster." | One run is noise. Call it provisional; the verdict needs 20 comparable runs a side. |
+| "The branch ran faster." | One run is noise. Call it provisional; the verdict needs 5 comparable runs a side. |
 | "It's faster locally." | A local timing is never the result. Measure CI's own runs, on the same runner label. |
 | "Same test count, so nothing was lost." | Compare names: a removed test and an added one keep the count. With only a count, say "count only". |
-| "The median improved." | Print the slowest 5% and the failed runs beside it; the tail can get worse. |
+| "The median improved." | Print the slowest runs and the failed runs beside it; the tail can get worse. |
 | "Three minutes saved in each of five jobs." | Never add savings up. Only the measured wait counts. |
 | "Faster, with one test skipped for now." | Fewer tests, more skips or a new failure fails the change, however fast. |
 
@@ -201,8 +237,10 @@ request yourself.
 This is reasoning from how CI works, not a measurement.
 
 - CI times vary run to run with machines, caches and load. Comparing two
-  single runs measures the noise as often as the change; a median over 20 or
-  more runs a side, with a bootstrap interval, separates the two.
+  single runs measures the noise as often as the change. An exact rank
+  interval over 5 or more runs a side separates the two, and says when it
+  can't yet. A larger count can narrow it; one chosen after seeing the first
+  result is exploratory, and both results are reported.
 - A local machine differs from a CI runner in cores, disk, network and cache
   state, so a local speedup may not exist on CI at all.
 - Dropping a test makes CI look faster, so speed alone can't tell a
