@@ -784,6 +784,7 @@ FAILED_WORDS = {"failed", "failure", "fail", "error", "errored", "broken"}
 # the end (Surefire), so they don't make it a failure, and explain no declared total.
 ASSERT_TAGS = {"failure"}
 ERROR_TAGS = {"error"}
+RETRY_TAGS = {"flakyFailure", "flakyError", "rerunFailure", "rerunError"}
 ASSERT_WORDS = {"failed", "failure", "fail"}
 ERROR_WORDS = {"error", "errored", "broken"}
 
@@ -855,6 +856,13 @@ def junit_results(path):
           for tc in [c for c in suite if local(c.tag) == "testcase"]:
             cases += 1
             out = case_outcome(tc)
+            # Retry history (Surefire's <flakyFailure>, <rerunError> and the like) is kept per
+            # test: the final outcome decides pass or fail, and more retries count as a failure.
+            retried = sum(1 for g in tc if local(g.tag) in RETRY_TAGS)
+            if retried:
+                rk = json.dumps([where, suite_path, tc.get("classname") or "", tc.get("file") or suite_file or "",
+                                 tc.get("name") or "", "(retried)"])
+                errs[rk] = errs.get(rk, 0) + retried
             if out in ("passed", "failed"):
                 executed[0] += 1
             add([where, suite_path, tc.get("classname") or "", tc.get("file") or suite_file or "",
@@ -927,8 +935,10 @@ def cmd_tests(a):
     stopped, newly_skipped, newly_errored, new_fail = [], [], [], []
     for t in sorted(set(b) | set(c)):
         ob, oc = b.get(t, []), c.get(t, [])
-        # A copy gone from the report counts as lost too, whatever it did before.
-        lost = max(ran(ob) - ran(oc), len(ob) - len(oc))
+        # A copy gone from the report, or newly skipped, counts as lost too, whatever it did
+        # before (an error included).
+        present = lambda outs: sum(1 for o in outs if o != "skipped")
+        lost = max(ran(ob) - ran(oc), len(ob) - len(oc), present(ob) - present(oc))
         if lost > 0:
             stopped.append((t, lost, len(ob)))
             if oc.count("skipped") > ob.count("skipped"):
@@ -956,7 +966,10 @@ def cmd_tests(a):
         for t, k in new_fail:
             print("  new failure: " + show_test(t) + ("" if k == 1 else " (%d more copies)" % k))
         for s, k in suite_errors:
-            print("  new suite error: " + show_test(s) + ("" if k == 1 else " (%d new)" % k))
+            if json.loads(s)[-1] == "(retried)":
+                print("  new failure, passed only on a retry: " + show_test(s).replace("::(retried)", ""))
+            else:
+                print("  new suite error: " + show_test(s) + ("" if k == 1 else " (%d new)" % k))
         print("verdict: " + res["verdict"])
     sys.exit(0 if ok else 1)
 
@@ -969,7 +982,8 @@ def cmd_tests(a):
 # setup-java's, which names its cache: "on the maven-wrapper primary key".
 CACHE_OUTCOMES = [
     (re.compile(r"^\s*key:\s+\S", re.I), "requested"),
-    (re.compile(r"^\s*(cache restored from key|restored from cache key)\b", re.I), "restore: hit"),
+    # setup-java names its cache first: "maven-wrapper cache restored from key".
+    (re.compile(r"^\s*(\S+ )?(cache restored from key|restored from cache key)\b", re.I), "restore: hit"),
     # setup-node and setup-python name the package manager first: "npm cache is not found".
     (re.compile(r"^\s*(\S+ )?(cache (is )?not found|no cache found)\b", re.I), "restore: miss"),
     (re.compile(r"^\s*cache hit occurred on (the )?(\S+ )?primary key [^,]*, not saving cache\.?\s*$", re.I),
@@ -996,7 +1010,6 @@ def cmd_cachelog(a):
             if rx.search(text):
                 k = KEY.search(text)
                 # A short hash names the key without printing it.
-                # actions/cache compares keys ignoring case, so the hash does too.
                 # A hint only: actions/cache compares keys ignoring case and normalisation, which
                 # lower() after NFC approximates but doesn't match in every script.
                 key = unicodedata.normalize("NFC", k.group(1)).lower() if k else ""
@@ -1016,8 +1029,8 @@ def cmd_flakebound(a):
     beforehand: the low end of a two-sided 95% interval for the failure rate (the rate at
     which x or more failures has a 2.5% chance), and the runs a re-test needs so that a
     flake still failing at that rate would fail at least once with 95% probability.
-    Decimal arithmetic at 60 digits; the bound is taken from the low side, and the run
-    count is checked against it, so the count is never short."""
+    Decimal arithmetic at 80 digits; the bound is taken from the low side and shown rounded
+    down, and the run count is worked out from the number shown, so it is never short."""
     from decimal import Decimal as D, localcontext, ROUND_CEILING, ROUND_FLOOR
     x, n = a.failures, a.runs
     if n < 1 or not 0 <= x <= n:

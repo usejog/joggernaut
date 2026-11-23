@@ -421,12 +421,31 @@ for before, after, what in (
     r = two_reports(before, after)
     if r.returncode == 0:
         bad.append("tests: %s passed\n%s" % (what, r.stdout))
+for before, after, what in (
+        ('<testsuite name="s" errors="1"><testcase classname="k" name="x"><error/></testcase></testsuite>',
+         '<testsuite name="s" errors="0"><testcase classname="k" name="y"/></testsuite>',
+         "deleting a test that errored, with its declared error"),
+        ('<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><error/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><skipped/></testcase></testsuite>',
+         "skipping a test that errored"),
+        ('<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><flakyError/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="y"/></testsuite>',
+         "deleting a test that passed on a retry"),
+        ('<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x" status="broken"/></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="y"/></testsuite>',
+         "deleting a broken test"),
+        ('<testsuite name="s"><testcase classname="k" name="x"/></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="x"><flakyFailure/></testcase></testsuite>',
+         "a test that now passes only on a retry")):
+    r = two_reports(before, after)
+    if r.returncode == 0:
+        bad.append("tests: %s passed\n%s" % (what, r.stdout))
 # flakebound: the count fits the rate it prints (shown rounded down), and is never below the
 # exact minimum, worked out independently here (one failure: n*ln(0.05)/ln(0.975), rounded up)
 from decimal import Decimal as Dd, getcontext as _gc
 _gc().prec = 80
 for x, n, least in (("1", "61288", 7251910), ("2", "10000000", 123683624), ("1", "33358860", 3947190594),
-                    ("1", "2002288363", 236920979641), ("1", "166", 19642), ("3", "100", 479),
+                    ("1", "2002288363", 236920979641), ("1", "166", 19642), ("3", "100", 480),
                     ("999999", "1000000", 1), ("1", "10" + "0" * 58, 1)):
     r = run([M, "flakebound", "--failures", x, "--runs", n])
     m = re.search(r"interval (\S+) .*\n.*at least (\d+) runs", r.stdout)
@@ -439,7 +458,7 @@ for x, n, least in (("1", "61288", 7251910), ("2", "10000000", 123683624), ("1",
         bad.append("flakebound: %s of %s gave %d runs at %s (exact minimum %d)" % (x, n, need, pshown, least))
 # flakebound: exact binomial arithmetic, and no bound from zero failures
 r = run([M, "flakebound", "--failures", "3", "--runs", "100"])
-if "0.0062" not in r.stdout or "at least 4" not in r.stdout:
+if "0.0062" not in r.stdout or "at least 480 runs" not in r.stdout:
     bad.append("flakebound: 3 of 100 should give 0.0062 and 480 runs\n" + r.stdout + r.stderr)
 r = run([M, "flakebound", "--failures", "0", "--runs", "50"])
 if r.returncode == 0:

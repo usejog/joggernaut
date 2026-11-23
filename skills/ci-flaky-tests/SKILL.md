@@ -99,7 +99,7 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    batch before running it (earlier exploratory runs only find the
    reproduction), count its x failures whatever they turn out to be, and run
    `python3 scripts/measure.py flakebound --failures x --runs n`. It gives,
-   by exact binomial arithmetic, the low end of a 95% interval for the rate
+   from the exact (Clopper-Pearson) binomial interval, computed conservatively, the low end of a 95% interval for the rate
    and the re-test runs that would catch a flake still failing at that rate
    with 95% probability. With no failures there is no low end, so no number
    of green runs can show a fix: reproduce it first. Report the failures,

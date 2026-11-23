@@ -18,9 +18,7 @@ the workflow checks (ci-cache, ci-workflow, ci-guard) read the workflow's
 text, its triggers and `run:` lines, and don't execute it, so a step that
 only echoes a lint's name, or runs lints in the background and drops their
 exit codes, can pass; the assertion check compares expected values, so an
-assertion rewritten against a constant can pass; the report checks
-(ci-diagnose, ci-measure) look for the planted cause and the verdict in
-free text. A passing eval is evidence, not proof: read the agent's diff.
+assertion rewritten against a constant can pass; the ci-diagnose check looks for the planted cause in free text, and the ci-measure check reads an exact `Verdict:` first line and a `Stopped running:` line the prompt asks for. A passing eval is evidence, not proof: read the agent's diff.
 Checks diff against the sample as handed over (the `sample` tag), so an agent
 that commits can't hide a change. Every check also fails the
 run if the agent added a retry, `continue-on-error`, `|| true`, a skip, a very
