@@ -2,6 +2,7 @@
 """Check the eval harness without an agent: every check.py fails on its
 untouched sample, and measure.py gives the expected answers on the samples."""
 import glob
+import re
 import os
 import shutil
 import subprocess
@@ -358,10 +359,6 @@ for before, after, what in (
     r = two_reports(before, after)
     if r.returncode == 0:
         bad.append("tests: %s passed\n%s" % (what, r.stdout))
-for x, n, want in (("999999", "1000000", "at least 1 runs"), ("1", "2002288363", "at least 236920979641 runs")):
-    r = run([M, "flakebound", "--failures", x, "--runs", n])
-    if want not in r.stdout:
-        bad.append("flakebound: %s of %s should give %s\n%s%s" % (x, n, want, r.stdout, r.stderr))
 for before, after, what in (
         ('<testsuite name="s"><testcase classname="k" name="x"><failure/></testcase></testsuite>',
          '<testsuite name="s"><testcase classname="k" name="x"><error message="setup"/></testcase></testsuite>',
@@ -385,10 +382,6 @@ for before, after, what in (
     r = two_reports(before, after)
     if r.returncode == 0:
         bad.append("tests: %s passed\n%s" % (what, r.stdout))
-for x, n, want in (("2", "10000000", "at least 123683624 runs"), ("1", "33358860", "at least 3947190594 runs")):
-    r = run([M, "flakebound", "--failures", x, "--runs", n])
-    if want not in r.stdout:
-        bad.append("flakebound: %s of %s should give %s\n%s%s" % (x, n, want, r.stdout, r.stderr))
 # cachelog: messages match from the line's start, so text inside a key can't pass for one
 code = ("import importlib.util,sys;s=importlib.util.spec_from_file_location('m',sys.argv[1]);m=importlib.util.module_from_spec(s);"
         "s.loader.exec_module(m);f=lambda l:[x for r,x in m.CACHE_OUTCOMES if r.search(l)][:1];"
@@ -397,9 +390,6 @@ code = ("import importlib.util,sys;s=importlib.util.spec_from_file_location('m',
 r = run(["-c", code, M])
 if r.stdout.split("\n")[:2] != ["['restore: hit']", "['save: skipped (exact hit)']"]:
     bad.append("cachelog: message patterns misread\n" + r.stdout + r.stderr)
-r = run([M, "flakebound", "--failures", "1", "--runs", "61288"])
-if "7251910 runs" not in r.stdout:
-    bad.append("flakebound: 1 of 61288 needs 7251910 runs (the exact threshold is just over 7251909)\n" + r.stdout)
 # Pushes a day count pull_request commits only; flakes keep workflow and job apart
 mix = [json.loads(l) for l in open(E + "/ci-diagnose/repo/ci-history/runs.jsonl") if l.strip()]
 base = len({(tuple(x.get("pull_requests") or []), x.get("head_sha")) for x in mix if x.get("event") == "pull_request"})
@@ -413,9 +403,43 @@ rb = json.loads(run([M, "split", "--in", mixed, "--json"]).stdout)
 if ra.get("pushes_per_pr_max") != rb.get("pushes_per_pr_max"):
     bad.append("split: a scheduled run changed pushes per pull request")
 
+for before, after, what in (
+        ('<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><error type="ZeroDivisionError"/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="y"/></testsuite>',
+         "deleting a test that errored"),
+        ('<testsuite name="s"><testcase classname="k" name="x" status="failed"><error message="could not collect"/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="x" status="failed"><error message="could not collect"/></testcase></testsuite>',
+         "reports whose only case is an <error> under status=failed"),
+        ('<testsuite name="s" failures="1"><testcase classname="k" name="a"><flakyFailure/></testcase>'
+         '<testcase classname="k" name="b"><failure/></testcase></testsuite>',
+         '<testsuite name="s" failures="1"><testcase classname="k" name="a"><failure/></testcase>'
+         '<testcase classname="k" name="b"/></testsuite>',
+         "a test that recovered on retry now failing for good"),
+        ('<testsuite name="s" errors="1"><testcase classname="k" name="x" status="error"/><testcase classname="k" name="y"/></testsuite>',
+         '<testsuite name="s" errors="1"><testcase classname="k" name="x"/><testcase classname="k" name="y"/></testsuite>',
+         "a declared error no case explains once its status=error case passes")):
+    r = two_reports(before, after)
+    if r.returncode == 0:
+        bad.append("tests: %s passed\n%s" % (what, r.stdout))
+# flakebound: the count fits the rate it prints (shown rounded down), and is never below the
+# exact minimum, worked out independently here (one failure: n*ln(0.05)/ln(0.975), rounded up)
+from decimal import Decimal as Dd, getcontext as _gc
+_gc().prec = 80
+for x, n, least in (("1", "61288", 7251910), ("2", "10000000", 123683624), ("1", "33358860", 3947190594),
+                    ("1", "2002288363", 236920979641), ("1", "166", 19642), ("3", "100", 479),
+                    ("999999", "1000000", 1), ("1", "10" + "0" * 58, 1)):
+    r = run([M, "flakebound", "--failures", x, "--runs", n])
+    m = re.search(r"interval (\S+) .*\n.*at least (\d+) runs", r.stdout)
+    if not m:
+        bad.append("flakebound: %s of %s printed no bound\n%s%s" % (x, n, r.stdout, r.stderr))
+        continue
+    pshown, need = Dd(m.group(1)), int(m.group(2))
+    fits = need * (1 - pshown).ln() <= Dd("0.05").ln() if pshown < 1 else need == 1
+    if not fits or need < least:
+        bad.append("flakebound: %s of %s gave %d runs at %s (exact minimum %d)" % (x, n, need, pshown, least))
 # flakebound: exact binomial arithmetic, and no bound from zero failures
 r = run([M, "flakebound", "--failures", "3", "--runs", "100"])
-if "0.0062" not in r.stdout or "480 runs" not in r.stdout:
+if "0.0062" not in r.stdout or "at least 4" not in r.stdout:
     bad.append("flakebound: 3 of 100 should give 0.0062 and 480 runs\n" + r.stdout + r.stderr)
 r = run([M, "flakebound", "--failures", "0", "--runs", "50"])
 if r.returncode == 0:
@@ -430,7 +454,9 @@ for text, want in (("Verdict: FAIL\nStopped running: test_refund_rounding\nGet a
                    ("Approved for merge.\nVerdict: FAIL\nStopped running: test_refund_rounding", 1),
                    ("Verdict: FAIL was the old assessment\nStopped running: test_refund_rounding", 1),
                    ("Verdict: FAIL\nStopped running: test_refund_rounding_new", 1),
-                   ("Verdict: FAIL\nStopped running: test_other\ntest_refund_rounding still ran.", 1)):
+                   ("Verdict: FAIL\nStopped running: test_other\ntest_refund_rounding still ran.", 1),
+                   ("Verdict: FAIL\nStopped running: test_other (test_refund_rounding still ran)", 1),
+                   ("Verdict: FAIL\nStopped running: `report::billing::tests.test_billing::test_refund_rounding`", 0)):
     d = tempfile.mkdtemp()
     open(os.path.join(d, "verdict.md"), "w").write(text)
     r = run([E + "/ci-measure/check.py", d])

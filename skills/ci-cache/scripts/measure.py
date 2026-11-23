@@ -366,7 +366,8 @@ def cmd_split(a):
     # pull_request runs only: their head_sha is the pull request's head commit.
     commits = {(tuple(r.get("pull_requests") or []) or (r.get("head_repo"), r.get("head_branch")), r.get("head_sha"))
                for r in runs if r.get("event") == "pull_request"}
-    out["runs_per_day"] = round(len(commits) / span_days, 1) if span_days >= 1 else None
+    out["pr_commits"] = len(commits)
+    out["runs_per_day"] = round(len(commits) / span_days, 1) if span_days >= 1 and commits else None
 
     # The three-way split on the slowest path: the job that finished last in each run.
     path = {"upstream": [], "waiting": [], "setup": [], "running": [], "cleanup": [], "other": []}
@@ -473,8 +474,10 @@ def cmd_split(a):
         return
     print("runs read: %d%s, over %.1f days%s" % (
         len(runs), " (workflow %s)" % a.workflow if a.workflow else "", out["span_days"],
-        ", about %s pushes a day" % out["runs_per_day"] if out["runs_per_day"]
-        else " (no pull-request runs)" if out["runs_per_day"] == 0 else " (under a day: no daily rate)"))
+        " (no pull-request runs)" if out["pr_commits"] == 0
+        else " (under a day: no daily rate)" if out["runs_per_day"] is None
+        else ", under 0.1 pushes a day" if out["runs_per_day"] == 0
+        else ", about %s pushes a day" % out["runs_per_day"]))
     print("PR wait (run start to last job done, %d successful runs): median %s, slowest 5%% %s%s"
           % (len(walls), fmt(out["wait_median"]), fmt(out["wait_p95"]),
              " (provisional: under %d runs)" % P95_FIRM if out["p95_provisional"] else ""))
@@ -777,10 +780,34 @@ SHARD = re.compile(r"((?:shard|part|chunk|split|slice|group|batch|worker|index|n
 NOT_RUN = {"notrun", "skipped", "suppressed", "disabled", "ignored", "pending"}
 FAILED_TAGS = {"failure", "error", "flakyFailure", "flakyError", "rerunFailure", "rerunError"}
 FAILED_WORDS = {"failed", "failure", "fail", "error", "errored", "broken"}
-ASSERT_TAGS = {"failure", "flakyFailure", "rerunFailure"}
-ERROR_TAGS = {"error", "flakyError", "rerunError"}
+# Final outcomes only: <flakyFailure> and the like are retry history of a test that passed in
+# the end (Surefire), so they don't make it a failure, and explain no declared total.
+ASSERT_TAGS = {"failure"}
+ERROR_TAGS = {"error"}
 ASSERT_WORDS = {"failed", "failure", "fail"}
 ERROR_WORDS = {"error", "errored", "broken"}
+
+
+def case_outcome(tc):
+    """passed, failed (an assertion failed, so the body ran), errored (only an error: a setup
+    or collection failure, so it may not have run) or skipped. Elements decide before
+    attributes, so <error> under status="failed" is an error."""
+    kids = {local(c.tag) for c in tc}
+    status = (tc.get("status") or "").lower()
+    result = (tc.get("result") or "").lower()
+    if kids & ASSERT_TAGS:
+        return "failed"
+    if kids & ERROR_TAGS:
+        return "errored"
+    if "skipped" in kids:
+        return "skipped"
+    if status in ASSERT_WORDS or result in ASSERT_WORDS:
+        return "failed"
+    if status in ERROR_WORDS or result in ERROR_WORDS:
+        return "errored"
+    if status in NOT_RUN or result in NOT_RUN:
+        return "skipped"
+    return "passed"
 
 
 def junit_results(path):
@@ -827,19 +854,7 @@ def junit_results(path):
                   errs[k] = errs.get(k, 0) + 1
           for tc in [c for c in suite if local(c.tag) == "testcase"]:
             cases += 1
-            kids = {local(c.tag) for c in tc}
-            status = (tc.get("status") or "").lower()
-            result = (tc.get("result") or "").lower()
-            # failed: an assertion failed, so the body ran. errored: only an error (a setup or
-            # collection failure), so it may not have run. Both are failures.
-            if kids & ASSERT_TAGS or status in ASSERT_WORDS or result in ASSERT_WORDS:
-                out = "failed"
-            elif kids & ERROR_TAGS or status in ERROR_WORDS or result in ERROR_WORDS:
-                out = "errored"
-            elif "skipped" in kids or status in NOT_RUN or result in NOT_RUN:
-                out = "skipped"
-            else:
-                out = "passed"
+            out = case_outcome(tc)
             if out in ("passed", "failed"):
                 executed[0] += 1
             add([where, suite_path, tc.get("classname") or "", tc.get("file") or suite_file or "",
@@ -878,7 +893,8 @@ def junit_results(path):
             holders = cases_in + [s for s in inner if local(s.tag) in ("testsuite", "testsuites")]
             for kind, attr in (("error", "errors"), ("failure", "failures")):
                 declared = count(e, attr)
-                explained = sum(1 for h in holders for c in h if local(c.tag) == kind)
+                explained = (sum(1 for c in cases_in if case_outcome(c) == {"error": "errored", "failure": "failed"}[kind])
+                             + sum(1 for h in holders if local(h.tag) != "testcase" for c in h if local(c.tag) == kind))
                 for label, n in (("(declared %s)" % attr, declared),
                                  ("(declared %s no case explains)" % attr, max(0, declared - explained))):
                     if n:
@@ -911,7 +927,8 @@ def cmd_tests(a):
     stopped, newly_skipped, newly_errored, new_fail = [], [], [], []
     for t in sorted(set(b) | set(c)):
         ob, oc = b.get(t, []), c.get(t, [])
-        lost = ran(ob) - ran(oc)
+        # A copy gone from the report counts as lost too, whatever it did before.
+        lost = max(ran(ob) - ran(oc), len(ob) - len(oc))
         if lost > 0:
             stopped.append((t, lost, len(ob)))
             if oc.count("skipped") > ob.count("skipped"):
@@ -953,12 +970,13 @@ def cmd_tests(a):
 CACHE_OUTCOMES = [
     (re.compile(r"^\s*key:\s+\S", re.I), "requested"),
     (re.compile(r"^\s*(cache restored from key|restored from cache key)\b", re.I), "restore: hit"),
-    (re.compile(r"^\s*(cache (is )?not found|no cache found)\b", re.I), "restore: miss"),
+    # setup-node and setup-python name the package manager first: "npm cache is not found".
+    (re.compile(r"^\s*(\S+ )?(cache (is )?not found|no cache found)\b", re.I), "restore: miss"),
     (re.compile(r"^\s*cache hit occurred on (the )?(\S+ )?primary key [^,]*, not saving cache\.?\s*$", re.I),
      "save: skipped (exact hit)"),
     (re.compile(r"^\s*cache saved\b", re.I), "save: saved"),
     (re.compile(r"^\s*(failed to save|unable to reserve cache)\b", re.I), "save: failed"),
-    (re.compile(r"not saving cache", re.I), "save: skipped, reason unknown"),
+    (re.compile(r"^\s*cache hit occurred\b.*not saving cache", re.I), "save: skipped, reason unknown"),
 ]
 # A key ends at a comma or the line's end (actions/cache refuses commas in keys); it may hold spaces.
 KEY = re.compile(r"(?:input keys|key):?\s+([^,]+?)\s*(?:,|$)", re.I)
@@ -1000,7 +1018,7 @@ def cmd_flakebound(a):
     flake still failing at that rate would fail at least once with 95% probability.
     Decimal arithmetic at 60 digits; the bound is taken from the low side, and the run
     count is checked against it, so the count is never short."""
-    from decimal import Decimal as D, localcontext, ROUND_CEILING
+    from decimal import Decimal as D, localcontext, ROUND_CEILING, ROUND_FLOOR
     x, n = a.failures, a.runs
     if n < 1 or not 0 <= x <= n:
         die("need 0 <= failures <= runs and runs >= 1")
@@ -1009,7 +1027,7 @@ def cmd_flakebound(a):
               " can show a fix; reproduce it first" % n)
         sys.exit(1)
     with localcontext() as ctx:
-        ctx.prec, ctx.Emin, ctx.Emax = 60, -999999999999999999, 999999999999999999
+        ctx.prec, ctx.Emin, ctx.Emax = 80, -999999999999999999, 999999999999999999
 
         def at_least_x(p):
             # P(X >= x), summed exactly by the binomial recurrence over the side with fewer terms.
@@ -1039,16 +1057,36 @@ def cmd_flakebound(a):
                     break
                 lo, hi = (mid, hi) if at_least_x(mid) < target else (lo, mid)
             p = lo
-        p = p.next_minus()  # step to the low side of any rounding
+        # Shown rounded down to 6 significant digits, and the run count is worked out from the
+        # number shown, so anyone can check it: a lower rate only asks for more runs.
+        p = p.next_minus()
+        if p > 0:
+            exp = p.adjusted() - 5
+            p = p.quantize(D(1).scaleb(exp), rounding=ROUND_FLOOR)
+        if p <= 0:
+            die("the rate's low end is too small to work with at %d runs" % n)
         if p >= 1:
             need = 1
         else:
-            need = int((D("0.05").ln() / (1 - p).ln()).to_integral_value(rounding=ROUND_CEILING))
-            while (1 - p) ** need > D("0.05"):
+            if p < D("0.001"):
+                # ln(1 - p) by its series, so a tiny p doesn't vanish into 1 - p == 1.
+                lq, term, k = D(0), p, 1
+                while True:
+                    step = term / k
+                    if step < D(10) ** (-(ctx.prec + 5)) * abs(lq or step):
+                        break
+                    lq -= step
+                    term *= p
+                    k += 1
+            else:
+                lq = (1 - p).ln()
+            l05 = D("0.05").ln()
+            need = int((l05 / lq).to_integral_value(rounding=ROUND_CEILING))
+            while need * lq > l05:
                 need += 1
-            while need > 1 and (1 - p) ** (need - 1) <= D("0.05"):
+            while need > 1 and (need - 1) * lq <= l05:
                 need -= 1
-    print("failure rate: %d of %d; low end of its 95%% interval %s" % (x, n, "%.6g" % float(p)))
+    print("failure rate: %d of %d; low end of its 95%% interval %s (rounded down)" % (x, n, "%.6g" % float(p)))
     print("re-test with at least %d runs: a flake still failing at that rate passes them all"
           " with chance under 5%%" % need)
 

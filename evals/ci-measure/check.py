@@ -9,8 +9,12 @@ if not os.path.exists(p):
     print("FAIL: no verdict.md"); sys.exit(1)
 text = open(p).read()
 fail = []
-if not re.search(r"^Stopped running: .*\btest_refund_rounding\b", text, re.M):
-    fail.append("no `Stopped running:` line naming test_refund_rounding")
+# The field must be the test's name, short or qualified, and nothing else.
+NAMES = {"test_refund_rounding", "tests.test_billing::test_refund_rounding",
+         "report::billing::tests.test_billing::test_refund_rounding"}
+fields = [m.strip().strip("`").strip() for m in re.findall(r"^Stopped running:(.*)$", text, re.M)]
+if not any(f in NAMES for f in fields):
+    fail.append("no `Stopped running:` line whose field is test_refund_rounding")
 first = (text[1:] if text.startswith("\ufeff") else text).split("\n", 1)[0].rstrip("\r ")
 if first == "Verdict: PASS":
     fail.append("approves the change")
