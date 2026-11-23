@@ -142,7 +142,7 @@ def gh_get(path, paginate=False, missing=False):
     except FileNotFoundError:
         die("gh is not installed; install the GitHub CLI and run `gh auth login`")
     except subprocess.CalledProcessError as e:
-        if missing:
+        if missing and re.search(r"HTTP 40[4]|HTTP 422", e.stderr or ""):
             return None
         first = (e.stderr or "").strip().splitlines()[:1]
         die("gh api %s failed: %s" % (path.split("?")[0], first[0] if first else e.returncode))
@@ -298,14 +298,18 @@ def cmd_fetch(a):
 
 def pr_bases(a, r):
     """The branch each pull request of a run targeted. GitHub lists a run's pull request
-    only while it is open, so for a closed one ask which pull requests hold the run's
-    commit (merged ones included), keeping those from the run's own head branch."""
+    only while it is open, so for one from this repository ask for the pull requests
+    from the run's head branch in any state (open, merged or closed). A fork's run
+    records none: the measuring guide leaves fork runs out on both sides."""
     listed = r.get("pull_requests") or []
-    if listed or not (r.get("event") or "").startswith("pull_request") or not r.get("head_sha"):
+    head_repo = (r.get("head_repository") or {}).get("full_name")
+    if (listed or not (r.get("event") or "").startswith("pull_request") or not r.get("head_branch")
+            or head_repo != a.repo):
         return [(p.get("base") or {}).get("ref") for p in listed]
-    prs = gh_get("repos/%s/commits/%s/pulls?per_page=100" % (a.repo, r["head_sha"]), missing=True) or []
-    mine = [p for p in prs if (p.get("head") or {}).get("ref") == r.get("head_branch")] or prs
-    return sorted({(p.get("base") or {}).get("ref") for p in mine})
+    owner = a.repo.split("/")[0]
+    prs = gh_get("repos/%s/pulls?state=all&per_page=100&head=%s" % (
+        a.repo, quote("%s:%s" % (owner, r["head_branch"]), safe="")), missing=True) or []
+    return sorted({(p.get("base") or {}).get("ref") for p in prs})
 
 
 def write_runs(a, runs, out):
@@ -645,6 +649,17 @@ def workflow_matches(r, wf):
     return not wf or wf in (r.get("name"), os.path.basename(r.get("path") or ""))
 
 
+def on_base(r, base):
+    """With --base: a pull request run whose recorded target is that branch alone, or a
+    push to it. A run that can't be placed (a fork's, or one with no branch recorded) is
+    left out whether it passed or failed, so the gap can't shift the failure rate."""
+    if not base:
+        return True
+    if (r.get("event") or "").startswith("pull_request"):
+        return r.get("pull_request_bases") == [base]
+    return r.get("head_branch") == base
+
+
 def load_cache_state(a):
     return json.load(open(a.cache_state)) if a.cache_state else {}
 
@@ -655,6 +670,8 @@ def outside_cohort(r, a, cache):
     event, so no runner, job or cache filter can hide or dilute a failure."""
     if a.event and r.get("event") != a.event:
         return "event %s" % r.get("event")
+    if not on_base(r, a.base):
+        return "not on branch %s" % a.base
     if a.cache and cache.get(str(r["id"])) != a.cache:
         return "cache %s" % (cache.get(str(r["id"])) or "state unknown")
     if a.label and not on_runner(r, a):
@@ -858,7 +875,8 @@ def cmd_compare(a):
     # runner, job and cache filters choose only which runs are timed, so none of them can
     # drop a failure whose runner or cache state is unknown, or add green runs that
     # weren't timed.
-    in_workflow = lambda r: workflow_matches(r, a.workflow) and (not a.event or r.get("event") == a.event)
+    in_workflow = lambda r: (workflow_matches(r, a.workflow) and (not a.event or r.get("event") == a.event)
+                             and on_base(r, a.base))
 
     def fail_rate(rs):
         # Every finished run except ones a newer push cancelled. A failed or rerun first
@@ -1198,6 +1216,8 @@ def main(argv=None):
     c.add_argument("--workflow")
     c.add_argument("--job", help="compare one job's duration instead of the run's")
     c.add_argument("--event", default="pull_request")
+    c.add_argument("--base", help="keep only runs for this branch: pull requests into it (as fetch"
+                   " recorded) or pushes to it; unplaced runs are left out, passed or failed")
     c.add_argument("--label", help="runner label the job must have")
     c.add_argument("--cache-state", help="JSON file: run id -> hit or miss")
     c.add_argument("--cache", choices=["hit", "miss"], help="keep only runs with this cache state")

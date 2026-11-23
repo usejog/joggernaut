@@ -125,8 +125,10 @@ If the change touched tests or test setup, run the break-it probe (step
    a pull request, and leave
    out runs whose base lacks the fix, or whose checkout prints no such line
    (mark those unknown); a run's time alone doesn't show it. Keep a failed
-   run you can't place, wherever it stopped (before checkout, or in it): it
-   is never timed, and its failure counts, as on the before side. An ancestor
+   run that stopped before that line (before checkout, or in it): it is
+   never timed, and its failure counts, as on the before side. `--base`
+   leaves out runs it can't place on the branch, fork runs included, on both
+   sides and whether they passed or failed (`references/measuring.md`). An ancestor
    fix may have been reverted since: also check that no revert of it is an ancestor of that run's BASE. Leave out pull requests
    into other branches, workflows that check out the pull request's head
    instead of the merge commit, and `push` runs on branches without the fix
@@ -152,7 +154,7 @@ If the change touched tests or test setup, run the break-it probe (step
    ```sh
    python3 scripts/measure.py compare --before .joggernaut/before-fix.jsonl \
      --after .joggernaut/after-fix.jsonl --workflow "CI" --event pull_request \
-     --label ubuntu-latest [--job "test"]
+     --base main --label ubuntu-latest [--job "test"]
    ```
 
    It prints the medians, the slowest runs (below 20 runs a side, the

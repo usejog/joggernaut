@@ -414,6 +414,21 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "compare", "--before", t + "/sb", "--after", t + "/nogroup", "--label", "ubuntu-latest", "--json"])
     if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_enough_runs":
         bad.append("compare: a job with no labels counted as on the runner\n" + r.stdout + r.stderr)
+    # --base leaves out unplaced runs whether they passed or failed: with placed and
+    # unplaced runs in the same proportions, the failure rate is the placed runs' rate.
+    def based(src, dst, base_id):
+        rows2 = []
+        for i, x in enumerate(json.loads(l) for l in open(src) if l.strip()):
+            for placed in (True, False):
+                rows2.append(dict(x, id=base_id + 2 * i + placed, pull_request_bases=["main"] if placed else []))
+        open(dst, "w").write("".join(json.dumps(x) + "\n" for x in rows2))
+    based(t + "/sb1", t + "/baseb", 60000)
+    based(t + "/fa6", t + "/basea", 70000)
+    r = run([M, "compare", "--before", t + "/baseb", "--after", t + "/basea", "--base", "main", "--json"])
+    v = json.loads(r.stdout) if r.returncode == 0 else {}
+    if v.get("failed_before") != [1, 6] or v.get("failed_after") != [6, 11] or v.get("before_runs") != 5:
+        bad.append("compare: --base changed the failure rate or the timed runs: %r %r %r\n%s"
+                   % (v.get("failed_before"), v.get("failed_after"), v.get("before_runs"), r.stderr))
     # Under --label, a run where no job shows a runner can't be one of the 5.
     nolab = [json.loads(l) for l in open(t + "/sa") if l.strip()][:4]
     extra = dict(nolab[0], id=4999)
@@ -445,9 +460,10 @@ runs = json.load(open(os.environ["FAKE_RUNS"]))
 path = sys.argv[-1]
 if path == "rate_limit":
     print(json.dumps({"resources": {"core": {"remaining": 5000, "reset": 0}}}))
-elif "/commits/" in path:
-    sha = re.search(r"/commits/([^/]+)/pulls", path).group(1)
-    print(json.dumps(json.loads(os.environ.get("FAKE_PULLS") or "{}").get(sha, [])))
+elif "/pulls?" in path:
+    from urllib.parse import unquote
+    head = unquote(re.search(r"[?&]head=([^&]+)", path).group(1))
+    print(json.dumps(json.loads(os.environ.get("FAKE_PULLS") or "{}").get(head, [])))
 elif "/jobs" in path:
     rid = int(re.search(r"/runs/(\d+)/jobs", path).group(1))
     print(json.dumps([{"jobs": [r for r in runs if r["id"] == rid][0]["jobs"]}]))
@@ -522,18 +538,20 @@ with tempfile.TemporaryDirectory() as t:
     ids = [json.loads(l)["id"] for l in open(out)] if os.path.exists(out) else []
     if r.returncode != 0 or len(ids) != 120 or len(set(ids)) != 120:
         bad.append("fetch: overlapping pages gave %d runs, %d distinct\n%s" % (len(ids), len(set(ids)), r.stderr))
-    # A closed pull request drops off its runs: fetch finds its branch from the commit.
-    shut = [dict(r, status="completed", pull_requests=[]) for r in rows]
+    # A closed pull request drops off its runs: fetch finds its branch from the run's head
+    # branch, in any state; a fork's run records none and is never looked up.
+    shut = [dict(r, status="completed", pull_requests=[], head_repository={"full_name": "o/r"}) for r in rows]
+    shut[1]["head_repository"] = {"full_name": "fork/r"}
     json.dump(shut, open(t + "/shut.json", "w"))
-    pulls = {shut[0]["head_sha"]: [{"head": {"ref": "elsewhere"}, "base": {"ref": "release"}},
-                                   {"head": {"ref": shut[0]["head_branch"]}, "base": {"ref": "main"}}]}
+    pulls = {"o:" + shut[0]["head_branch"]: [{"base": {"ref": "main"}}],
+             "o:" + shut[1]["head_branch"]: [{"base": {"ref": "main"}}]}
     out = t + "/out/shut.jsonl"
     r = subprocess.run([sys.executable, M, "fetch", "--repo", "o/r", "--workflow", "ci.yml", "--out", out] + list(window),
                        cwd=t, env=dict(env, FAKE_RUNS=t + "/shut.json", FAKE_PULLS=json.dumps(pulls)),
                        capture_output=True, text=True)
     got = [json.loads(l)["pull_request_bases"] for l in open(out)] if os.path.exists(out) else []
     if r.returncode != 0 or not got or got[0] != ["main"] or got[1] != []:
-        bad.append("fetch: a closed pull request's branch wasn't found from its commit: %r\n%s" % (got[:2], r.stderr))
+        bad.append("fetch: a closed pull request's branch wasn't found, or a fork's was: %r\n%s" % (got[:2], r.stderr))
     r, n = fetch(["completed"] * 5 + ["queued"])
     if r.returncode != 0 or n != 5:
         bad.append("fetch: without a window, the finished runs should be written (%r runs)\n%s" % (n, r.stderr))

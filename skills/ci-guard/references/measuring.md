@@ -52,23 +52,23 @@ If either `fetch` refuses, stop: anything after it would read an older file.
 Then keep the runs that tested the fix's branch, judged from each run's own
 record the same way on both sides:
 
-- A `pull_request` run: keep it if the pull request targeted the branch
-  the fix merged into. `fetch` records the branch GitHub lists with the run
-  (`pull_request_bases`, looked up from the commit once the pull request
-  has closed). If no branch is recorded, leave a run that passed out; a
-  failed one stays (below). It tests its merge commit with the base
-  as it was when the run started: the `HEAD is now at … Merge HEAD into
-  BASE` line `actions/checkout` prints names that base.
-- A `push` run tests its own commit: keep it if the push was to that
-  branch.
+- The branch: `compare --base BRANCH` (the branch the fix merged into)
+  keeps only pull request runs whose recorded target is that branch alone
+  (`fetch` records it, looking it up by the run's head branch once the pull
+  request has closed) and pushes to it. Everything else is left out on
+  both sides whether it passed or failed, fork runs included (closed fork
+  pull requests can't be found), so a gap in the record can't shift the
+  failure rate.
+- A pull request run tests its merge commit with the base as it was when
+  the run started: the `HEAD is now at … Merge HEAD into BASE` line
+  `actions/checkout` prints names that base.
 - Leave out workflows that check out the pull request's head instead of
   the merge commit.
 - On the after side, also require the fix in that base or commit
   (`git merge-base --is-ancestor FIX_SHA BASE`), with no revert of it there.
-- A run that passed but can't be placed (no such line) is unknown: leave it
-  out. A failed run you can't place stays on both sides, wherever it
-  stopped (before checkout, or in it): it is never timed, and its failure
-  counts.
+- On the after side, a run that passed but prints no such line is unknown:
+  leave it out. A failed run that stopped before that line (before
+  checkout, or in it) stays: it is never timed, and its failure counts.
 
 Write the kept runs, one line each as `fetch` wrote them, to
 `before-fix.jsonl` and `after-fix.jsonl`, and compare those, with the
@@ -76,7 +76,7 @@ same `--event` as the fetches (`pull_request` unless you gave another):
 
 ```sh
 MEASURE compare --before .joggernaut/before-fix.jsonl --after .joggernaut/after-fix.jsonl \
-  --event pull_request --label RUNNER-LABEL [--job NAME] &&  # always pass the runner label; add --job when jobs run on different runners
+  --event pull_request --base main --label RUNNER-LABEL [--job NAME] &&  # always pass the runner label; add --job when jobs run on different runners
 MEASURE tests --before JUNIT-BEFORE --after JUNIT-AFTER   # each downloaded into a new, empty folder
 ```
 
