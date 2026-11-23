@@ -1,0 +1,4 @@
+# Cache lines from the test job's log, as the job logs show them.
+# Every pull-request run in the history shows the same two lines.
+Cache not found for input keys: pnpm-Linux-6f1c2e0b9d
+Cache saved with key: pnpm-Linux-6f1c2e0b9d

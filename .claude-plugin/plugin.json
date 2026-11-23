@@ -1,0 +1,20 @@
+{
+  "name": "jog",
+  "version": "0.1.0",
+  "description": "Find out why your pull requests wait on CI, then let your coding agent fix the biggest cause with every test still running. Start with /jog:ci-diagnose: a read-only report of where GitHub Actions time goes, ranked by wait saved.",
+  "author": {
+    "name": "Machine Intelligence Company",
+    "url": "https://github.com/usejog"
+  },
+  "homepage": "https://github.com/usejog/joggernaut",
+  "repository": "https://github.com/usejog/joggernaut",
+  "license": "MIT",
+  "keywords": [
+    "ci",
+    "github-actions",
+    "flaky-tests",
+    "slow-ci",
+    "caching",
+    "agent-skills"
+  ]
+}

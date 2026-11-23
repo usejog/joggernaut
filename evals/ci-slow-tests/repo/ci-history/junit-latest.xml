@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<testsuites>
+  <testsuite name="unittest" tests="17" time="7.513">
+    <testcase classname="tests.test_cart.CartTest" name="test_empty_total" time="0.001"/>
+    <testcase classname="tests.test_cart.CartTest" name="test_single_item" time="0.501"/>
+    <testcase classname="tests.test_cart.CartTest" name="test_quantities" time="1.001"/>
+    <testcase classname="tests.test_cart.CartTest" name="test_add_twice" time="0.501"/>
+    <testcase classname="tests.test_cart.CartTest" name="test_remove" time="0.501"/>
+    <testcase classname="tests.test_cart.CartTest" name="test_discount" time="1.001"/>
+    <testcase classname="tests.test_cart.CartTest" name="test_discount_rounds_down" time="0.501"/>
+    <testcase classname="tests.test_cart.CartTest" name="test_unknown_sku" time="0.501"/>
+    <testcase classname="tests.test_cart.CartTest" name="test_bad_quantity" time="0.001"/>
+    <testcase classname="tests.test_cart.CartTest" name="test_many_items" time="2.001"/>
+    <testcase classname="tests.test_prices.PriceServerTest" name="test_known_price" time="0.501"/>
+    <testcase classname="tests.test_prices.PriceServerTest" name="test_unknown_price" time="0.501"/>
+    <testcase classname="tests.test_prices.PriceServerTest" name="test_custom_prices" time="0.001"/>
+    <testcase classname="tests.test_format.FormatTest" name="test_whole" time="0.000"/>
+    <testcase classname="tests.test_format.FormatTest" name="test_small" time="0.000"/>
+    <testcase classname="tests.test_format.FormatTest" name="test_negative" time="0.000"/>
+    <testcase classname="tests.test_format.FormatTest" name="test_zero" time="0.000"/>
+  </testsuite>
+</testsuites>

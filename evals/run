@@ -1,0 +1,48 @@
+#!/bin/sh
+# Run one skill's eval: copy its sample repository to a fresh directory, let an
+# agent work on it headless, then decide pass or fail with the case's check.py.
+#
+#   evals/run <skill> [claude|codex]
+#
+# claude: loads this repository as a plugin (--plugin-dir), with no MCP servers.
+# codex:  expects the skills installed for Codex (npx skills add ... -a codex).
+# The agent starts in the copy but runs without permission prompts, and this
+# script is not a sandbox: run it inside a disposable VM or container.
+set -eu
+if [ "${EVALS_IN_DISPOSABLE_MACHINE:-}" != 1 ]; then
+  echo "evals/run lets an agent run commands without asking. Run it inside a" >&2
+  echo "disposable VM or container, with EVALS_IN_DISPOSABLE_MACHINE=1 set." >&2
+  exit 2
+fi
+AGENT_FAILED=0
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+SKILL=${1:?usage: evals/run <skill> [claude|codex]}
+AGENT=${2:-claude}
+CASE="$ROOT/evals/$SKILL"
+[ -f "$CASE/prompt.md" ] || { echo "no eval for $SKILL" >&2; exit 2; }
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/joggernaut-eval-$SKILL.XXXXXX")
+cp -R "$CASE/repo/." "$WORK/"
+(
+  cd "$WORK"
+  git init -q && git add -A &&
+    git -c user.name=eval -c user.email=eval@example.invalid commit -qm sample &&
+    git tag sample
+)
+PROMPT=$(cat "$CASE/prompt.md")
+LOG="$WORK.log"
+echo "eval $SKILL with $AGENT in $WORK"
+case "$AGENT" in
+  claude)
+    (cd "$WORK" && claude -p "$PROMPT" --plugin-dir "$ROOT" --strict-mcp-config \
+      --setting-sources project --no-session-persistence \
+      --permission-mode bypassPermissions --max-turns 80 --output-format text) >"$LOG" 2>&1 || AGENT_FAILED=$?
+    ;;
+  codex)
+    codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \
+      -C "$WORK" "$PROMPT" >"$LOG" 2>&1 || AGENT_FAILED=$?
+    ;;
+  *) echo "unknown agent $AGENT" >&2; exit 2 ;;
+esac
+echo "agent log: $LOG"
+if [ "${AGENT_FAILED:-0}" != 0 ]; then echo "FAIL: the agent exited with status $AGENT_FAILED"; exit 1; fi
+python3 "$CASE/check.py" "$WORK"

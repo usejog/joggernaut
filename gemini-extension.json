@@ -1,0 +1,5 @@
+{
+  "name": "joggernaut",
+  "version": "0.1.0",
+  "description": "Find out why your pull requests wait on CI, then let your coding agent fix the biggest cause with every test still running."
+}

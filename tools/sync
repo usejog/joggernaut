@@ -1,0 +1,19 @@
+#!/bin/sh
+# Copy the one source of shared files into every skill.
+set -eu
+cd "$(dirname "$0")/.."
+python3 - <<'PY'
+import glob, re, shutil
+rules = re.search(r"<!-- rules:start -->.*?<!-- rules:end -->", open("snippets/AGENTS.md").read(), re.S).group(0)
+for p in glob.glob("skills/*/SKILL.md") + ["AGENTS.md"]:
+    s = open(p).read()
+    open(p, "w").write(re.sub(r"<!-- rules:start -->.*?<!-- rules:end -->", lambda m: rules, s, flags=re.S))
+for d in glob.glob("skills/*/scripts"):
+    if d != "skills/ci-measure/scripts":
+        shutil.copy("skills/ci-measure/scripts/measure.py", d + "/measure.py")
+shutil.copy("snippets/AGENTS.md", "skills/ci-guard/references/agents-snippet.md")
+for d in glob.glob("skills/*/references"):
+    if d != "skills/ci-measure/references":
+        shutil.copy("skills/ci-measure/references/measuring.md", d + "/measuring.md")
+PY
+echo synced

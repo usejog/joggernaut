@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" fill="none" stroke="#1f2328" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Joggernaut">
+  <circle cx="68" cy="60" r="40"/>
+  <circle cx="68" cy="60" r="31"/>
+  <path d="M68 20 L68 29 M68 91 L68 100 M28 60 L37 60 M99 60 L108 60 M39.7 31.7 L46.1 38.1 M89.9 81.9 L96.3 88.3 M39.7 88.3 L46.1 81.9 M89.9 38.1 L96.3 31.7"/>
+  <path d="M8 46 L22 46 M4 60 L22 60 M8 74 L22 74"/>
+  <path d="M54 60 L64 70 L84 49" stroke-width="5"/>
+</svg>

@@ -1,0 +1,18 @@
+{
+  "name": "joggernaut",
+  "description": "Joggernaut: find out why your pull requests wait on CI, then let your coding agent fix the biggest cause with every test still running.",
+  "owner": {
+    "name": "Machine Intelligence Company",
+    "url": "https://github.com/usejog"
+  },
+  "plugins": [
+    {
+      "name": "jog",
+      "source": "./",
+      "description": "Start with /jog:ci-diagnose: a read-only report of where your GitHub Actions time goes, ranked by wait saved. Six more skills fix the causes and measure each fix.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "homepage": "https://github.com/usejog/joggernaut"
+    }
+  ]
+}

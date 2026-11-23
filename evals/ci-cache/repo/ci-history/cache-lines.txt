@@ -1,0 +1,95 @@
+# Cache lines from each run's test job, as the job logs show them.
+
+run 8000 (feature-0, PR #300):
+  Cache not found for input keys: pnpm-Linux-9b2d71c4e0, pnpm-Linux-
+  Cache saved with key: pnpm-Linux-9b2d71c4e0
+run 8001 (feature-0, PR #300):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8002 (feature-0, PR #300):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8003 (feature-1, PR #301):
+  Cache not found for input keys: pnpm-Linux-9b2d71c4e0, pnpm-Linux-
+  Cache saved with key: pnpm-Linux-9b2d71c4e0
+run 8004 (feature-1, PR #301):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8005 (feature-1, PR #301):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8006 (feature-2, PR #302):
+  Cache not found for input keys: pnpm-Linux-9b2d71c4e0, pnpm-Linux-
+  Cache saved with key: pnpm-Linux-9b2d71c4e0
+run 8007 (feature-2, PR #302):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8008 (feature-2, PR #302):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8009 (feature-3, PR #303):
+  Cache not found for input keys: pnpm-Linux-9b2d71c4e0, pnpm-Linux-
+  Cache saved with key: pnpm-Linux-9b2d71c4e0
+run 8010 (feature-3, PR #303):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8011 (feature-3, PR #303):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8012 (feature-4, PR #304):
+  Cache not found for input keys: pnpm-Linux-9b2d71c4e0, pnpm-Linux-
+  Cache saved with key: pnpm-Linux-9b2d71c4e0
+run 8013 (feature-4, PR #304):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8014 (feature-4, PR #304):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8015 (feature-5, PR #305):
+  Cache not found for input keys: pnpm-Linux-9b2d71c4e0, pnpm-Linux-
+  Cache saved with key: pnpm-Linux-9b2d71c4e0
+run 8016 (feature-5, PR #305):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8017 (feature-5, PR #305):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8018 (feature-6, PR #306):
+  Cache not found for input keys: pnpm-Linux-9b2d71c4e0, pnpm-Linux-
+  Cache saved with key: pnpm-Linux-9b2d71c4e0
+run 8019 (feature-6, PR #306):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8020 (feature-6, PR #306):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8021 (feature-7, PR #307):
+  Cache not found for input keys: pnpm-Linux-9b2d71c4e0, pnpm-Linux-
+  Cache saved with key: pnpm-Linux-9b2d71c4e0
+run 8022 (feature-7, PR #307):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8023 (feature-7, PR #307):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8024 (feature-8, PR #308):
+  Cache not found for input keys: pnpm-Linux-9b2d71c4e0, pnpm-Linux-
+  Cache saved with key: pnpm-Linux-9b2d71c4e0
+run 8025 (feature-8, PR #308):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8026 (feature-8, PR #308):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8027 (feature-9, PR #309):
+  Cache not found for input keys: pnpm-Linux-9b2d71c4e0, pnpm-Linux-
+  Cache saved with key: pnpm-Linux-9b2d71c4e0
+run 8028 (feature-9, PR #309):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+run 8029 (feature-9, PR #309):
+  Cache restored from key: pnpm-Linux-9b2d71c4e0
+  Cache hit occurred on the primary key pnpm-Linux-9b2d71c4e0, not saving cache.
+
+# The repository's caches (gh api repos/OWNER/NAME/actions/caches):
+#   key pnpm-Linux-9b2d71c4e0, ref refs/pull/300/merge ... refs/pull/309/merge (one per PR), none on refs/heads/main

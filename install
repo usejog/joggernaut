@@ -1,0 +1,104 @@
+#!/bin/sh
+# Joggernaut installer, for machines without Node.
+#   ./install              copy the skills to ~/.agents/skills
+#   ./install --claude     also add the Claude Code plugin (only if you use Claude Code)
+#   ./install --uninstall  remove what this script installed
+# It copies (never links), marks each folder it installs, and never replaces
+# or removes a folder it didn't install. A copy edited since it was installed
+# is moved aside, never deleted, and the script says where.
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+DEST="${HOME}/.agents/skills"
+MARK=".installed-by-joggernaut"
+MODE="${1:-install}"
+
+# Every entry with its type, mode and contents (or link target), to tell an
+# untouched copy from an edited one: a changed file, an added link or a
+# changed permission all count as edits.
+sums() {
+  (cd "$1" && find . ! -name "$MARK" | LC_ALL=C sort | while IFS= read -r f; do
+    if [ -L "$f" ]; then
+      printf 'link %s -> %s\n' "$f" "$(readlink "$f")"
+    elif [ -f "$f" ]; then
+      printf 'file %s %s %s\n' "$(ls -ld "$f" | cut -c1-10)" "$(cksum < "$f")" "$f"
+    else
+      printf 'other %s %s\n' "$(ls -ld "$f" | cut -c1-10)" "$f"
+    fi
+  done)
+}
+
+# Move an installed copy aside if someone edited it since this script wrote it.
+keep_edits() {
+  if [ -d "$DEST/$1" ] && [ "$(sums "$DEST/$1")" != "$(cat "$DEST/$1/$MARK")" ]; then
+    b="$DEST/.$1.edited.$(date +%Y%m%d%H%M%S)"
+    mv "$DEST/$1" "$b"
+    echo "$DEST/$1 had local edits; moved them to $b" >&2
+  fi
+}
+
+skills() {
+  for d in "$HERE"/skills/ci-*/; do
+    [ -f "$d/SKILL.md" ] && basename "$d"
+  done
+}
+
+install_skills() {
+  mkdir -p "$DEST"
+  for s in $(skills); do
+    if [ -e "$DEST/$s" ] && [ ! -f "$DEST/$s/$MARK" ]; then
+      echo "skipped $s: $DEST/$s exists and wasn't installed by this script" >&2
+      continue
+    fi
+    b=""
+    # Stage the new copy first, so a failed copy leaves the installed one alone.
+    tmp="$DEST/.$s.new.$$"
+    if ! cp -R "$HERE/skills/$s" "$tmp" || ! sums "$tmp" > "$DEST/.$s.sums.$$" ||
+       ! mv "$DEST/.$s.sums.$$" "$tmp/$MARK"; then
+      rm -f "$DEST/.$s.sums.$$"
+      rm -rf "$tmp"
+      echo "could not copy $s; left $DEST/$s as it was" >&2
+      exit 1
+    fi
+    keep_edits "$s"
+    old="$DEST/.$s.old.$$"
+    if [ -e "$DEST/$s" ]; then mv "$DEST/$s" "$old"; fi
+    if mv "$tmp" "$DEST/$s"; then
+      rm -rf "$old"
+    else
+      [ -e "$old" ] && mv "$old" "$DEST/$s"
+      if [ -e "$DEST/$s" ]; then
+        echo "could not install $s; left $DEST/$s as it was" >&2
+      else
+        echo "could not install $s${b:+; your edited copy is in $b}" >&2
+      fi
+      exit 1
+    fi
+    echo "installed $s in $DEST/$s"
+  done
+}
+
+case "$MODE" in
+  install|--claude)
+    install_skills
+    if [ "$MODE" = --claude ]; then
+      claude plugin marketplace add "$HERE"
+      claude plugin install jog@joggernaut
+      echo "added the Claude Code plugin jog@joggernaut (run /reload-plugins in open sessions)"
+    fi
+    echo "done. Ask your agent: diagnose my CI"
+    ;;
+  --uninstall|uninstall)
+    for s in $(skills); do
+      if [ -f "$DEST/$s/$MARK" ]; then
+        keep_edits "$s"
+        if [ -d "$DEST/$s" ]; then rm -rf "${DEST:?}/$s" && echo "removed $DEST/$s"; fi
+      fi
+    done
+    echo "if you added the Claude Code plugin: claude plugin uninstall jog@joggernaut"
+    ;;
+  *)
+    echo "usage: $0 [--claude | --uninstall]" >&2
+    exit 2
+    ;;
+esac

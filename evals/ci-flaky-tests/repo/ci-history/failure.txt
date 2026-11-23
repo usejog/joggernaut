@@ -1,0 +1,6 @@
+# The failing step's last lines, from each failed attempt (the same every time):
+FAIL: test_burst_sends_one_notification (tests.test_debounce.DebounceTest)
+Traceback (most recent call last):
+  File "tests/test_debounce.py", line 14, in test_burst_sends_one_notification
+    self.assertEqual(sent, [4])
+AssertionError: Lists differ: [] != [4]

@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<testsuites>
+  <testsuite name="billing" tests="12">
+    <testcase classname="tests.test_billing" name="test_invoice_total" time="57.79"/>
+    <testcase classname="tests.test_billing" name="test_invoice_tax" time="19.25"/>
+    <testcase classname="tests.test_billing" name="test_invoice_currency" time="38.33"/>
+    <testcase classname="tests.test_billing" name="test_refund_full" time="28.09"/>
+    <testcase classname="tests.test_billing" name="test_refund_partial" time="5.99"/>
+    <testcase classname="tests.test_billing" name="test_refund_rounding" time="35.69"/>
+    <testcase classname="tests.test_billing" name="test_coupon_percent" time="12.73"/>
+    <testcase classname="tests.test_billing" name="test_coupon_fixed" time="8.12"/>
+    <testcase classname="tests.test_billing" name="test_coupon_expired" time="6.85"/>
+    <testcase classname="tests.test_billing" name="test_ledger_balance" time="13.86"/>
+    <testcase classname="tests.test_billing" name="test_ledger_reversal" time="10.27"/>
+    <testcase classname="tests.test_billing" name="test_webhook_signature" time="39.93"/>
+  </testsuite>
+</testsuites>
