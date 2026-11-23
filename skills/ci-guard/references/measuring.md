@@ -43,16 +43,58 @@ MEASURE compare --before .joggernaut/before.jsonl --after .joggernaut/after.json
 MEASURE tests --before JUNIT-BEFORE --after JUNIT-AFTER   # each downloaded into a new, empty folder
 ```
 
-`compare` needs 20 successful comparable runs a side and reports the failure
-rate on both sides. If more runs fail after than chance explains (a one-sided
-test at 5%), the result is not valid; a smaller rise is printed, and you
-report it. Report
-its verdict as printed. `tests` fails if any test stopped running, was newly
-skipped or newly fails.
+`compare` needs at least 5 successful comparable runs a side and reports the
+failure rate on both sides. If more runs fail after than chance explains (a
+one-sided test at 5%), the result is not valid; a smaller rise is printed, and
+you report it. Report its verdict as printed, with the run count it names, for
+example "median faster (5 runs a side)". `tests` fails if any test stopped
+running, was newly skipped or newly fails.
 
-**If there aren't 20 runs yet**, say "not enough runs yet", write the exact
-commands above into the pull request so anyone can finish the measurement,
-and stop. Never trigger runs to fill the count without asking: runs cost money.
+**If there aren't 5 runs a side yet**, say "not enough runs yet", write the
+exact commands above into the pull request so anyone can finish the
+measurement, and stop. Never trigger runs to fill the count without asking:
+runs cost money.
+
+**If the verdict is "no measurable change yet"**, the change may still be
+real but smaller than the run-to-run noise at this count. Say so, and measure
+again when more runs have finished; more runs narrow the interval.
+
+## How compare decides, and why 5
+
+The verdict comes from the Hodges-Lehmann estimate of how far the times moved
+(the median of every after-minus-before difference) and its exact 95%
+Mann-Whitney confidence interval (Bauer, 1972): two of those differences,
+picked by the exact distribution of the rank-sum count under "no change".
+"Median faster" means the whole interval is below zero; "median slower",
+above; anything else is "no measurable change yet".
+
+We chose it over a bootstrap and over a permutation test on the medians:
+
+- A bootstrap interval is a large-sample approximation. With 5 runs a side it
+  is too narrow, so it would claim speedups that aren't there.
+- The exact interval holds its 95% at any count. Its "faster" is exactly a
+  two-sided rank-sum test at 5% (that the after runs tend to be faster), so it
+  doesn't need the times to be normal or the change to be a pure shift. Read
+  as a size, the interval assumes the change moves times without reshaping
+  them. Ties, common with whole-second times, only make it more cautious.
+- A permutation test on the medians gives a yes or no, not a size, and its
+  interval would need a search over shifts. The rank interval gives both.
+
+The floor follows from the method. With 3 runs a side no 95% interval can
+rule out "no change": every after run beating every before run happens by
+chance 1 time in 20, and a 95% interval allows 1 in 40 on each side. With 4 a
+side it can, but only if all 16 pairs agree.
+At 5 a side, 2 of the 25 pairs may disagree, so 5 is the fewest that leaves
+room for ordinary noise. `--min-runs` refuses less than 5 and takes more.
+
+Few runs still cost something, and the output says what:
+
+- The slowest 5% of under 20 runs is just the slowest run, so below 20 runs a
+  side it is printed as "slowest run". Either is marked provisional below
+  100 runs a side.
+- The failure-rate test has little power at 5 a side: 0 failures in 5 before
+  against 4 in 5 after is the smallest rise it calls beyond chance. Name the
+  cause of every failure after the change whatever the test says.
 
 ## Break-it probe
 

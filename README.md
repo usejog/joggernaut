@@ -42,9 +42,11 @@ For a person: bigger runners (cost money), a merge queue
 ```
 
 Say yes to a fix and the matching skill opens one pull request for it. Once
-20 runs have finished after the merge, ask your agent to **measure the fix**:
-`ci-measure` compares them with 20 or more from before, and checks by name,
-from the JUnit reports CI saves, that every test still ran. Where CI saves no
+5 runs have passed after the merge, ask your agent to **measure the fix**:
+`ci-measure` compares them with the runs from before, says how many runs its
+verdict rests on, and says when more runs would settle a small change. It
+also checks by name, from the JUnit reports CI saves, that every test still
+ran. Where CI saves no
 report it can only count tests, and says the check is unverified.
 
 ## Start
@@ -85,7 +87,7 @@ $ python3 ../../../skills/ci-measure/scripts/measure.py compare \
     --before ci-history/before.jsonl --after ci-history/after.jsonl
 before: 24 runs, median 11m 10s, slowest 5% 11m 39s
 after:  24 runs, median 7m 54s, slowest 5% 8m 18s
-verdict: median faster
+verdict: median faster (24 runs a side)
 $ python3 ../../../skills/ci-measure/scripts/measure.py tests \
     --before ci-history/junit-before --after ci-history/junit-after
 tests that ran: before 12, after 11
@@ -118,8 +120,8 @@ skill links its sources in `references/evidence.md`.
 
 ## The four rules every skill follows
 
-1. **Measure CI's own runs, before and after.** At least 20 comparable runs a
-   side. A local timing is never the result.
+1. **Measure CI's own runs, before and after.** At least 5 comparable runs a
+   side; more when the change is small. A local timing is never the result.
 2. **Keep every test running.** Don't hide a failure with a retry, a wider
    timeout, a skip or fewer workers. No test may stop running or newly fail.
 3. **One fix per pull request,** with the diff, the baseline and the
@@ -136,7 +138,7 @@ repository's AGENTS.md or CLAUDE.md.
 | Skill | Use it when | What it measures |
 |---|---|---|
 | [ci-diagnose](skills/ci-diagnose/SKILL.md) | "Why is CI slow?" Start here; read-only | PR wait; waiting, setup and running per job; minutes in failed, timed-out or cancelled runs and in catch-up runs |
-| [ci-measure](skills/ci-measure/SKILL.md) | Before a fix, and "did that help?" | 20+ runs a side, median and slowest 5%; the tests that ran, by name |
+| [ci-measure](skills/ci-measure/SKILL.md) | Before a fix, and "did that help?" | 5+ runs a side, median with an exact interval, and the tail; the tests that ran, by name |
 | [ci-cache](skills/ci-cache/SKILL.md) | Dependencies reinstall on every PR; a cache never hits | Hit rate per cache key; setup seconds per job |
 | [ci-workflow](skills/ci-workflow/SKILL.md) | Short jobs each repeat setup; old runs keep going after a push | PR wait; runner-minutes per PR |
 | [ci-slow-tests](skills/ci-slow-tests/SKILL.md) | The test step is most of the wait | Suite time; slowest shard; how many tests ran |
@@ -252,7 +254,7 @@ before editing a tracked file or starting a fix.
 
 ```text
  ci-diagnose ──► ranked causes ──► one fixer skill ──► pull request ──► ci-measure
- read-only       wait saved a      cache, workflow,     diff + baseline   20+ runs a side,
+ read-only       wait saved a      cache, workflow,     diff + baseline   5+ runs a side,
  150 PR runs     day, slowest      slow tests, flaky,   (provisional)     tests compared
                  path only         guard                                  by name
 ```

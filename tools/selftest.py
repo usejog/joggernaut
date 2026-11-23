@@ -137,6 +137,38 @@ except OverflowError:
     bad.append("fails_rose: overflows on large samples")
 if not mm.fails_rose((0, 20), (6, 20)):
     bad.append("fails_rose: 0/20 against 6/20 should count as a rise")
+if not mm.fails_rose((0, 5), (4, 5)) or mm.fails_rose((0, 5), (3, 5)):
+    bad.append("fails_rose: at 5 a side, 0 against 4 failures is the smallest rise beyond chance")
+# The exact interval. The Mann-Whitney null counts match brute force over every order.
+import itertools
+import math
+from fractions import Fraction
+for m in range(1, 7):
+    for n in range(1, 7):
+        want = [0] * (m * n + 1)
+        for after_at in itertools.combinations(range(m + n), n):
+            # u counts (before, after) pairs where the after run is the slower one
+            want[sum(1 for p in after_at for q in range(m + n) if q < p and q not in after_at)] += 1
+        if mm.mann_whitney_counts(m, n, m * n) != want:
+            bad.append("mann_whitney_counts(%d, %d) differs from brute force" % (m, n))
+# Textbook two-sided 5% critical values of U (Mann and Whitney's table): reject when U <= c.
+import random
+rng = random.Random(7)
+for (m, n), c in {(4, 4): 0, (4, 6): 2, (4, 8): 4, (5, 5): 2, (5, 7): 5, (5, 10): 8, (6, 6): 5,
+                  (7, 7): 8, (8, 8): 13, (10, 10): 23, (20, 20): 127}.items():
+    xs, ys = [rng.random() for _ in range(m)], [rng.random() for _ in range(n)]
+    est, lo, hi, conf = mm.shift_interval(xs, ys)
+    d = sorted(y - x for x in xs for y in ys)
+    if (lo, hi) != (d[c], d[-c - 1]):
+        bad.append("shift_interval: %d and %d a side should use U <= %d" % (m, n, c))
+if mm.shift_interval([1, 2, 3], [4, 5, 6])[1:3] != (-math.inf, math.inf):
+    bad.append("shift_interval: 3 a side can't give a 95% interval")
+# A published worked example: X = (0, 2.2, 5.5, 10.1), Y = (3.2, 7.7, 12.4, 18.9),
+# 90% interval [-2.4, 16.7] at coverage 1 - 4/70 (clinicalbiostats.com, "Hodges-Lehmann
+# Estimates and Rank-Based Intervals"); the median of the 16 printed differences is 6.2.
+est, lo, hi, conf = mm.shift_interval([0, 2.2, 5.5, 10.1], [3.2, 7.7, 12.4, 18.9], Fraction(1, 10))
+if (round(est, 6), round(lo, 6), round(hi, 6), round(conf, 6)) != (6.2, -2.4, 16.7, round(1 - 4 / 70, 6)):
+    bad.append("shift_interval: the worked example gives %r" % ((est, lo, hi, conf),))
 k = mm.KEY.search("Cache not found for input keys: pnpm-Linux-9b2d, pnpm-Linux-")
 if not k or k.group(1) != "pnpm-Linux-9b2d":
     bad.append("cachelog: key not read from 'input keys:'")
@@ -205,6 +237,25 @@ r = run([M, "compare", "--before", "ci-history/before.jsonl", "--after", "ci-his
          "--min-runs", "30"], cwd=E + "/ci-measure/repo")
 if "not enough runs yet" not in r.stdout:
     bad.append("compare: expected not enough runs\n" + r.stdout)
+# Five runs a side are enough for a verdict, named with its count; four are not.
+with tempfile.TemporaryDirectory() as t:
+    for name, src, keep in (("b5", "before", 5), ("a5", "after", 5), ("b4", "before", 4), ("a4", "after", 4)):
+        lines = [l for l in open(E + "/ci-measure/repo/ci-history/%s.jsonl" % src) if l.strip()][:keep]
+        open(t + "/" + name, "w").write("".join(lines))
+    lines = [json.loads(l) for l in open(t + "/b5")]
+    open(t + "/same5", "w").write("".join(json.dumps(dict(x, id=x["id"] + 10 ** 9)) + "\n" for x in lines))
+    r = run([M, "compare", "--before", t + "/b5", "--after", t + "/a5"])
+    if "verdict: median faster (5 runs a side)" not in r.stdout or "slowest run" not in r.stdout:
+        bad.append("compare: 5 runs a side should give a verdict with its count\n" + r.stdout + r.stderr)
+    r = run([M, "compare", "--before", t + "/b5", "--after", t + "/same5"])
+    if "verdict: no measurable change yet with 5 a side; more runs can tighten this" not in r.stdout:
+        bad.append("compare: the same 5 runs should say more runs can tighten it\n" + r.stdout + r.stderr)
+    r = run([M, "compare", "--before", t + "/b4", "--after", t + "/a4"])
+    if "verdict: not enough runs yet" not in r.stdout:
+        bad.append("compare: 4 runs a side should not get a verdict\n" + r.stdout + r.stderr)
+    r = run([M, "compare", "--before", t + "/b4", "--after", t + "/a4", "--min-runs", "4"])
+    if r.returncode == 0:
+        bad.append("compare: --min-runs 4 should be refused\n" + r.stdout)
 r = run([M, "tests", "--before", "ci-history/junit-before", "--after", "ci-history/junit-after"],
         cwd=E + "/ci-measure/repo")
 if r.returncode == 0 or "test_refund_rounding" not in r.stdout:
