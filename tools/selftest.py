@@ -2,6 +2,7 @@
 """Check the eval harness without an agent: every check.py fails on its
 untouched sample, and measure.py gives the expected answers on the samples."""
 import glob
+import re
 import os
 import shutil
 import subprocess
@@ -702,18 +703,174 @@ r = two_reports('<testsuites><testsuite name="outer/inner"><testcase classname="
 if r.returncode == 0:
     bad.append("tests: a suite named outer/inner passed for inner nested in outer\n" + r.stdout)
 
+# Suite errors aren't tests that ran, and a second one, or a declared one, still counts
+r = two_reports('<testsuite name="s"><error/><testcase classname="k" name="x"><skipped/></testcase></testsuite>',
+                '<testsuite name="s"><error/><testcase classname="k" name="x"><skipped/></testcase></testsuite>')
+if r.returncode == 0:
+    bad.append("tests: reports where only a suite error 'ran' were called kept\n" + r.stdout)
+r = two_reports('<testsuite name="s" errors="0"><testcase classname="k" name="x"/></testsuite>',
+                '<testsuite name="s" errors="1"><testcase classname="k" name="x"/></testsuite>')
+if r.returncode == 0:
+    bad.append("tests: a declared suite error no case explains passed\n" + r.stdout)
+r = run([M, "flakebound", "--failures", "3", "--runs", "1100"])
+if r.returncode != 0:
+    bad.append("flakebound: large run counts must not overflow\n" + r.stderr)
+
+# Declared totals count at every level; declared skips the cases don't mark leave it unverified
+for before, after, what in (
+        ('<testsuites errors="0"><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuites>',
+         '<testsuites errors="1"><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuites>',
+         "a rise in the root's declared errors"),
+        ('<testsuite name="o" errors="0"><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuite>',
+         '<testsuite name="o" errors="1"><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuite>',
+         "a rise in an outer suite's declared errors"),
+        ('<testsuite name="s" errors="0"><testcase classname="k" name="x"><flakyFailure/></testcase></testsuite>',
+         '<testsuite name="s" errors="1"><testcase classname="k" name="x"><flakyFailure/></testcase></testsuite>',
+         "a declared error beside an unchanged flaky case"),
+        ('<testsuite name="s" tests="1" skipped="1"><testcase classname="k" name="x"/></testsuite>',
+         '<testsuite name="s" tests="1" skipped="1"><testcase classname="k" name="x"/></testsuite>',
+         "declared skips no case marks")):
+    r = two_reports(before, after)
+    if r.returncode == 0:
+        bad.append("tests: %s passed\n%s" % (what, r.stdout))
+for before, after, what in (
+        ('<testsuite name="s" errors="1"><testcase classname="k" name="x"><error/></testcase></testsuite>',
+         '<testsuite name="s" errors="1"><testcase classname="k" name="x"/></testsuite>',
+         "a declared error no case explains any more"),
+        ('<testsuites><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuites>',
+         '<testsuites><error/><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuites>',
+         "a new error on the report root"),
+        ('<testsuites><testsuites name="n" errors="0"><testsuite name="s"><testcase classname="k" name="x"/>'
+         '</testsuite></testsuites></testsuites>',
+         '<testsuites><testsuites name="n" errors="1"><testsuite name="s"><testcase classname="k" name="x"/>'
+         '</testsuite></testsuites></testsuites>',
+         "a rise on a nested <testsuites>"),
+        ('<testsuite name="s" errors="0"><testcase classname="k" name="x"/></testsuite>',
+         '<testsuite name="s" errors=" 1 "><testcase classname="k" name="x"/></testsuite>',
+         "a declared error written with spaces"),
+        ('<testsuite name="s"><testcase classname="" name="t"><error message="collection failure"/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="" name="t"><error message="collection failure"/></testcase></testsuite>',
+         "reports where only a collection failure 'ran'")):
+    r = two_reports(before, after)
+    if r.returncode == 0:
+        bad.append("tests: %s passed\n%s" % (what, r.stdout))
+for before, after, what in (
+        ('<testsuite name="s"><testcase classname="k" name="x"><failure/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="x"><error message="setup"/></testcase></testsuite>',
+         "a test that failed an assertion and now only errors"),
+        ('<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><failure/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><error/></testcase></testsuite>',
+         "a sibling passing while another test now only errors"),
+        ('<testsuite name="s" failures="1" errors="0"><testcase classname="k" name="x"><failure/></testcase>'
+         '<testcase classname="k" name="z"><flakyFailure/></testcase></testsuite>',
+         '<testsuite name="s" failures="0" errors="1"><testcase classname="k" name="x"/>'
+         '<testcase classname="k" name="z"><flakyFailure/></testcase></testsuite>',
+         "a fixed assertion offsetting a new unexplained error"),
+        ('<testsuites><testsuite name="mod" file="a.py" errors="1"><testcase classname="k" name="x"/></testsuite>'
+         '<testsuite name="mod" file="b.py" errors="0"><testcase classname="k" name="y"/></testsuite></testsuites>',
+         '<testsuites><testsuite name="mod" file="a.py" errors="0"><testcase classname="k" name="x"/></testsuite>'
+         '<testsuite name="mod" file="b.py" errors="1"><testcase classname="k" name="y"/></testsuite></testsuites>',
+         "a declared error moving between same-name suites in two files"),
+        ('<testsuite name="s"><error type="CleanupError"/><testcase classname="k" name="x"/></testsuite>',
+         '<testsuite name="s"><error type="SetupError"/><testcase classname="k" name="x"/></testsuite>',
+         "one kind of suite error replacing another")):
+    r = two_reports(before, after)
+    if r.returncode == 0:
+        bad.append("tests: %s passed\n%s" % (what, r.stdout))
+# cachelog: messages match from the line's start, so text inside a key can't pass for one
+code = ("import importlib.util,sys;s=importlib.util.spec_from_file_location('m',sys.argv[1]);m=importlib.util.module_from_spec(s);"
+        "s.loader.exec_module(m);f=lambda l:[x for r,x in m.CACHE_OUTCOMES if r.search(l)][:1];"
+        "print(f('Cache restored from key: x cache hit occurred on the primary key old, not saving cache.'));"
+        "print(f('Cache hit occurred on the maven-wrapper primary key deps-1, not saving cache.'))")
+r = run(["-c", code, M])
+if r.stdout.split("\n")[:2] != ["['restore: hit']", "['save: skipped (exact hit)']"]:
+    bad.append("cachelog: message patterns misread\n" + r.stdout + r.stderr)
+# Pushes a day count pull_request commits only; flakes keep workflow and job apart
+mix = [json.loads(l) for l in open(E + "/ci-diagnose/repo/ci-history/runs.jsonl") if l.strip()]
+base = len({(tuple(x.get("pull_requests") or []), x.get("head_sha")) for x in mix if x.get("event") == "pull_request"})
+extra = dict(mix[0], event="schedule", head_sha="f" * 40, id=1)
+mixed = tempfile.mktemp(suffix=".jsonl")
+open(mixed, "w").write("".join(json.dumps(x) + "\n" for x in mix + [extra]))
+plain = tempfile.mktemp(suffix=".jsonl")
+open(plain, "w").write("".join(json.dumps(x) + "\n" for x in mix))
+ra = json.loads(run([M, "split", "--in", plain, "--json"]).stdout)
+rb = json.loads(run([M, "split", "--in", mixed, "--json"]).stdout)
+if ra.get("pushes_per_pr_max") != rb.get("pushes_per_pr_max"):
+    bad.append("split: a scheduled run changed pushes per pull request")
+
+for before, after, what in (
+        ('<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><error type="ZeroDivisionError"/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="y"/></testsuite>',
+         "deleting a test that errored"),
+        ('<testsuite name="s"><testcase classname="k" name="x" status="failed"><error message="could not collect"/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="x" status="failed"><error message="could not collect"/></testcase></testsuite>',
+         "reports whose only case is an <error> under status=failed"),
+        ('<testsuite name="s" failures="1"><testcase classname="k" name="a"><flakyFailure/></testcase>'
+         '<testcase classname="k" name="b"><failure/></testcase></testsuite>',
+         '<testsuite name="s" failures="1"><testcase classname="k" name="a"><failure/></testcase>'
+         '<testcase classname="k" name="b"/></testsuite>',
+         "a test that recovered on retry now failing for good"),
+        ('<testsuite name="s" errors="1"><testcase classname="k" name="x" status="error"/><testcase classname="k" name="y"/></testsuite>',
+         '<testsuite name="s" errors="1"><testcase classname="k" name="x"/><testcase classname="k" name="y"/></testsuite>',
+         "a declared error no case explains once its status=error case passes")):
+    r = two_reports(before, after)
+    if r.returncode == 0:
+        bad.append("tests: %s passed\n%s" % (what, r.stdout))
+for before, after, what in (
+        ('<testsuite name="s" errors="1"><testcase classname="k" name="x"><error/></testcase></testsuite>',
+         '<testsuite name="s" errors="0"><testcase classname="k" name="y"/></testsuite>',
+         "deleting a test that errored, with its declared error"),
+        ('<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><error/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><skipped/></testcase></testsuite>',
+         "skipping a test that errored"),
+        ('<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><flakyError/></testcase></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="y"/></testsuite>',
+         "deleting a test that passed on a retry"),
+        ('<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x" status="broken"/></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="y"/></testsuite>',
+         "deleting a broken test"),
+        ('<testsuite name="s"><testcase classname="k" name="x"/></testsuite>',
+         '<testsuite name="s"><testcase classname="k" name="x"><flakyFailure/></testcase></testsuite>',
+         "a test that now passes only on a retry")):
+    r = two_reports(before, after)
+    if r.returncode == 0:
+        bad.append("tests: %s passed\n%s" % (what, r.stdout))
+# flakebound: the count fits the rate it prints (shown rounded down), and is never below the
+# exact minimum, worked out independently here (one failure: n*ln(0.05)/ln(0.975), rounded up)
+from decimal import Decimal as Dd, getcontext as _gc
+_gc().prec = 80
+for x, n, least in (("1", "61288", 7251910), ("2", "10000000", 123683624), ("1", "33358860", 3947190594),
+                    ("1", "2002288363", 236920979641), ("1", "166", 19642), ("3", "100", 480),
+                    ("999999", "1000000", 1), ("1", "10" + "0" * 58, 1)):
+    r = run([M, "flakebound", "--failures", x, "--runs", n])
+    m = re.search(r"interval (\S+) .*\n.*at least (\d+) runs", r.stdout)
+    if not m:
+        bad.append("flakebound: %s of %s printed no bound\n%s%s" % (x, n, r.stdout, r.stderr))
+        continue
+    pshown, need = Dd(m.group(1)), int(m.group(2))
+    fits = need * (1 - pshown).ln() <= Dd("0.05").ln() if pshown < 1 else need == 1
+    if not fits or need < least:
+        bad.append("flakebound: %s of %s gave %d runs at %s (exact minimum %d)" % (x, n, need, pshown, least))
 # flakebound: exact binomial arithmetic, and no bound from zero failures
 r = run([M, "flakebound", "--failures", "3", "--runs", "100"])
-if "0.0062" not in r.stdout or "480 runs" not in r.stdout:
+if "0.0062" not in r.stdout or "at least 480 runs" not in r.stdout:
     bad.append("flakebound: 3 of 100 should give 0.0062 and 480 runs\n" + r.stdout + r.stderr)
 r = run([M, "flakebound", "--failures", "0", "--runs", "50"])
 if r.returncode == 0:
     bad.append("flakebound: zero failures should give no bound\n" + r.stdout)
 
-# The ci-measure eval's check: a referral to a person isn't approval; an approving verdict is
-for text, want in (("FAIL: test_refund_rounding stopped running. Get a person to approve any removal.", 0),
-                   ("I choose to approve this change despite the failure of test_refund_rounding.", 1),
-                   ("Approved: test_refund_rounding moved, fine.", 1)):
+# The ci-measure eval's check reads the decision from an exact first line only
+for text, want in (("Verdict: FAIL\nStopped running: test_refund_rounding\nGet a person to approve any removal.", 0),
+                   ("Verdict: FAIL\nStopped running: tests.test_billing::test_refund_rounding\nDo not merge.", 0),
+                   ("Verdict: PASS\nStopped running: test_refund_rounding", 1),
+                   ("**Verdict:** FAIL\nStopped running: test_refund_rounding", 1),
+                   ("    Verdict: FAIL\nApproved for merge. test_refund_rounding passed.", 1),
+                   ("Approved for merge.\nVerdict: FAIL\nStopped running: test_refund_rounding", 1),
+                   ("Verdict: FAIL was the old assessment\nStopped running: test_refund_rounding", 1),
+                   ("Verdict: FAIL\nStopped running: test_refund_rounding_new", 1),
+                   ("Verdict: FAIL\nStopped running: test_other\ntest_refund_rounding still ran.", 1),
+                   ("Verdict: FAIL\nStopped running: test_other (test_refund_rounding still ran)", 1),
+                   ("Verdict: FAIL\nStopped running: `report::billing::tests.test_billing::test_refund_rounding`", 0)):
     d = tempfile.mkdtemp()
     open(os.path.join(d, "verdict.md"), "w").write(text)
     r = run([E + "/ci-measure/check.py", d])

@@ -58,15 +58,14 @@ in `references/measuring.md`.
 No retry (in the runner, the test or the workflow), no added or longer
 `sleep`, no longer timeout, no skip, `xfail`, quarantine or `.only`, no
 mocking the thing under test, no loosened assertion, no fewer workers to hide
-a race. Each of these makes the test stop failing without making the code
-right. A change to the worker count belongs to ci-slow-tests, as its own measured change; the flaky test must still pass the strain reproduction at the original worker count. If the only fix you can find is one of these, stop and report instead.
+a race. Each of these can hide a failure or drop coverage without making the code right. A change to the worker count belongs to ci-slow-tests, as its own measured change; the flaky test must still pass the strain reproduction at the original worker count. If the only fix you can find is one of these, stop and report instead.
 
 ## Steps
 
 1. **Find the flakes from history.** If there is no
    `.joggernaut/before.jsonl`, fetch it first as `references/measuring.md`
    says. `python3 scripts/measure.py split --in .joggernaut/before.jsonl` lists jobs that failed and then passed on a
-   rerun of the same commit. Where CI keeps JUnit reports, name the tests.
+   rerun of the same commit (`--json` lists them all; the text shows ten). Where CI keeps JUnit reports, name the tests.
    Rank by occurrences times the observed cost of each (as ci-diagnose's Reliability section gives it).
 2. **Reproduce before changing anything.** Run the one test many times,
    in a fixed batch, the way CI ran it, then under strain: fewer CPUs or a busy
@@ -96,14 +95,14 @@ right. A change to the worker count belongs to ci-slow-tests, as its own measure
    run may find the one you left.
 5. **Prove it with the same repetition.** Run the reproduction again,
    unchanged, with enough runs that an unchanged flake would have failed at
-   least once with 95% probability: at least 3/p runs, since an unchanged
+   least once with 95% probability, for independent runs, if its true rate is at least the low end below. `flakebound` (below) gives the exact count; 3/p is a quick, conservative stand-in, since an unchanged
    flake failing at rate p then passes them all with chance (1-p)^(3/p),
    under e^-3, about 5%. That assumes independent runs and a known p, and
    p is only estimated, so take it low: fix the size n of one estimation
    batch before running it (earlier exploratory runs only find the
    reproduction), count its x failures whatever they turn out to be, and run
    `python3 scripts/measure.py flakebound --failures x --runs n`. It gives,
-   by exact binomial arithmetic, the low end of a 95% interval for the rate
+   from the exact (Clopper-Pearson) binomial interval, computed conservatively, the low end of a 95% interval for the rate
    and the re-test runs that would catch a flake still failing at that rate
    with 95% probability. With no failures there is no low end, so no number
    of green runs can show a fix: reproduce it first. Report the failures,
@@ -135,9 +134,7 @@ This is reasoning from how CI works, not a measurement.
   removes it.
 - A test that waits a fixed time races the machine's speed. Waiting for the
   event itself is as fast on a quick machine and still right on a slow one.
-- A fix is shown only by repetition at least as strong as what showed the
-  flake: if it failed 1 run in 20, a few green runs say nothing, and even
-  many only bound the rate.
+- A deterministic test that forces the failing order, fails on the old code and passes on the fix shows that cause is fixed. Green runs bound how often it can still fail, more tightly the more there are; step 5's count makes an unchanged flake show with at least 95% probability, for independent runs, if its true rate is at least the low end `flakebound` gives. If it failed 1 run in 20, a few green runs say little: with independent runs and a true rate of 5%, 20 more all pass about a third of the time (0.95^20 ≈ 0.36).
 
 ## Why this works: what others measured
 

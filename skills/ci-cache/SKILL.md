@@ -72,10 +72,8 @@ in `references/measuring.md`.
    It prints one fixed label per cache line, with a short hash (8 hex
    digits) that names the key without printing it. Some setup actions don't
    print their key; then the outcome is unknown unless the step's
-   `cache-hit` output shows it (its meaning differs by action: setup-node sets it for any restore, setup-python only for an exact key; else record "restored, match unknown"). Equal short hashes almost surely mean the same key, compared without case as actions/cache does. `requested key#…` is the key the step asked for.
-   A `restore: hit` with the same hash is an exact hit, so is `save: skipped
-   (exact hit)`; a `restore: hit` with another hash is a partial match (a
-   prefix of the key, or `restore-keys`; GitHub docs). Where a job has
+   `cache-hit` output shows it (its meaning differs by action: setup-node sets it for any restore, setup-python only for an exact key; else record "restored, match unknown"). Keys are hashed after Unicode normalisation, in lower case, close to how actions/cache compares them but not identical in every script (final ς and σ, for example). `save: skipped, reason unknown` means a skipped save without the exact-hit message. `requested key#…` is the key the step asked for.
+   `save: skipped (exact hit)` (the action's own exact-hit message) is an exact hit. A `restore: hit` with the requested key's hash suggests an exact hit, and with another hash suggests a partial match (a prefix of the key, or `restore-keys`; GitHub docs); the hashes are hints, so where no exact-hit message or `cache-hit` output settles it, record the match as unknown. Where a job has
    several cache steps and the lines can't be paired, record the outcome as
    unknown. Record, per key: exact hit, partial hit, miss or unknown, and
    whether the run saved a cache. List the caches that exist with
@@ -116,7 +114,7 @@ in `references/measuring.md`.
       and a `restore-keys` prefix restores the newest one; CloudX fixed its
       cache with the run id, RemitAid with the commit SHA. Such caches grow:
       CloudX had to prune its Go cache, and storage above the included 10 GB
-      is billed, so raising the cap is the person's call.
+      is billed, so raising the cap is the person's call; where the cap is already raised, a change that saves more caches can raise the bill with no setting changed, so check the cap and usage first and ask.
    3. **Parallel jobs share one key** (the same key, scope and cached paths). The first job to save the key wins,
       because a saved cache can't be changed (GitHub docs), and it may hold
       only what that job built (setup-go's own docs warn of this race for

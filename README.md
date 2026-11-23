@@ -60,12 +60,13 @@ In Claude Code:
 Other agents: [Install](#install).
 
 Ask your agent to **diagnose my CI**. It reads your recent GitHub Actions
-runs (150 runs take about 155 API requests: one for each run's jobs, more
-for a run with over 100 jobs, plus the run list; the usual limit for a
-signed-in user is 5,000 an hour, and `gh api rate_limit` shows yours), splits the wait into waiting for a machine, setup and
-running, and ranks the causes by the wait each one costs on your own runs.
-It changes no tracked file until you say yes. An example of what it
-prints, for a made-up repository with made-up numbers:
+runs (by default 150 a workflow; fetching them costs about 155 API requests
+per workflow: one for each run's jobs, more for a run with over 100 jobs,
+plus the run list; the usual limit for a signed-in user is 5,000 an hour,
+and `gh api rate_limit` shows yours), splits the wait into waiting for a
+machine, setup and running, and ranks the causes by the wait each one costs
+on your own runs. It changes no tracked file until you say yes. An example
+of what it prints, for a made-up repository with made-up numbers:
 
 ```text
 Joggernaut · made-up example: acme/web · 150 PR runs over 3.75 days   read-only
@@ -79,8 +80,8 @@ On the slowest path, observed in these runs         a run          a day
 > 1  pnpm cache never saved on main: cold PRs   -4m 50s on 96 runs  -2h 04m  ci-cache
        install 5m 20s on 96 cold runs, 0m 30s on 41 warm; same job, same runner
 On the slowest path, ceilings (not observed)
-  2  tests use 2 of 4 cores                     up to -3m 03s   up to -2h 02m  ci-slow-tests
-       with ideal scaling, twice the workers halves the 6m 05s test step
+  2  tests use 2 of 4 cores                     up to -2m 05s   up to -1h 23m  ci-slow-tests
+       with ideal scaling, twice the workers halves the 4m 10s test step
 Off the slowest path (runner-minutes, not wait)
   3  old PR runs keep going after a new push    up to 9 min on each of 54 runs        ci-workflow
        observed work after the newer push started; a ceiling on what cancelling saves
@@ -88,7 +89,8 @@ Off the slowest path (runner-minutes, not wait)
        billed minutes can save more, since each job rounds up
 Reliability
   5  checkout.test.ts fails, then passes on rerun   5 of 150 runs, observed      ci-flaky-tests
-       each: +18 min of wait to the passing attempt, +12 runner-minutes
+       each: 32 min to green, about +18 min against a typical run (an estimate);
+       +12 runner-minutes re-run; about 24 min of wait a day
 For a person: bigger runners (cost money), a merge queue
 ```
 
@@ -194,7 +196,7 @@ The rules for agents in [snippets/AGENTS.md](snippets/AGENTS.md):
 | Rule | Basis |
 |---|---|
 | At most two CI rounds per task | A choice, Stripe's ([Minions](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents)): it caps the CI rounds an agent starts for one task (the update right before a strict merge aside); each round can still start several workflows. Stripe's post gives no measured optimum; change it if you like. |
-| Fast checks before every push; never skip the hook | A choice, with this reason: a check that fails in CI costs a CI round, and run locally it costs its own seconds; `ci-guard` measures both on your runs. Agents skipped a pre-push hook on 118 of 411 push commands at one project ([Kumiko](https://dev.to/marc_kumiko/our-coding-agents-skipped-the-pre-push-hook-on-118-of-411-pushes-27j0)), most through an exception their rules allowed, some with an environment variable; that is why the rule bans every way of skipping (not only `--no-verify`) and why the required CI check stays. |
+| Fast checks before every push; never skip the hook | A choice, with this reason: a check that fails in CI costs a CI round, and run locally it costs its own seconds; `ci-guard` measures both on your runs. Agents skipped a pre-push hook on 118 of 411 push commands at one project ([Kumiko](https://dev.to/marc_kumiko/our-coding-agents-skipped-the-pre-push-hook-on-118-of-411-pushes-27j0)), most of the reasons the agents wrote cited an exception their rules allowed (self-reported and not checked one by one; the author says in a reply at least two were wrong, and some cited flaky tests, which the exception excludes); their rules named both `--no-verify` and an environment variable. That is why the rule bans every way of skipping, and why the required CI check stays. |
 | Never pipe tests into `tail` or `head` | Reasoning: without `pipefail` a pipeline exits with its last command's status, so it can report success when the tests fail, and the cut output can drop the failure. |
 | Fix the code when a test exposes a real bug | A choice: a test changed to pass hides the bug it found. |
 | Never set a commit status or check run | Anyone with write access can set a status check's state; naming the app expected to report a required check makes only that app's report count ([GitHub docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)), so an agent could turn a required check green itself. |

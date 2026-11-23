@@ -10,7 +10,7 @@ metadata:
 
 # ci-diagnose: where CI time goes
 
-Start here. It reads up to 150 recent pull-request runs, says where the time
+Start here. It reads up to 150 recent pull-request runs per workflow (a default), says where the time
 goes, and ranks what to fix first by the minutes of wait each cause costs a
 day, observed on the repository's own runs or bounded by a ceiling. It is read-only: it
 changes no tracked file (its notes go in `.joggernaut/`, kept out of
@@ -56,7 +56,7 @@ in `references/measuring.md`.
 
 ## Steps
 
-1. **Saved history first.** If the repository already has run history saved
+1. **Saved history first.** Before any write to `.joggernaut/`, check it isn't tracked: `git ls-files .joggernaut` must succeed and list nothing (if it fails, say tracking can't be checked and write nowhere in the repository), and `.joggernaut` and the files in it must not be symbolic links. If the repository already has run history saved
    (a `runs.jsonl` someone gives you, or `.joggernaut/before.jsonl`), use it
    in place of `.joggernaut/before.jsonl` below for the diagnosis and go to
    step 3. Before a fix, fetch the baseline it will be measured against as
@@ -113,8 +113,7 @@ in `references/measuring.md`.
      slowest run, below 20; `split` says which), from
      the start of the run's final attempt to its last job done (time spent
      waiting for someone to rerun a failure isn't in it). With several
-     workflows in the file that line pools them; report the "PR wait across
-     all workflows" line instead. If branch protection requires only some
+     workflows in the file that line pools them; report the "PR wait across workflows" line instead, as the elapsed time for commits where two or more workflows were seen, read as follows: for each commit it takes each workflow's first run within 24 hours of the commit's first, drops the commit if any of those failed (even if a later run passed), and times until their last job finished (an optional slow job counts; a workflow missing for a commit isn't in it). Report a pull-request-wide wait only when every required workflow is present. If branch protection requires only some
      jobs (read `required_status_checks` as in ci-workflow; on 403 or 404,
      say it is unknown), the required checks can't pass before the slowest
      required job ends: say which job that is and rank on its path. Reviews,
@@ -142,7 +141,7 @@ in `references/measuring.md`.
      is its name and runner labels; matrix legs that share both can't be
      told apart).
 
-   Setup is matched by step name. Read the step names in the run file
+   A job with no creation time counts as no wait; say so where it matters. Setup is matched by step name. Read the step names in the run file
    (`jobs[].steps[].name`) and pass `--setup-pattern` if the defaults put a
    step in the wrong bucket; where a name doesn't say what a step does
    (`CI`, `install and test`), read its commands. A step that both installs
@@ -177,15 +176,12 @@ in `references/measuring.md`.
      "up to", and the assumption. A dependency, queue or rerun effect isn't
      a step's time; estimate it apart.
 
-   For each run, apply the saving to every path it touches (zero for runs
+   For each run, apply the saving to every path it touches, never more than that run's own time in the affected steps (zero for runs
    without the cause) and take the change in that run's last required
    finish: a saving on one of two near-equal paths shortens the wait only
    by their gap. A day: add the per-run changes up over the history and
    divide by the days it spans. Rank the observed causes by that, then list
-   the ceilings under their own heading. A push that starts several workflows has one last required finish, so apply a fix to all of them together and count one change per push. Fix #1 is the top observed cause; if every row is a ceiling, or a ceiling is larger, leave fix #1 undecided and name the measurement that would settle it;
-   if a ceiling is larger, say that the biggest cause isn't known yet and
-   which measurement would settle it (for workers, repeated comparable runs
-   at each count). A cause on a job that isn't on the slowest
+   the ceilings under their own heading. A push that starts several workflows has one last required finish, so apply a fix to all of them together and count one change per push. Fix #1 is the top observed cause. If every row is a ceiling, or a ceiling is larger, say the biggest cause isn't known yet, leave fix #1 undecided, and name the measurement that would settle it (for workers, repeated comparable runs at each count). A cause on a job that isn't on the slowest
    path saves runner-minutes but not wait; list it with its runner-minutes
    and its basis instead (a shared runner pool can turn freed minutes into
    shorter machine waits; that shows only in `ci-measure`'s after). A rerun
@@ -193,7 +189,7 @@ in `references/measuring.md`.
    so give its cost per occurrence instead, observed: the runner-minutes of
    the failed attempt's jobs that ran again, and the extra wait (first
    attempt's start to the passing attempt's end, minus a typical passing
-   run; the subtraction is an estimate against the typical passing run, so show the actual interval too). Give a flake's daily cost as well (occurrences times cost, over the days); if it is larger than fix #1's, say so. Never add savings of different causes up: their effects can overlap, interact or move the slowest path. Show the runs
+   run; the subtraction is an estimate against the typical passing run, so show the actual interval too). Give a flake's daily cost as well, worked out on the push's last required finish as for the other causes (a flake in a workflow that doesn't finish last saves no wait, as long as its rerun doesn't hold a runner, a slot, or a shared resource such as a database lock that another required job waits for); if it is larger than fix #1's, it becomes fix #1, or the order is undecided where its estimate is too uncertain. Show it under Reliability either way. Never add savings of different causes up: their effects can overlap (less than the sum), combine (more, as with two equally long paths) or move the slowest path. Show the runs
    and steps each number rests on.
 
    When the question is the bill, first name what is billed and rank within that: storage by stored volume over time, minutes by runner-minutes (hosted runner
@@ -218,8 +214,8 @@ in `references/measuring.md`.
    > 1  pnpm cache never saved on main: cold PRs   -4m 50s on 96 runs  -2h 04m  ci-cache
           install 5m 20s on 96 cold runs, 0m 30s on 41 warm; same job, same runner
    On the slowest path, ceilings (not observed)
-     2  tests use 2 of 4 cores                     up to -3m 03s   up to -2h 02m  ci-slow-tests
-          with ideal scaling, twice the workers halves the 6m 05s test step
+     2  tests use 2 of 4 cores                     up to -2m 05s   up to -1h 23m  ci-slow-tests
+          with ideal scaling, twice the workers halves the 4m 10s test step
    Off the slowest path (runner-minutes, not wait)
      3  old PR runs keep going after a new push    up to 9 min on each of 54 runs        ci-workflow
           observed work after the newer push started; a ceiling on what cancelling saves
@@ -227,7 +223,8 @@ in `references/measuring.md`.
           billed minutes can save more, since each job rounds up
    Reliability
      5  checkout.test.ts fails, then passes on rerun   5 of 150 runs, observed      ci-flaky-tests
-          each: +18 min of wait to the passing attempt, +12 runner-minutes
+          each: 32 min to green, about +18 min against a typical run (an estimate);
+          +12 runner-minutes re-run; about 24 min of wait a day
    For a person: bigger runners (cost money), a merge queue
    ```
 
@@ -260,8 +257,7 @@ request, and catch-up runs. It changes no tracked file, so there is no after.
 This is reasoning from how CI works, not a measurement.
 
 - A pull request's checks finish when the job that finishes last does, so
-  only time on that path shortens the wait; time saved elsewhere saves
-  runner-minutes, and shortens the wait only by freeing a machine.
+  only time on that path shortens the wait; time saved elsewhere saves runner-minutes, and shortens the wait only if freeing a machine, a concurrency or matrix slot, or shared disk or database capacity lets a required job start or run sooner; the before logs can hint at that (queue or lock waits), and `ci-measure`'s after measures it.
 - Every job pays three different costs (waiting for a machine, setting up,
   running), and each has different fixes. Splitting them first stops an
   agent from optimising tests when the time is in installs.
