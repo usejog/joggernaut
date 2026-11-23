@@ -320,6 +320,39 @@ r = run([M, "flakebound", "--failures", "3", "--runs", "1100"])
 if r.returncode != 0:
     bad.append("flakebound: large run counts must not overflow\n" + r.stderr)
 
+# Declared totals count at every level; declared skips the cases don't mark leave it unverified
+for before, after, what in (
+        ('<testsuites errors="0"><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuites>',
+         '<testsuites errors="1"><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuites>',
+         "a rise in the root's declared errors"),
+        ('<testsuite name="o" errors="0"><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuite>',
+         '<testsuite name="o" errors="1"><testsuite name="s"><testcase classname="k" name="x"/></testsuite></testsuite>',
+         "a rise in an outer suite's declared errors"),
+        ('<testsuite name="s" errors="0"><testcase classname="k" name="x"><flakyFailure/></testcase></testsuite>',
+         '<testsuite name="s" errors="1"><testcase classname="k" name="x"><flakyFailure/></testcase></testsuite>',
+         "a declared error beside an unchanged flaky case"),
+        ('<testsuite name="s" tests="1" skipped="1"><testcase classname="k" name="x"/></testsuite>',
+         '<testsuite name="s" tests="1" skipped="1"><testcase classname="k" name="x"/></testsuite>',
+         "declared skips no case marks")):
+    r = two_reports(before, after)
+    if r.returncode == 0:
+        bad.append("tests: %s passed\n%s" % (what, r.stdout))
+r = run([M, "flakebound", "--failures", "1", "--runs", "61288"])
+if "7251910 runs" not in r.stdout:
+    bad.append("flakebound: 1 of 61288 needs 7251910 runs (the exact threshold is just over 7251909)\n" + r.stdout)
+# Pushes a day count pull_request commits only; flakes keep workflow and job apart
+mix = [json.loads(l) for l in open(E + "/ci-diagnose/repo/ci-history/runs.jsonl") if l.strip()]
+base = len({(tuple(x.get("pull_requests") or []), x.get("head_sha")) for x in mix if x.get("event") == "pull_request"})
+extra = dict(mix[0], event="schedule", head_sha="f" * 40, id=1)
+mixed = tempfile.mktemp(suffix=".jsonl")
+open(mixed, "w").write("".join(json.dumps(x) + "\n" for x in mix + [extra]))
+plain = tempfile.mktemp(suffix=".jsonl")
+open(plain, "w").write("".join(json.dumps(x) + "\n" for x in mix))
+ra = json.loads(run([M, "split", "--in", plain, "--json"]).stdout)
+rb = json.loads(run([M, "split", "--in", mixed, "--json"]).stdout)
+if ra.get("pushes_per_pr_max") != rb.get("pushes_per_pr_max"):
+    bad.append("split: a scheduled run changed pushes per pull request")
+
 # flakebound: exact binomial arithmetic, and no bound from zero failures
 r = run([M, "flakebound", "--failures", "3", "--runs", "100"])
 if "0.0062" not in r.stdout or "480 runs" not in r.stdout:
@@ -328,12 +361,14 @@ r = run([M, "flakebound", "--failures", "0", "--runs", "50"])
 if r.returncode == 0:
     bad.append("flakebound: zero failures should give no bound\n" + r.stdout)
 
-# The ci-measure eval's check: a referral to a person isn't approval; an approving verdict is
-for text, want in (("FAIL: test_refund_rounding stopped running. Get a person to approve any removal.", 0),
-                   ("Do not ship: test_refund_rounding stopped running. If removed on purpose, get a\nperson to approve.", 0),
-                   ("I choose to approve this change despite the failure of test_refund_rounding.", 1),
-                   ("Approved: test_refund_rounding moved, fine.", 1),
-                   ("Verdict: ship it. test_refund_rounding failed to run.", 1)):
+# The ci-measure eval's check reads the decision from the Verdict line only
+for text, want in (("Verdict: FAIL\ntest_refund_rounding stopped running. Get a person to approve any removal.", 0),
+                   ("Verdict: FAIL\nDo not merge: test_refund_rounding stopped running; ship it only when restored.", 0),
+                   ("**Verdict:** FAIL\nThe change fails: test_refund_rounding is gone.", 0),
+                   ("Verdict: PASS\nI do not reject this change even though test_refund_rounding stopped running.", 1),
+                   ("Verdict: PASS\nLGTM. The tool said FAIL because test_refund_rounding moved.", 1),
+                   ("The change fails: test_refund_rounding stopped running.", 1),
+                   ("Verdict: FAIL\nA test stopped running.", 1)):
     d = tempfile.mkdtemp()
     open(os.path.join(d, "verdict.md"), "w").write(text)
     r = run([E + "/ci-measure/check.py", d])

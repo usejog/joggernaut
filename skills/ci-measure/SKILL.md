@@ -148,8 +148,7 @@ If the change touched tests or test setup, run the break-it probe (step
    ```
 
    It exits non-zero if any test stopped running (including one now skipped)
-   or any new failure appeared, and refuses an empty report or one where
-   no test ran. A test is known by its report's path (shard numbers
+   or any new failure or suite error appeared (a suite's declared errors and failures rising counts, at any level), and refuses an empty report, one where no test ran, or one that declares more skips than its cases mark. A test is known by its report's path (shard numbers
    blanked), its suite and every suite around it, class, file (its own, or
    the nearest suite's) and name, so a removed test can't hide behind an added one with another
    name; two tests that share all of these can't be told apart. The result

@@ -53,7 +53,7 @@ in `references/measuring.md`.
 
 ## Steps
 
-1. **Saved history first.** Before any write to `.joggernaut/`, check it isn't tracked: `git ls-files .joggernaut` must succeed and list nothing (if it fails, say tracking can't be checked and write nowhere in the repository). If the repository already has run history saved
+1. **Saved history first.** Before any write to `.joggernaut/`, check it isn't tracked: `git ls-files .joggernaut` must succeed and list nothing (if it fails, say tracking can't be checked and write nowhere in the repository), and `.joggernaut` and the files in it must not be symbolic links. If the repository already has run history saved
    (a `runs.jsonl` someone gives you, or `.joggernaut/before.jsonl`), use it
    in place of `.joggernaut/before.jsonl` below and go to step 3. Otherwise
    check access: `gh auth status`, then `gh api rate_limit`. Stop if fewer
@@ -99,7 +99,7 @@ in `references/measuring.md`.
    - the PR wait, at the median and the slowest 5% of successful runs, from
      the start of the run's final attempt to its last job done (time spent
      waiting for someone to rerun a failure isn't in it). With several
-     workflows in the file that line pools them; report the "PR wait across all workflows" line instead, read as the time until all fetched workflows finished (an optional slow job counts in it). If branch protection requires only some
+     workflows in the file that line pools them; report the "PR wait across workflows" line instead, read as the time until the first passing runs present for that commit finished (an optional slow job counts in it; a workflow missing for a commit isn't in it). Report a pull-request-wide wait only when every required workflow is present. If branch protection requires only some
      jobs (read `required_status_checks` as in ci-workflow; on 403 or 404,
      say it is unknown), the required checks can't pass before the slowest
      required job ends: say which job that is and rank on its path. Reviews,
@@ -127,7 +127,7 @@ in `references/measuring.md`.
      is its name and runner labels; matrix legs that share both can't be
      told apart).
 
-   Steps that run in parallel are summed, not overlapped, and a job with no creation time counts as no wait; say so where it matters. Setup is matched by step name. Read the step names in the run file
+   A job with no creation time counts as no wait; say so where it matters. Setup is matched by step name. Read the step names in the run file
    (`jobs[].steps[].name`) and pass `--setup-pattern` if the defaults put a
    step in the wrong bucket; where a name doesn't say what a step does
    (`CI`, `install and test`), read its commands. A step that both installs
@@ -162,7 +162,7 @@ in `references/measuring.md`.
      "up to", and the assumption. A dependency, queue or rerun effect isn't
      a step's time; estimate it apart.
 
-   For each run, apply the saving to every path it touches, never more than that run's own time in the affected steps, (zero for runs
+   For each run, apply the saving to every path it touches, never more than that run's own time in the affected steps (zero for runs
    without the cause) and take the change in that run's last required
    finish: a saving on one of two near-equal paths shortens the wait only
    by their gap. A day: add the per-run changes up over the history and
@@ -175,7 +175,7 @@ in `references/measuring.md`.
    so give its cost per occurrence instead, observed: the runner-minutes of
    the failed attempt's jobs that ran again, and the extra wait (first
    attempt's start to the passing attempt's end, minus a typical passing
-   run; the subtraction is an estimate against the typical passing run, so show the actual interval too). Give a flake's daily cost as well (occurrences times cost, over the days); if it is larger than fix #1's, compare it on the same daily metric: if it is larger, it is fix #1, or the order is undecided where its estimate is too uncertain. Never add savings of different causes up: their effects can overlap (less than the sum), combine (more, as with two equally long paths) or move the slowest path. Show the runs
+   run; the subtraction is an estimate against the typical passing run, so show the actual interval too). Give a flake's daily cost as well, worked out on the push's last required finish as for the other causes (a flake in a workflow that doesn't finish last saves no wait); if it is larger than fix #1's, it becomes fix #1, or the order is undecided where its estimate is too uncertain. Show it under Reliability either way. Never add savings of different causes up: their effects can overlap (less than the sum), combine (more, as with two equally long paths) or move the slowest path. Show the runs
    and steps each number rests on.
 
    When the question is the bill, first name what is billed and rank within that: storage by stored volume over time, minutes by runner-minutes (hosted runner
@@ -243,7 +243,7 @@ request, and catch-up runs. It changes no tracked file, so there is no after.
 This is reasoning from how CI works, not a measurement.
 
 - A pull request's checks finish when the job that finishes last does, so
-  only time on that path shortens the wait; time saved elsewhere saves runner-minutes, and shortens the wait only by freeing a machine or a concurrency or matrix slot.
+  only time on that path shortens the wait; time saved elsewhere saves runner-minutes, and, with job durations and scheduling fixed, shortens the wait only by freeing a machine or a concurrency or matrix slot; contention for disk or a database shows only in `ci-measure`'s after.
 - Every job pays three different costs (waiting for a machine, setting up,
   running), and each has different fixes. Splitting them first stops an
   agent from optimising tests when the time is in installs.

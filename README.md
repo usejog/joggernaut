@@ -29,7 +29,7 @@ a test, are safety choices, labelled as choices, and each says why.
 of every rule.
 
 Ask your agent to **diagnose my CI**. It reads your recent GitHub Actions
-runs (150 runs a workflow by default, about 155 API requests: one for each run's jobs, more
+runs (150 runs a workflow by default, about 155 API requests each: one for each run's jobs, more
 for a run with over 100 jobs, plus the run list; the usual limit for a
 signed-in user is 5,000 an hour, and `gh api rate_limit` shows yours), splits the wait into waiting for a machine, setup and
 running, and ranks the causes by the wait each one costs on your own runs.
@@ -174,7 +174,7 @@ The rules for agents in [snippets/AGENTS.md](snippets/AGENTS.md):
 | Rule | Basis |
 |---|---|
 | At most two CI rounds per task | A choice, Stripe's ([Minions](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents)): it caps the CI rounds an agent starts for one task (the update right before a strict merge aside); each round can still start several workflows. Stripe's post gives no measured optimum; change it if you like. |
-| Fast checks before every push; never skip the hook | A choice, with this reason: a check that fails in CI costs a CI round, and run locally it costs its own seconds; `ci-guard` measures both on your runs. Agents skipped a pre-push hook on 118 of 411 push commands at one project ([Kumiko](https://dev.to/marc_kumiko/our-coding-agents-skipped-the-pre-push-hook-on-118-of-411-pushes-27j0)), most of the reasons the agents wrote cited an exception their rules allowed (the author didn't verify them, and found two wrong); their rules named both `--no-verify` and an environment variable. That is why the rule bans every way of skipping, and why the required CI check stays. |
+| Fast checks before every push; never skip the hook | A choice, with this reason: a check that fails in CI costs a CI round, and run locally it costs its own seconds; `ci-guard` measures both on your runs. Agents skipped a pre-push hook on 118 of 411 push commands at one project ([Kumiko](https://dev.to/marc_kumiko/our-coding-agents-skipped-the-pre-push-hook-on-118-of-411-pushes-27j0)), most of the reasons the agents wrote cited an exception their rules allowed (the author didn't verify them; some cited flaky tests, which the exception excludes); their rules named both `--no-verify` and an environment variable. That is why the rule bans every way of skipping, and why the required CI check stays. |
 | Never pipe tests into `tail` or `head` | Reasoning: without `pipefail` a pipeline exits with its last command's status, so it can report success when the tests fail, and the cut output can drop the failure. |
 | Fix the code when a test exposes a real bug | A choice: a test changed to pass hides the bug it found. |
 | Never set a commit status or check run | Anyone with write access can set a status check's state; naming the app expected to report a required check makes only that app's report count ([GitHub docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)), so an agent could turn a required check green itself. |

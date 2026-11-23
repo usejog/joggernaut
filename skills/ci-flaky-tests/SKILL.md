@@ -61,8 +61,8 @@ a race. Each of these can hide a failure or drop coverage without making the cod
 
 1. **Find the flakes from history.** If there is no
    `.joggernaut/before.jsonl`, fetch it first as `references/measuring.md`
-   says. `python3 scripts/measure.py split --in .joggernaut/before.jsonl` lists jobs that failed and then passed on (`--json` lists them all; the text shows ten) a
-   rerun of the same commit. Where CI keeps JUnit reports, name the tests.
+   says. `python3 scripts/measure.py split --in .joggernaut/before.jsonl` lists jobs that failed and then passed on a
+   rerun of the same commit (`--json` lists them all; the text shows ten). Where CI keeps JUnit reports, name the tests.
    Rank by occurrences times the observed cost of each (as ci-diagnose's Reliability section gives it).
 2. **Reproduce before changing anything.** Run the one test many times,
    in a fixed batch, the way CI ran it, then under strain: fewer CPUs or a busy
@@ -131,9 +131,7 @@ This is reasoning from how CI works, not a measurement.
   removes it.
 - A test that waits a fixed time races the machine's speed. Waiting for the
   event itself is as fast on a quick machine and still right on a slow one.
-- A fix is shown by a deterministic test that forces the failing order and fails on the old code, or by repetition at least as strong as what showed the
-  flake: if it failed 1 run in 20, a few green runs say nothing, and even
-  many only bound the rate.
+- A deterministic test that forces the failing order, fails on the old code and passes on the fix shows that cause is fixed. Only repetition as step 5 computes it bounds how often the flake can still fail: if it failed 1 run in 20, a few green runs say nothing, and as many again (20) all pass about a third of the time even if nothing changed.
 
 ## Why this works: what others measured
 

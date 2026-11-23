@@ -66,14 +66,13 @@ in `references/measuring.md`.
      one before it: GitHub docs). A cancelled run there can leave a commit
      without a complete run. If the workflow already has a `concurrency`
      group (deploys, a shared environment), keep it and ask before changing it.
-     Only `opened`, `synchronize` and `reopened` runs share the group: a run for a label or an edit could otherwise cancel the real run while its own jobs are skipped by `if:`, and a skipped job reports success. First read `on.pull_request.types` and every job's `if:`, and check on a pull request that a label change can't turn a required check green. Cancellation follows arrival order: a manual rerun of an older run
-     joins the group last and cancels the newer one, so rerun the newest.
+     Only first attempts of `opened`, `synchronize` and `reopened` runs share the group (a rerun gets its own, so rerunning an older commit can't cancel the newest run; a `ready_for_review` run isn't cancelled by later pushes, which costs minutes, not safety): a run for a label or an edit could otherwise cancel the real run while its own jobs are skipped by `if:`, and a skipped job reports success. First read `on.pull_request.types`, every job's and test step's `if:`, and any reusable workflow; if a run for another event can report a required job's name with its tests skipped, report it to the person, since a skipped job reports success with or without this recipe. Check on a pull request that a label change can't turn a required check green. Cancellation follows arrival order: if pushes reach GitHub out of order, the older commit's run can cancel the newer one's. A cancelled check isn't green: it blocks the merge until the newest commit is run again.
      `github.workflow` is the workflow's name, and GitHub compares group names ignoring case across the repository; if two workflow files share a name (or differ only in case), give each its own prefix.
 
      ```yaml
      concurrency:
-       group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","synchronize","reopened"]'), github.event.action) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-       cancel-in-progress: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","synchronize","reopened"]'), github.event.action) }}
+       group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.run_attempt == 1 && contains(fromJSON('["opened","synchronize","reopened"]'), github.event.action) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+       cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == 1 && contains(fromJSON('["opened","synchronize","reopened"]'), github.event.action) }}
      ```
 
    - **Fold tiny jobs.** First read which checks are required

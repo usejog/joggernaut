@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from fractions import Fraction
@@ -157,6 +158,12 @@ def prepare_out(path):
     if rc != 1:
         die("git couldn't say whether %s is tracked; not writing it" % path)
     folder = os.path.dirname(path)
+    # A symlink anywhere on the way could point the write at a tracked file.
+    here = ""
+    for part in [x for x in os.path.normpath(path).split(os.sep) if x not in ("", ".")]:
+        here = os.path.join(here, part) if here else part
+        if os.path.islink(here):
+            die("%s is a symbolic link; write measurements to a real, untracked folder" % here)
     if folder:
         os.makedirs(folder, exist_ok=True)
     parts = os.path.normpath(path).split(os.sep)
@@ -352,8 +359,9 @@ def cmd_split(a):
     span_days = (starts[-1] - starts[0]) / 86400.0 if len(starts) > 1 else 0.0
     out["span_days"] = round(span_days, 1)
     # Pushes a day, not runs: with several workflows in the file, one push starts several runs.
+    # pull_request runs only: their head_sha is the pull request's head commit.
     commits = {(tuple(r.get("pull_requests") or []) or (r.get("head_repo"), r.get("head_branch")), r.get("head_sha"))
-               for r in runs}
+               for r in runs if r.get("event") == "pull_request"}
     out["runs_per_day"] = round(len(commits) / span_days, 1) if span_days >= 1 else None
 
     # The three-way split on the slowest path: the job that finished last in each run.
@@ -415,7 +423,7 @@ def cmd_split(a):
     # Runs per pull request (pushes that each paid for CI).
     per_pr = {}
     for r in runs:
-        if r.get("event") not in ("pull_request", "pull_request_target"):
+        if r.get("event") != "pull_request":
             continue
         # Fork pull requests come back with no PR number: key them by fork and branch.
         key = tuple(r.get("pull_requests") or []) or (r.get("head_repo"), r.get("head_branch"))
@@ -446,9 +454,10 @@ def cmd_split(a):
             failed = [j.get("run_attempt", 1) for j in js if j.get("conclusion") in ("failure", "timed_out")]
             if failed and any(j.get("conclusion") == "success" and j.get("run_attempt", 1) > min(failed)
                               for j in js):
-                k = "%s / %s [%s]" % (r.get("name"), name, ",".join(labs) or "no labels")
+                k = (r.get("path") or r.get("name") or "", r.get("name") or "", name or "", labs)
                 flakes[k] = flakes.get(k, 0) + 1
-    out["rerun_flakes"] = sorted(flakes.items(), key=lambda kv: -kv[1])
+    out["rerun_flakes"] = sorted((("%s / %s [%s]" % (wf, job, ",".join(labs) or "no labels"), n)
+                                  for (_, wf, job, labs), n in flakes.items()), key=lambda kv: -kv[1])
 
     if a.json:
         print(json.dumps(out, indent=2))
@@ -485,7 +494,8 @@ def cmd_split(a):
     print("  in runs that failed, timed out or were cancelled: %.0f%%" % (100 * out["wasted_share"]))
     print("  by runner label (unweighted; price each label to get dollars): " + ", ".join(
         "%s %d" % kv for kv in sorted(by_label.items(), key=lambda kv: -kv[1])))
-    print("pushes per PR: median %g, max %s" % (out["pushes_per_pr_median"] or 0, out["pushes_per_pr_max"]))
+    print("pushes per PR: median %g, max %s" % (out["pushes_per_pr_median"], out["pushes_per_pr_max"])
+          if out["pushes_per_pr_max"] else "pushes per PR: no pull-request runs in this file")
     if out["catch_up_known"]:
         print("catch-up runs, by commit message (a merge of another branch in; rebases can't be seen):"
               " %d runs, %.0f%% of runner-minutes"
@@ -495,7 +505,7 @@ def cmd_split(a):
     if flakes:
         print("jobs that failed then passed on a rerun, same commit:")
         for k, n in out["rerun_flakes"][:10]:
-            print("  %-60s %d" % (k[:60], n))
+            print("  %s  %d" % (k, n))
 
 
 # ---------------------------------------------------------------- compare
@@ -795,17 +805,8 @@ def junit_results(path):
           chain.reverse()
           suite_path = [s.get("name") or "" for s in chain]
           suite_file = next((s.get("file") for s in reversed(chain) if s.get("file")), "")
-          # Errors on the suite itself, and any the suite declares that no case accounts for,
-          # are counted apart from tests (they aren't tests that ran).
+          # Errors on the suite itself are counted apart from tests (they aren't tests that ran).
           direct = sum(1 for c in suite if local(c.tag) in FAILED_TAGS)
-          if not any(local(c.tag) == "testsuite" for c in suite):
-              declared = sum(int(suite.get(k) or 0) for k in ("errors", "failures")
-                             if (suite.get(k) or "").isdigit())
-              case_fails = sum(1 for c in suite if local(c.tag) == "testcase" and (
-                  {local(g.tag) for g in c} & FAILED_TAGS
-                  or (c.get("status") or "").lower() in FAILED_WORDS
-                  or (c.get("result") or "").lower() in FAILED_WORDS))
-              direct = max(direct, declared - case_fails)
           if direct:
               k = json.dumps([where, suite_path, suite_file])
               errs[k] = errs.get(k, 0) + direct
@@ -824,6 +825,28 @@ def junit_results(path):
                  tc.get("name") or ""], out)
         if not cases:
             die("no test cases in %s; is it a JUnit report?" % f)
+        # Every suite's declared totals, the root's included: a rise in declared errors and
+        # failures counts even when no case shows it, and declared skips the cases don't mark
+        # make it impossible to tell which ran.
+        for e in [root] + [s for s in root.iter() if local(s.tag) == "testsuite" and s is not root]:
+            if local(e.tag) not in ("testsuite", "testsuites"):
+                continue
+            num = lambda k: int(e.get(k)) if (e.get(k) or "").isdigit() else 0
+            chain, x = [], e
+            while x is not None:
+                if local(x.tag) == "testsuite":
+                    chain.append(x.get("name") or "")
+                x = parent.get(x)
+            key = json.dumps([where, ["(report)"] + chain[::-1], "(declared errors and failures)"])
+            declared = num("errors") + num("failures")
+            if declared:
+                errs[key] = errs.get(key, 0) + declared
+            cases_in = [c for c in e.iter() if local(c.tag) == "testcase"]
+            marked = sum(1 for c in cases_in if ({local(g.tag) for g in c} & {"skipped"})
+                         or (c.get("status") or "").lower() in NOT_RUN or (c.get("result") or "").lower() in NOT_RUN)
+            if num("skipped") + num("disabled") > marked:
+                die("%s declares %d skipped but marks only %d cases skipped, so which ran can't be told;"
+                    " the comparison is unverified" % (f, num("skipped") + num("disabled"), marked))
     return res, errs
 
 
@@ -870,7 +893,7 @@ def cmd_tests(a):
         for t, k in new_fail:
             print("  new failure: " + show_test(t) + ("" if k == 1 else " (%d more copies)" % k))
         for s, k in suite_errors:
-            print("  new suite error: " + show_test(s) + ("" if k == 1 else " (%d more)" % k))
+            print("  new suite error: " + show_test(s) + ("" if k == 1 else " (%d new)" % k))
         print("verdict: " + res["verdict"])
     sys.exit(0 if ok else 1)
 
@@ -905,7 +928,8 @@ def cmd_cachelog(a):
                 k = KEY.search(text)
                 # A short hash names the key without printing it.
                 # actions/cache compares keys ignoring case, so the hash does too.
-                tag = " key#" + hashlib.sha1(k.group(1).lower().encode()).hexdigest()[:8] if k else ""
+                key = unicodedata.normalize("NFC", k.group(1)).casefold() if k else ""
+                tag = " key#" + hashlib.sha1(key.encode()).hexdigest()[:8] if k else ""
                 print(label + tag)
                 break
         else:
@@ -922,6 +946,7 @@ def cmd_flakebound(a):
     failure rate (the rate at which x or more failures has a 2.5% chance), and the
     runs a re-test needs so that a flake that still failed at that rate would fail at
     least once with 95% probability."""
+    from decimal import Decimal, getcontext
     x, n = a.failures, a.runs
     if n < 1 or not 0 <= x <= n:
         die("need 0 <= failures <= runs and runs >= 1")
@@ -929,17 +954,34 @@ def cmd_flakebound(a):
         print("no failures in %d runs: the rate's low end is 0, so no number of green runs"
               " can show a fix; reproduce it first" % n)
         sys.exit(1)
-    def tail(p):
-        # Summed in log space so large run counts don't overflow a float.
-        lc = lambda i: math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1)
-        return sum(math.exp(lc(i) + i * math.log(p) + (n - i) * math.log1p(-p)) for i in range(x, n + 1))
-    lo, hi = 1e-12, x / float(n)
-    for _ in range(100):
-        mid = (lo + hi) / 2
-        lo, hi = (mid, hi) if tail(mid) < 0.025 else (lo, mid)
-    p = hi
-    need = 1 if p >= 1 else int(math.ceil(math.log(0.05) / math.log(1 - p)))
-    print("failure rate: %d of %d; low end of its 95%% interval %.4f" % (x, n, p))
+    getcontext().prec = 50
+    D = Decimal
+
+    def at_least_x(p):
+        # P(X >= x) = 1 - P(X < x): x terms, in high precision so small rates stay exact enough.
+        if p <= 0:
+            return D(0)
+        pd, term, below = D(p), (1 - D(p)) ** n, D(0)
+        for i in range(x):
+            below += term
+            term = term * D(n - i) / D(i + 1) * pd / (1 - pd) if pd < 1 else D(0)
+        return 1 - below
+
+    if x == n:
+        p = float(D("0.025") ** (D(1) / D(n)))
+    else:
+        lo, hi = 0.0, x / float(n)
+        for _ in range(200):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if at_least_x(mid) < D("0.025") else (lo, mid)
+        p = lo  # the side where x or more failures is still under 2.5%: never above the true end
+    if p >= 1:
+        need = 1
+    else:
+        need = int((D("0.05").ln() / (1 - D(p)).ln()).to_integral_value(rounding="ROUND_CEILING"))
+        while (1 - D(p)) ** need > D("0.05"):
+            need += 1
+    print("failure rate: %d of %d; low end of its 95%% interval %.3g" % (x, n, p))
     print("re-test with at least %d runs: a flake still failing at that rate passes them all"
           " with chance under 5%%" % need)
 
