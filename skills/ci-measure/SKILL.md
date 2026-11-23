@@ -130,7 +130,11 @@ If the change touched tests or test setup, run the break-it probe (step
    instead of the merge commit, and `push` runs on branches without the fix
    (`git merge-base --is-ancestor FIX_SHA RUN_SHA` tells you). Write the
    runs that stay into `.joggernaut/after-fix.jsonl`, one line each as
-   `fetch` wrote them.
+   `fetch` wrote them. Fetch the baseline again with its recorded cut-off
+   (the same runs, each now read by this `fetch`), and keep in
+   `.joggernaut/before-fix.jsonl` only its pull requests into the same
+   branch, from the same workflow and checkout: `references/measuring.md`
+   gives the commands.
    If `fetch` refuses, stop there: anything after it would read an older
    file. You need at least 5 comparable runs a side. If the window ends with fewer,
    `compare` reports "not enough runs yet" and shows no timings; choose a
@@ -144,7 +148,7 @@ If the change touched tests or test setup, run the break-it probe (step
 2. Compare:
 
    ```sh
-   python3 scripts/measure.py compare --before .joggernaut/before.jsonl \
+   python3 scripts/measure.py compare --before .joggernaut/before-fix.jsonl \
      --after .joggernaut/after-fix.jsonl --workflow "CI" --label ubuntu-latest [--job "test"]
    ```
 

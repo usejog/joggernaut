@@ -37,17 +37,31 @@ change now, not after merge.
 
 ## After merge
 
+Fetch the baseline again with the cut-off it recorded (a time before the
+change merged): the same runs, each now read by this `fetch`, which refuses
+any still going. Then the window after the merge:
+
 ```sh
+MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request --limit 150 \
+  --created '<=CUT-OFF' --out .joggernaut/before.jsonl &&
 MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request \
   --created 'MERGE-TIME..WINDOW-END' --out .joggernaut/after.jsonl   # times as YYYY-MM-DDTHH:MM:SSZ
 ```
 
-If `fetch` refuses, stop: anything after it would read an older file. Then
-keep only the runs that tested the fix (ci-measure's step 3.1 says how to
-tell) in `.joggernaut/after-fix.jsonl`, and compare those:
+If either `fetch` refuses, stop: anything after it would read an older file.
+Then keep, on both sides, only runs of pull requests into the branch the fix
+merged into (`gh api repos/OWNER/NAME/pulls/N --jq .base.ref`; a run from a
+fork lists no pull request number, so leave it out unless you can tell its
+base), from workflows that test the merge commit rather than the pull
+request's head. On the after side keep only runs whose base had the fix:
+the `HEAD is now at … Merge HEAD into BASE` line `actions/checkout` prints
+names the base, and `git merge-base --is-ancestor FIX_SHA BASE` checks it;
+leave out runs whose base lacks it or that print no such line. Write the
+kept runs, one line each as `fetch` wrote them, to `before-fix.jsonl` and
+`after-fix.jsonl`, and compare those:
 
 ```sh
-MEASURE compare --before .joggernaut/before.jsonl --after .joggernaut/after-fix.jsonl \
+MEASURE compare --before .joggernaut/before-fix.jsonl --after .joggernaut/after-fix.jsonl \
   --label RUNNER-LABEL [--job NAME] &&  # always pass the runner label; add --job when jobs run on different runners
 MEASURE tests --before JUNIT-BEFORE --after JUNIT-AFTER   # each downloaded into a new, empty folder
 ```

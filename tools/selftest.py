@@ -299,6 +299,49 @@ with tempfile.TemporaryDirectory() as t:
         if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
             bad.append("compare: failed runs with a skipped job dropped out under %s\n%s%s"
                        % (" ".join(flags), r.stdout, r.stderr))
+    # A build on one runner fails and the measured test, meant for another, is skipped:
+    # the failure still counts under that other runner's label.
+    def relabel(src, dst, labels):
+        rows2 = [json.loads(l) for l in open(src) if l.strip()]
+        for row in rows2:
+            for j in row["jobs"]:
+                if j["labels"]:
+                    j["labels"] = labels if j["name"] != "build" else ["ubuntu-latest"]
+        open(dst, "w").write("".join(json.dumps(x) + "\n" for x in rows2))
+    relabel(t + "/sb", t + "/sbw", ["windows-latest"])
+    relabel(t + "/skip", t + "/skipw", ["windows-latest"])
+    r = run([M, "compare", "--before", t + "/sbw", "--after", t + "/skipw", "--json",
+             "--label", "windows-latest", "--job", "test"])
+    if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
+        bad.append("compare: a failed build on another runner dropped out under --job --label\n" + r.stdout + r.stderr)
+    # Same-name matrix legs: the leg on the asked runner is timed, whichever is listed first.
+    def legs(src, dst, ubuntu_secs, first_ubuntu):
+        rows2 = []
+        for row in (json.loads(l) for l in open(src) if l.strip()):
+            win = row["jobs"][0]
+            start = win["started_at"]
+            end = (datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=ubuntu_secs)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            ubu = dict(win, id=win["id"] + 1, labels=["ubuntu-latest"], completed_at=end)
+            row["jobs"] = [ubu, dict(win, labels=["windows-latest"])] if first_ubuntu else [dict(win, labels=["windows-latest"]), ubu]
+            rows2.append(row)
+        open(dst, "w").write("".join(json.dumps(x) + "\n" for x in rows2))
+    from datetime import datetime, timedelta
+    legs(t + "/sb", t + "/legb", 900, False)
+    legs(t + "/sb", t + "/lega0", 300, True)
+    lega = [dict(json.loads(l), id=json.loads(l)["id"] + 50000) for l in open(t + "/lega0") if l.strip()]
+    open(t + "/lega", "w").write("".join(json.dumps(x) + "\n" for x in lega))
+    r = run([M, "compare", "--before", t + "/legb", "--after", t + "/lega", "--json",
+             "--label", "windows-latest", "--job", "test"])
+    v = json.loads(r.stdout) if r.returncode == 0 else {}
+    if v.get("verdict_code") != "no_change_yet" or v.get("after_runs") != 5:
+        bad.append("compare: the windows leg wasn't the one timed: %r\n%s" % (v.get("verdict"), r.stderr))
+    # Under --label, runs that failed at startup (no jobs, no runner) still count as failures.
+    started = [json.loads(l) for l in open(t + "/fa7") if l.strip() and json.loads(l)["conclusion"] == "success"]
+    early = [dict(started[0], id=7900 + i, conclusion="startup_failure", jobs=[]) for i in range(7)]
+    open(t + "/early", "w").write("".join(json.dumps(x) + "\n" for x in started + early))
+    r = run([M, "compare", "--before", t + "/sb", "--after", t + "/early", "--label", "ubuntu-latest", "--json"])
+    if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
+        bad.append("compare: startup failures dropped out of the count under --label\n" + r.stdout + r.stderr)
     # Under --label, a run where no job shows a runner can't be one of the 5.
     nolab = [json.loads(l) for l in open(t + "/sa") if l.strip()][:4]
     extra = dict(nolab[0], id=4999)

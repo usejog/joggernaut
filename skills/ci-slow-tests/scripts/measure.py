@@ -639,21 +639,22 @@ def outside_cohort(r, a, cache):
         return "event %s" % r.get("event")
     if a.cache and cache.get(str(r["id"])) != a.cache:
         return "cache %s" % (cache.get(str(r["id"])) or "state unknown")
-    # A job skipped because an earlier one failed never got a runner, so it has no
-    # labels; judge the runner by the jobs that ran, or a failed run would drop out of
-    # the cohort and its failure out of the count.
+    # A job skipped because an earlier one failed, or a run that failed before any job
+    # started, never got a runner, so it has no labels. Such a run can't be timed (the
+    # timing side checks the runner itself) but its failure still counts: leaving it out
+    # here would drop the failure from the count.
     if not a.label:
         return None
-    jobs = [j for j in (r.get("jobs", []) if a.job else latest_jobs(r)) if j.get("labels")]
+    if a.job:
+        measured = [j for j in r.get("jobs", []) if j.get("name") == a.job and j.get("labels")]
+        if measured and not any(a.label in j["labels"] for j in measured):
+            return "job %s not on runner %s" % (a.job, a.label)
+        return None
+    jobs = [j for j in latest_jobs(r) if j.get("labels")]
     if not jobs:
-        return "no job ran on a runner"  # nothing shows which runner it would have used
-    if not a.job and not all(a.label in j["labels"] for j in jobs):
+        return "no job ran on a runner" if r.get("conclusion") == "success" else None
+    if not all(a.label in j["labels"] for j in jobs):
         return "not every job on runner %s" % a.label
-    # The measured job, or if it never ran (skipped after an earlier job failed),
-    # the jobs that did run, must have been on the runner.
-    measured = [j for j in jobs if j.get("name") == a.job] or jobs
-    if a.job and not any(a.label in j["labels"] for j in measured):
-        return "job %s not on runner %s" % (a.job, a.label)
     return None
 
 
@@ -683,15 +684,18 @@ def durations(runs, a, side, excluded):
         d = None
         if not why:
             if a.job:
-                js = [j for j in latest_jobs(r) if j.get("name") == a.job]
+                # By name and runner, so a matrix leg on another runner isn't taken for it.
+                js = [j for j in latest_jobs(r) if j.get("name") == a.job
+                      and (not a.label or a.label in (j.get("labels") or []))]
                 if not js:
-                    why = "no job %s" % a.job
+                    why = "no job %s%s" % (a.job, " on runner %s" % a.label if a.label else "")
+                elif len(js) > 1:
+                    why = "%d jobs named %s%s; can't tell which to time" % (
+                        len(js), a.job, " on runner %s" % a.label if a.label else "")
                 else:
                     j = js[0]
                     if j.get("conclusion") != "success":
                         why = "job %s" % j.get("conclusion")
-                    elif a.label and a.label not in (j.get("labels") or []):
-                        why = "runner %s" % ",".join(j.get("labels") or [])
                     else:
                         d = secs(j.get("started_at"), j.get("completed_at"))
             else:

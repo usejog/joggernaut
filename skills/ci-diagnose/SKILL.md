@@ -88,8 +88,7 @@ in `references/measuring.md`.
    several, fetch them over the same dates (`--created 'OLDEST..CUTOFF'`,
    from the oldest run the busiest one returned to the same cut-off; raise
    `--limit` if `fetch` says the window holds more), so each covers the same
-   days, and join
-   only the files from this fetch, by name (`cat .joggernaut/before-ci.jsonl
+   days, and join only the files from this fetch, by name (`cat .joggernaut/before-ci.jsonl
    .joggernaut/before-lint.jsonl > .joggernaut/before.jsonl`): `split` then
    prints the PR wait across them per commit. That line counts a commit
    once every workflow it ran passed, timed from the first run's creation
@@ -109,7 +108,8 @@ in `references/measuring.md`.
 3. **Split the time.**
    `python3 scripts/measure.py split --in .joggernaut/before.jsonl`. It
    reports:
-   - the PR wait, at the median and the slowest 5% of successful runs, from
+   - the PR wait, at the median and the slowest 5% of successful runs (the
+     slowest run, below 20; `split` says which), from
      the start of the run's final attempt to its last job done (time spent
      waiting for someone to rerun a failure isn't in it). With several
      workflows in the file that line pools them; report the "PR wait across
@@ -250,7 +250,7 @@ in `references/measuring.md`.
 
 ## What it measures
 
-PR wait at the median and slowest 5%, the waiting/setup/running split per job
+PR wait at the median and slowest 5% (the slowest run below 20 runs), the waiting/setup/running split per job
 and on the slowest path, minutes on failed or cancelled runs, pushes per pull
 request, and catch-up runs. It changes no tracked file, so there is no after.
 
