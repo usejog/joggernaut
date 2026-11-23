@@ -52,26 +52,30 @@ If either `fetch` refuses, stop: anything after it would read an older file.
 Then keep the runs that tested the fix's branch, judged from each run's own
 record the same way on both sides:
 
-- A `pull_request` run tests its merge commit with the base as it was when
-  the run started, and the `HEAD is now at … Merge HEAD into BASE` line
-  `actions/checkout` prints names that base: keep the run if BASE is on the
-  branch the fix merged into (`git merge-base --is-ancestor BASE
-  origin/BRANCH`). A `push` run tests its own commit: keep it if that
-  commit is on the branch.
+- A `pull_request` run: keep it if the pull request targeted the branch
+  the fix merged into. `fetch` records the branch GitHub lists with the run
+  (`pull_request_bases`); a run from a fork lists none, so leave it out
+  unless you can tell its branch. It tests its merge commit with the base
+  as it was when the run started: the `HEAD is now at … Merge HEAD into
+  BASE` line `actions/checkout` prints names that base.
+- A `push` run tests its own commit: keep it if the push was to that
+  branch.
 - Leave out workflows that check out the pull request's head instead of
   the merge commit.
 - On the after side, also require the fix in that base or commit
   (`git merge-base --is-ancestor FIX_SHA BASE`), with no revert of it there.
-- A run that passed but shows no such line is unknown: leave it out. A
-  failed run that never got to checkout (a startup failure, or a failed job
-  before it) stays on both sides: it is never timed, and its failure counts.
+- A run that passed but can't be placed (no such line) is unknown: leave it
+  out. A failed run you can't place stays on both sides, wherever it
+  stopped (before checkout, or in it): it is never timed, and its failure
+  counts.
 
 Write the kept runs, one line each as `fetch` wrote them, to
-`before-fix.jsonl` and `after-fix.jsonl`, and compare those:
+`before-fix.jsonl` and `after-fix.jsonl`, and compare those, with the
+same `--event` as the fetches (`pull_request` unless you gave another):
 
 ```sh
 MEASURE compare --before .joggernaut/before-fix.jsonl --after .joggernaut/after-fix.jsonl \
-  --label RUNNER-LABEL [--job NAME] &&  # always pass the runner label; add --job when jobs run on different runners
+  --event pull_request --label RUNNER-LABEL [--job NAME] &&  # always pass the runner label; add --job when jobs run on different runners
 MEASURE tests --before JUNIT-BEFORE --after JUNIT-AFTER   # each downloaded into a new, empty folder
 ```
 
@@ -82,10 +86,15 @@ fetch it only once it has ended and every run created in it has finished;
 finish keeps the fastest of the window and can pass for a speedup with no
 change at all.
 
-`compare` needs at least 5 successful comparable runs a side and reports the
-failure rate on both sides. If more runs fail after than chance explains (a
-one-sided test at 5%), the result is not valid; a smaller rise is printed, and
-you report it. Report its verdict as printed, with the run count it names, for
+`compare` needs at least 5 successful comparable runs a side. Those are the
+runs it times; `--label`, `--job` and `--cache` choose them. The failure rate
+it reports reads every finished run of the workflow and event in each file,
+whatever those filters say, so a filter can't hide or dilute a failure. If
+more runs fail after than chance explains (a one-sided test at 5%), the
+result is not valid. If more fail after but within chance, the verdict says
+"median faster …, but more runs failed after": at a few runs a side the test
+can't rule out a real rise, so name each failure's cause before calling it
+faster. Report its verdict as printed, with the run count it names, for
 example "median faster (5 runs a side)". `tests` fails if any test stopped
 running, was newly skipped or newly fails.
 

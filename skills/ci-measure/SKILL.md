@@ -125,8 +125,8 @@ If the change touched tests or test setup, run the break-it probe (step
    a pull request, and leave
    out runs whose base lacks the fix, or whose checkout prints no such line
    (mark those unknown); a run's time alone doesn't show it. Keep a failed
-   run that never got to checkout (a startup failure, or a failed job before
-   it): it is never timed, and its failure counts, as on the before side. An ancestor
+   run you can't place, wherever it stopped (before checkout, or in it): it
+   is never timed, and its failure counts, as on the before side. An ancestor
    fix may have been reverted since: also check that no revert of it is an ancestor of that run's BASE. Leave out pull requests
    into other branches, workflows that check out the pull request's head
    instead of the merge commit, and `push` runs on branches without the fix
@@ -135,7 +135,7 @@ If the change touched tests or test setup, run the break-it probe (step
    `fetch` wrote them. Fetch the baseline again by replaying its recorded
    `fetch` command (the same runs, each now read by this `fetch`), and keep
    in `.joggernaut/before-fix.jsonl` only its runs of the same branch, judged
-   the same way from each run's own checkout line or commit:
+   the same way (the branch `fetch` recorded for the run, or a push run's):
    `references/measuring.md` gives the rule and the commands.
    If `fetch` refuses, stop there: anything after it would read an older
    file. You need at least 5 comparable runs a side. If the window ends with fewer,
@@ -151,7 +151,8 @@ If the change touched tests or test setup, run the break-it probe (step
 
    ```sh
    python3 scripts/measure.py compare --before .joggernaut/before-fix.jsonl \
-     --after .joggernaut/after-fix.jsonl --workflow "CI" --label ubuntu-latest [--job "test"]
+     --after .joggernaut/after-fix.jsonl --workflow "CI" --event pull_request \
+     --label ubuntu-latest [--job "test"]
    ```
 
    It prints the medians, the slowest runs (below 20 runs a side, the
@@ -159,7 +160,8 @@ If the change touched tests or test setup, run the break-it probe (step
    many; the slowest 5% from 20; provisional below 100), the Hodges-Lehmann
    estimate of the change with its exact 95% interval, the runs it left out
    and why, the failure rate and the runner-minutes per run on each side, and
-   one verdict with the run count: **median faster**, **median slower**,
+   one verdict with the run count: **median faster** (with ", but more runs
+   failed after" when the failure rate rose within chance), **median slower**,
    **mixed** (the runs tend one way, the median went the other or nowhere),
    **no measurable change yet** (more runs can tighten it), **not enough runs
    yet**, or **not valid** when more runs fail after than chance explains.
@@ -168,7 +170,9 @@ If the change touched tests or test setup, run the break-it probe (step
    printed, with the slowest runs beside it, since the median can improve
    while the tail gets worse. If any run failed after the change,
    name the cause of each before reporting a speedup: at a few runs a side,
-   only a large rise in failures counts as beyond chance.
+   only a large rise in failures counts as beyond chance. The failure rate
+   reads every finished run of the workflow and event; `--label`, `--job`
+   and `--cache` choose only the runs timed.
 3. Compare the tests, by name:
 
    ```sh

@@ -278,7 +278,8 @@ with tempfile.TemporaryDirectory() as t:
     if verdict(t + "/tb", t + "/ta").get("verdict_code") != "no_change_yet":
         bad.append("compare: identical tied times should be no measurable change")
     # The failure-rate test on the real path: 5 passed before; 5 passed and 6 or 7 failed after.
-    for fails, want in ((6, "faster"), (7, "not_valid")):
+    # 6 failures is within chance at 5 a side, but any rise in failures withholds a clean "faster".
+    for fails, want in ((6, "faster_more_failures"), (7, "not_valid")):
         fake_runs(t + "/fa%d" % fails, [500, 505, 510, 515, 520], 7000 + 100 * fails)
         fake_runs(t + "/fa%d" % fails, [400] * fails, 7050 + 100 * fails, "failure")
         v = verdict(t + "/sb", t + "/fa%d" % fails)
@@ -328,8 +329,9 @@ with tempfile.TemporaryDirectory() as t:
         open(t + "/" + name, "w").write("".join(json.dumps(x) + "\n" for x in rows2))
         r = run([M, "compare", "--before", t + "/sbw", "--after", t + "/" + name, "--json",
                  "--label", "windows-latest", "--job", "test"])
-        if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
-            bad.append("compare: %s case hid the failures under --job --label\n%s%s" % (name, r.stdout, r.stderr))
+        v = json.loads(r.stdout) if r.returncode == 0 else {}
+        if (v.get("failed_after") or [0])[0] != 7 or v.get("verdict_code") not in ("not_valid", "faster_more_failures"):
+            bad.append("compare: %s case hid the failures under --job --label: %r" % (name, v.get("verdict")))
     # Same-name matrix legs: the leg on the asked runner is timed, whichever is listed first.
     def legs(src, dst, ubuntu_secs, first_ubuntu):
         rows2 = []
@@ -358,6 +360,21 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "compare", "--before", t + "/sb", "--after", t + "/early", "--label", "ubuntu-latest", "--json"])
     if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_valid":
         bad.append("compare: startup failures dropped out of the count under --label\n" + r.stdout + r.stderr)
+    # The failure check reads every run of the workflow: a cache filter can't drop startup
+    # failures that never reached the cache, and a failure before doesn't buy a clean "faster".
+    json.dump({str(x["id"]): "hit" for x in started + [json.loads(l) for l in open(t + "/sb") if l.strip()]},
+              open(t + "/hits.json", "w"))
+    r = run([M, "compare", "--before", t + "/sb", "--after", t + "/early", "--json",
+             "--cache", "hit", "--cache-state", t + "/hits.json"])
+    v = json.loads(r.stdout) if r.returncode == 0 else {}
+    if v.get("verdict_code") != "not_valid":
+        bad.append("compare: --cache hit hid startup failures: %r\n%s" % (v.get("verdict"), r.stderr))
+    sb1 = [json.loads(l) for l in open(t + "/sb") if l.strip()]
+    open(t + "/sb1", "w").write("".join(json.dumps(x) + "\n" for x in sb1 + [dict(sb1[0], id=3999, conclusion="failure")]))
+    r = run([M, "compare", "--before", t + "/sb1", "--after", t + "/fa7", "--json"])
+    v = json.loads(r.stdout) if r.returncode == 0 else {}
+    if v.get("verdict_code") == "faster":
+        bad.append("compare: a failure before bought a clean faster beside 7 after: %r" % v.get("verdict"))
     # Under --label, a run where no job shows a runner can't be one of the 5.
     nolab = [json.loads(l) for l in open(t + "/sa") if l.strip()][:4]
     extra = dict(nolab[0], id=4999)

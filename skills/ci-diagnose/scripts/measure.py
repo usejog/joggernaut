@@ -310,6 +310,8 @@ def write_runs(a, runs, out):
             "conclusion": r.get("conclusion"), "created_at": r.get("created_at"),
             "run_started_at": r.get("run_started_at"), "updated_at": r.get("updated_at"),
             "pull_requests": [p.get("number") for p in r.get("pull_requests") or []],
+            # The branch each pull request targeted, as GitHub lists it with the run.
+            "pull_request_bases": [(p.get("base") or {}).get("ref") for p in r.get("pull_requests") or []],
             "jobs": [{
                 "id": j["id"], "name": j.get("name"), "run_attempt": j.get("run_attempt", 1),
                 "conclusion": j.get("conclusion"), "created_at": j.get("created_at"),
@@ -634,34 +636,26 @@ def load_cache_state(a):
 
 
 def outside_cohort(r, a, cache):
-    """Why a run isn't comparable (ignoring its outcome), or None."""
+    """Why a run can't be one of the timed runs (ignoring its outcome), or None. The
+    failure check doesn't use this: it counts every finished run of the workflow and
+    event, so no runner, job or cache filter can hide or dilute a failure."""
     if a.event and r.get("event") != a.event:
         return "event %s" % r.get("event")
     if a.cache and cache.get(str(r["id"])) != a.cache:
         return "cache %s" % (cache.get(str(r["id"])) or "state unknown")
     if a.label and not on_runner(r, a):
         return ("job %s not on runner %s" % (a.job, a.label) if a.job
-                else "not every job on runner %s" % a.label)
+                else "not every job on runner %s (pass --job to measure one job)" % a.label)
     return None
 
 
 def on_runner(r, a):
-    """Whether a run belongs under --label. A job that never got a runner (skipped after
-    an earlier failure, or a run that failed before any job started) has no labels, so
-    the runner of a failure is often unknown. Resolve that against a speedup: a run that
-    passed counts only with evidence it ran on the runner (it is the one timed), and one
-    that failed counts unless its jobs show it ran on another."""
-    failed = failed_somewhere(r, a)
+    """Evidence a run can be timed under --label: with --job, a job of that name ran on
+    the runner; without, every job that ran (has labels) did, and at least one ran."""
     if a.job:
-        same = [j for j in r.get("jobs", []) if j.get("name") == a.job]
-        labelled = [j for j in same if j.get("labels")]
-        if any(a.label in j["labels"] for j in labelled):
-            return True
-        return failed and (not labelled or len(labelled) < len(same))
+        return any(a.label in (j.get("labels") or []) for j in r.get("jobs", []) if j.get("name") == a.job)
     labelled = [j for j in latest_jobs(r) if j.get("labels")]
-    if not failed:
-        return bool(labelled) and all(a.label in j["labels"] for j in labelled)
-    return not labelled or any(a.label in j["labels"] for j in labelled)
+    return bool(labelled) and all(a.label in j["labels"] for j in labelled)
 
 
 FAILED = ("failure", "timed_out", "startup_failure")
@@ -818,13 +812,16 @@ def cmd_compare(a):
     before = durations(rb, a, "before", excluded)
     after = durations(ra, a, "after", excluded)
 
-    cache = load_cache_state(a)
+    # The failure check and the cost read every run of the workflow and event: the
+    # runner, job and cache filters choose only which runs are timed, so none of them can
+    # drop a failure whose runner or cache state is unknown, or add green runs that
+    # weren't timed.
+    in_workflow = lambda r: workflow_matches(r, a.workflow) and (not a.event or r.get("event") == a.event)
 
     def fail_rate(rs):
-        # The same cohort as the timings (workflow, event, cache state, runner),
-        # every finished run except ones a newer push cancelled. A failed or
-        # rerun first attempt counts as a failure even if the rerun passed.
-        rs = [r for r in rs if workflow_matches(r, a.workflow) and not outside_cohort(r, a, cache)]
+        # Every finished run except ones a newer push cancelled. A failed or rerun first
+        # attempt counts as a failure even if the rerun passed.
+        rs = [r for r in rs if in_workflow(r)]
         done = [r for r in rs if r.get("conclusion") not in (None, "cancelled", "skipped", "neutral")]
         bad = [r for r in done if failed_somewhere(r, a)]
         return (len(bad), len(done))
@@ -842,13 +839,13 @@ def cmd_compare(a):
 
     def minutes(rs):
         # What the runs cost: every job and attempt, rounded up per job as GitHub bills,
-        # over the same cohort as the failure rate.
-        rs = [r for r in rs if workflow_matches(r, a.workflow) and not outside_cohort(r, a, cache)]
+        # over the same runs as the failure rate.
+        rs = [r for r in rs if in_workflow(r)]
         # Cancelled runs cost minutes too, and avoiding them is often the saving.
         return [run_minutes(r) for r in rs if r.get("conclusion") not in (None, "skipped", "neutral")]
 
     def per_day(rs, m):
-        rs = [r for r in rs if workflow_matches(r, a.workflow) and not outside_cohort(r, a, cache)]
+        rs = [r for r in rs if in_workflow(r)]
         days = [ts(r["created_at"]) for r in rs if r.get("created_at")]
         span = (max(days) - min(days)) / 86400.0 if len(days) > 1 else 0
         return round(sum(m) / span) if span >= 1 else None
@@ -875,7 +872,14 @@ def cmd_compare(a):
         # The interval says the after runs tend to be faster (or slower). It speaks for
         # the median only when the medians moved the same way; a change that speeds most
         # runs and slows the middle one is reported as mixed.
-        if hi < 0 and moved < 0:
+        if hi < 0 and moved < 0 and rate(fa) > rate(fb):
+            # A higher failure rate after, even within chance, isn't a clean speedup: at a
+            # few runs a side the failure test can't rule out a real rise.
+            res["verdict_code"] = "faster_more_failures"
+            res["verdict"] = ("median faster (%s), but more runs failed after (%d of %d) than before"
+                              " (%d of %d): name each failure's cause before calling it faster"
+                              % ((runs,) + fa + fb))
+        elif hi < 0 and moved < 0:
             res["verdict_code"], res["verdict"] = "faster", "median faster (%s)" % runs
         elif lo > 0 and moved > 0:
             res["verdict_code"], res["verdict"] = "slower", "median slower (%s)" % runs
