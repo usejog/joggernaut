@@ -14,6 +14,10 @@ This skill is the only way any skill here may claim a result. It records
 a baseline from runs that already happened, compares it with runs after a
 change, and checks by name that no test stopped running.
 
+Each step below rests on a result other teams published
+(`references/evidence.md`), on vendor docs (listed in the same file), or on
+the reasoning under "Why this works: reasoning", or says it is a choice.
+
 <!-- rules:start -->
 ## The rules for any change to CI
 
@@ -51,8 +55,10 @@ in `references/measuring.md`.
 ## The tool
 
 `scripts/measure.py` in this folder: one Python file, standard library only,
-plus `gh`. It calls GitHub with GET only and stops when fewer than 300 API
-requests are left. Run it with `python3 scripts/measure.py <command> --help`.
+plus `gh`. It calls GitHub with GET only. `fetch` checks the rate limit
+before it starts and every 50 runs, and stops when fewer than 300 requests
+are left (a default reserve, so other tools sharing the token keep some);
+it checks every 50 runs, not every request, so it can end under 300. Run it with `python3 scripts/measure.py <command> --help`.
 If Python isn't available, follow the same method by hand with `gh api`; the
 steps below say what each command computes.
 
@@ -62,7 +68,8 @@ steps below say what each command computes.
 
 1. `gh auth status`. If it fails, stop and ask the person to log in.
 2. Pull the runs that already happened. Reuse them; never trigger runs just to
-   build a baseline without asking, since runs cost money.
+   build a baseline without asking, since runs use minutes, which can cost
+   money.
 
    ```sh
    python3 scripts/measure.py fetch --repo OWNER/NAME --workflow ci.yml \
@@ -95,6 +102,8 @@ Report the baseline and the branch's own runs in the pull request description,
 labelled **provisional**: a handful of runs can't show a change smaller than
 the run-to-run noise. Compare the tests that ran on the branch with the
 baseline now (step 3.3): a lost test fails the change before it merges.
+If the change touched tests or test setup, run the break-it probe (step
+3.4) now too, and record which behaviour the changed test caught.
 
 ### 3. After the change merges
 
@@ -105,14 +114,25 @@ baseline now (step 3.3): a lost test fails the change before it merges.
    hasn't ended, has runs still going, or holds more runs than `--limit`.
    `python3 scripts/measure.py fetch ... --created 'MERGE-TIME..WINDOW-END' --out .joggernaut/after.jsonl`
    (times as `YYYY-MM-DDTHH:MM:SSZ`).
-   A `pull_request` run tests the pull request merged into its base as the
-   base was when the run started, so runs on pull requests into the same
-   branch, created after the merge, include the fix. Leave out pull requests
+   A `pull_request` run tests the pull request's merge commit with its base
+   (GitHub docs: `GITHUB_SHA` is the last merge commit on
+   `refs/pull/N/merge`). As a conservative selection rule, count a run as
+   including the fix only if that base does: the
+   line `HEAD is now at … Merge HEAD into BASE` that `actions/checkout`
+   prints names the base, and `git merge-base --is-ancestor FIX_SHA BASE`
+   checks it (a pull request could also bring the fix in itself or undo
+   it; this rule doesn't look at that). Do that for each after-side run of
+   a pull request, and leave
+   out runs whose base lacks the fix, or whose checkout prints no such line
+   (mark those unknown); a run's time alone doesn't show it. An ancestor
+   fix may have been reverted since: also check that no revert of it is an ancestor of that run's BASE. Leave out pull requests
    into other branches, workflows that check out the pull request's head
    instead of the merge commit, and `push` runs on branches without the fix
-   (`git merge-base --is-ancestor FIX_SHA RUN_SHA` tells you).
-   If `fetch` refuses, stop there: `compare` would read an older file. You
-   need at least 5 comparable runs a side. If the window ends with fewer,
+   (`git merge-base --is-ancestor FIX_SHA RUN_SHA` tells you). Write the
+   runs that stay into `.joggernaut/after-fix.jsonl`, one line each as
+   `fetch` wrote them.
+   If `fetch` refuses, stop there: anything after it would read an older
+   file. You need at least 5 comparable runs a side. If the window ends with fewer,
    `compare` reports "not enough runs yet" and shows no timings; choose a
    longer window, write the exact commands for it into the pull request so
    anyone can finish the measurement, and stop; never trigger runs to fill
@@ -125,7 +145,7 @@ baseline now (step 3.3): a lost test fails the change before it merges.
 
    ```sh
    python3 scripts/measure.py compare --before .joggernaut/before.jsonl \
-     --after .joggernaut/after.jsonl --workflow "CI" --label ubuntu-latest [--job "test"]
+     --after .joggernaut/after-fix.jsonl --workflow "CI" --label ubuntu-latest [--job "test"]
    ```
 
    It prints the medians, the slowest runs (below 20 runs a side, the
@@ -150,13 +170,18 @@ baseline now (step 3.3): a lost test fails the change before it merges.
    ```
 
    It exits non-zero if any test stopped running (including one now skipped)
-   or any new failure appeared, and refuses an empty report. A test's name
-   is compared, so a removed test can't hide behind an added one. Either one fails the change, however much
-   faster it is. Say so plainly, and name the tests.
+   or any new failure appeared, and refuses an empty report or one where
+   no test ran. A test is known by its report's path (shard numbers
+   blanked), its suite and every suite around it, class, file (its own, or
+   the nearest suite's) and name, so a removed test can't hide behind an added one with another
+   name; two tests that share all of these can't be told apart. The result
+   covers only the reports downloaded: say which jobs and matrix legs they
+   came from on each side. A missing test or a new failure fails the
+   change, however much faster it is. Say so plainly, and name the tests.
 4. If the change touched tests or test setup, run the **break-it probe**:
    re-plant a bug the suite caught before (revert a fix, flip a condition) on a
    local throwaway branch (never pushed, so it starts no CI run), and confirm
-   the suite still fails for that reason. Report the result, then delete the
+   the changed test itself fails for that reason, not only some other test. Report the result, then delete the
    branch.
 5. Post the result as a comment on the merged pull request, faster or not.
 
@@ -216,7 +241,7 @@ As their authors reported them; we didn't reproduce them.
 - A local proxy can lie: one team's suite went from 163 s to about 100 s
   locally, and from 14 to 13 minutes on CI. See `references/evidence.md`.
 - Shopify's Ruby LSP speedup took CI from about 30 to about 20 minutes, and
-  its test plan checked the count: all 18,329 tests ran, the same count, with
+  its test plan checked the count: 18,329 tests, the same count, with
   the same two failures as before.
 - Sidelab's agent wrote a baseline file with the numbers and the commands to
   re-measure before touching anything, and proved each fix with a CI run.

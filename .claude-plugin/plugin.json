@@ -1,7 +1,7 @@
 {
   "name": "jog",
   "version": "0.1.0",
-  "description": "Find out why your pull requests wait on CI, then let your coding agent fix the biggest cause with every test still running. Start with /jog:ci-diagnose: a read-only report of where GitHub Actions time goes, ranked by wait saved.",
+  "description": "Fixes for slow CI, drawn from results other teams published, GitHub's docs and arithmetic anyone can check, as skills for GitHub Actions. Start with /jog:ci-diagnose: a read-only report of where your pull requests' CI time goes, ranked by what your own runs show. Every fix must keep every test running; ci-measure checks it by name where CI saves test reports.",
   "author": {
     "name": "Machine Intelligence Company",
     "url": "https://github.com/usejog"

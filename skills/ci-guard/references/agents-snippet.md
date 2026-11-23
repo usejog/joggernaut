@@ -2,7 +2,9 @@
 
 Paste this into your repository's AGENTS.md (or CLAUDE.md). It is the same
 set of rules every skill in Joggernaut follows, for agents that read rules files
-only. Source: https://github.com/usejog/joggernaut
+only. Each rule rests on results other teams published, on vendor docs, on
+reasoning anyone can check, or is a safety choice; the basis of each:
+https://github.com/usejog/joggernaut#where-each-rule-comes-from
 
 <!-- rules:start -->
 ## The rules for any change to CI
@@ -34,16 +36,19 @@ never add `pull_request_target` or widen a workflow's `permissions`.
 
 ## Working with CI
 
-- At most two CI rounds per task. If CI is still red after the second, stop
-  and report what failed and what you tried. (The one update before a strict
-  merge, below, doesn't count.)
-- Run the fast checks (format, lint, type check) before every push. Never push
-  with `--no-verify`.
-- Never pipe a test run into `tail` or `head`: the exit code and the failure
-  get lost. Write the output to a file and read the file.
+- At most two CI rounds per task (Stripe's limit; a choice you can change).
+  If CI is still red after the second, stop and report what failed and what
+  you tried. (The one update before a strict merge, below, doesn't count.)
+- Run the fast checks (format, lint, type check) before every push. Never skip the hook: no `--no-verify`, and no variable that turns it off (`HUSKY=0`, `SKIP=`, or the hook's own).
+- Never pipe a test run into `tail` or `head`: without `pipefail` the
+  pipeline reports success when the tests fail, and the cut output can drop
+  the failure. Write the output to a file and read the file.
 - If a test exposes a real bug, fix the code, not the test.
+- Never set a commit status or check run yourself: a required check is what
+  keeps CI honest.
 - Never merge main into a pull request, rebase it or run `gh pr update-branch`
-  just to bring it up to date: each update pays for a full CI run. Update it
-  for a merge conflict or a change on main it needs. If branch protection
-  requires up-to-date branches and there is no merge queue, update once,
-  right before the merge. Merge only when a person asks you to.
+  just to bring it up to date: an update can start the pull request's CI
+  again. Update it for a merge conflict or a change on main it needs. If
+  branch protection requires up-to-date branches and there is no merge
+  queue, update right before the merge, and again only if main moves before
+  it merges. Merge only when a person asks you to.

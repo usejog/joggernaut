@@ -1,7 +1,10 @@
 # Joggernaut: rules for agents
 
-Every skill in this repository follows these rules. They are here for agents
-that read rules files only, and for anyone changing this repository.
+Every skill in this repository follows these rules. Each rests on results
+other teams published, on vendor docs, on reasoning anyone can check, or is
+a safety choice labelled as one; the README's "Where each rule comes from" links the basis
+of each. They are here for agents that
+read rules files only, and for anyone changing this repository.
 
 <!-- rules:start -->
 ## The rules for any change to CI
@@ -34,13 +37,13 @@ never add `pull_request_target` or widen a workflow's `permissions`.
 ## Working on this repository
 
 - Skills live only in `skills/<name>/`. Never copy them into `.agents/skills`
-  or `.claude/skills` here, or agents that open this repository load them
-  twice.
+  or `.claude/skills` here, or agents that open this repository can load
+  them twice or pick one copy over the other.
 - `skills/ci-measure/scripts/measure.py` is the one source of the measuring
   script. After changing it, run `tools/sync` to copy it into every skill.
 - The rules block above is the same in `snippets/AGENTS.md` and every
   `SKILL.md`. Change it in `snippets/AGENTS.md`, then run `tools/sync`.
 - Run `python3 tools/check.py` before every push. It checks the skill format,
-  that the copies are in step, the evidence links, and a generic leak scan.
+  that the copies are in step, the evidence links' format (not what they say: check that by reading them), and a generic leak scan.
 - A public file cites only public, verified links. No private names, ids,
   internal hosts or numbers that a public link doesn't back.

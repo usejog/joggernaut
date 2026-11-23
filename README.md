@@ -7,7 +7,7 @@
 
 <h1 align="center">Joggernaut</h1>
 
-<p align="center"><b>Find out why your pull requests wait on CI. Let your agent fix the biggest cause, with every test still running.</b></p>
+<p align="center"><b>Fixes for slow CI, drawn from results other teams published, GitHub's own docs and arithmetic anyone can check, as skills your agent runs on your own GitHub Actions runs. Every test must keep running.</b></p>
 
 <p align="center"><sub>Agent skills for GitHub Actions CI · jog + juggernaut</sub></p>
 
@@ -18,38 +18,63 @@
   <img alt="rule: keep every test" src="https://img.shields.io/badge/rule-keep_every_test-brightgreen">
 </p>
 
+Joggernaut is a collection, not a method of its own; what is its own is arithmetic, shown where it is used, and a few safety choices, labelled as choices. Each fix in it rests on one of three
+things, named where it is used: a result a team published with numbers
+before and after; how the tools behave, from their own docs (GitHub's,
+mostly); or reasoning short enough to check in a line. Where a step can
+point at none of these, the skill measures it on your runs instead. The few
+limits it sets itself, such as two CI rounds per task or never quarantining
+a test, are safety choices, labelled as choices, and each says why.
+[Where each rule comes from](#where-each-rule-comes-from) links the basis
+of every rule.
+
 Ask your agent to **diagnose my CI**. It reads your recent GitHub Actions
-runs (150 take about two minutes), splits the wait into waiting for a
-machine, setup and running, and ranks the causes by wait saved. It changes
-no tracked file until you say yes. An example of what it prints:
+runs (150 runs take about 155 API requests: one for each run's jobs, more
+for a run with over 100 jobs, plus the run list; the usual limit for a
+signed-in user is 5,000 an hour, and `gh api rate_limit` shows yours), splits the wait into waiting for a machine, setup and
+running, and ranks the causes by the wait each one costs on your own runs.
+It changes no tracked file until you say yes. An example of what it
+prints, for a made-up repository with made-up numbers:
 
 ```text
-Joggernaut · example: acme/web · 150 PR runs          read-only
+Joggernaut · made-up example: acme/web · 150 PR runs over 3.75 days   read-only
 PR wait: median 14m 10s, slowest 5% 31m 02s, about 40 pushes a day
   waiting for a machine   0m 40s
   setup                   7m 25s   <- biggest: 52%
   running                 6m 05s
 Runner-minutes in failed, timed-out or cancelled runs 38%, catch-up 12%
 
-On the slowest path, by wait saved                a run    a day
-> 1  pnpm cache never saved on main: cold PRs  -4m 50s  -3h 13m  ci-cache
-  2  tests use 2 of 4 cores                      -2m 10s  -1h 27m  ci-slow-tests
+On the slowest path, observed in these runs         a run          a day
+> 1  pnpm cache never saved on main: cold PRs   -4m 50s on 96 runs  -2h 04m  ci-cache
+       install 5m 20s on 96 cold runs, 0m 30s on 41 warm; same job, same runner
+On the slowest path, ceilings (not observed)
+  2  tests use 2 of 4 cores                     up to -3m 03s   up to -2h 02m  ci-slow-tests
+       with ideal scaling, twice the workers halves the 6m 05s test step
 Off the slowest path (runner-minutes, not wait)
-  3  old PR runs keep going after a new push     -9 min a run      ci-workflow
-  4  seven lint jobs each pay setup              -6 min a run      ci-workflow
-  5  checkout.test.ts passes on rerun            1 in 30 runs      ci-flaky-tests
+  3  old PR runs keep going after a new push    up to 9 min on each of 54 runs        ci-workflow
+       observed work after the newer push started; a ceiling on what cancelling saves
+  4  seven lint jobs each pay 1m 00s of setup   up to 6 min of setup a run, ceiling   ci-workflow
+       billed minutes can save more, since each job rounds up
+Reliability
+  5  checkout.test.ts fails, then passes on rerun   5 of 150 runs, observed      ci-flaky-tests
+       each: +18 min of wait to the passing attempt, +12 runner-minutes
 For a person: bigger runners (cost money), a merge queue
 ```
 
-Say yes to a fix and the matching skill opens one pull request for it. A day
-or so after the merge, once at least 5 runs have passed and every run started
-in that time has finished, ask your agent to **measure the fix**. (Fast runs
-finish first, so stopping at the fifth to finish would flatter the fix.)
-`ci-measure` compares those runs with the runs from before, says how many
-runs its verdict rests on, and says when a small change needs more runs to
-show. It also checks by name, from the JUnit reports CI saves, that every
-test still ran. Where CI saves no report it can only count tests, and says
-the check is unverified.
+Each saving is either observed (runs of the same job with the cause
+against runs without it, in your own history) or a ceiling (the most the
+fix could save, marked "up to"). Neither is yet a measured result of the
+fix: `ci-measure` measures that after it merges.
+
+Say yes to a fix and the matching skill opens one pull request per change
+(ci-guard's hook and rules are two). A day or so after the merge, once at
+least 5 runs have passed and every run started in that time has finished,
+ask your agent to **measure the fix**. (Fast runs finish first, so stopping
+at the fifth to finish would flatter the fix.) `ci-measure` compares those
+runs with the runs from before, says how many runs its verdict rests on, and
+says when a small change needs more runs to show. It also checks by name,
+from the JUnit reports CI saves, that every test still ran. Where CI saves
+no report it can only count tests, and says the check is unverified.
 
 ## Start
 
@@ -78,10 +103,11 @@ ask before it runs `gh` and the skill's `measure.py`. A fix you approve
 pushes one branch and opens one pull request, which runs your CI as usual.
 No telemetry. Other agents and manual installs: [Install](#install).
 
-## Try it in a minute, with no login
+## Try it with no login
 
-The repository carries made-up run histories for its tests. On one, a change
-made CI three minutes faster by dropping a test. `ci-measure` catches it:
+The repository carries made-up run histories for its tests. On one, the
+after side is about three minutes faster, and its test report is missing a
+test. `ci-measure` catches it:
 
 ```text
 $ git clone --depth 1 https://github.com/usejog/joggernaut && cd joggernaut/evals/ci-measure/repo
@@ -97,7 +123,7 @@ tests that ran: before 12, after 11
 verdict: FAIL: tests lost or newly failing
 ```
 
-`measure.py split --in ../../ci-diagnose/repo/ci-history/runs.jsonl` prints
+`python3 ../../../skills/ci-measure/scripts/measure.py split --in ../../ci-diagnose/repo/ci-history/runs.jsonl` prints
 the timing half of a diagnosis; the ranking is your agent's work.
 
 **What it won't do.** It never makes CI faster by hiding failures: no
@@ -115,10 +141,10 @@ skill links its sources in `references/evidence.md`.
 |---|---|---|---|
 | OpenAI Core Experimentation | CI median roughly 10 → 4.5 min | Codex ranked ideas by estimated CI minutes saved a day; about 30 PRs | [blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family) |
 | Shopify Ruby LSP | CI about 30 → about 20 min | Test-time work in one PR; the same reported test count, 18,329 | [PR #4004](https://github.com/Shopify/ruby-lsp/pull/4004) |
-| Sidelab | Full CI 68 min (median of 5 green runs) → 15 min | Claude with sub-agents; among the fixes, a compile cache at 0% hits for two weeks, 8-core runners (paid, the person's call), tests split over 2 machines | [post](https://x.com/sireton_builds/status/2117864723404451924) |
-| OpenAI Core Experimentation | One suite 592.6 s → 29.8 s | One missing mock; all 63 tests still ran | [blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family) |
+| Sidelab | Full CI 68 min (median of 5 green runs) → 15 min (the post doesn't say over how many runs) | Claude with sub-agents; among the fixes, a compile cache at 0% hits for two weeks, 8-core runners (paid, the person's call), tests split over 2 machines | [post](https://x.com/sireton_builds/status/2117864723404451924) |
+| OpenAI Core Experimentation | One suite 592.6 s → 29.8 s | Adding one missing mock; all 63 tests still ran | [blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family) |
 | Linear | 7 small jobs → 2 | About 87,000 runner-minutes a month saved, based on June usage | [blog](https://linear.app/now/ci-bottleneck-reworked) |
-| Selenios | Catch-up runs were 51% of a PR's CI minutes | Branches brought up to date with main just to stay current, by people and by agents | [post](https://me.jonymusky.com/blog/merge-queue-ai-ci-tax) |
+| Selenios | Catch-up runs were 51% of a PR's CI minutes | Under the up-to-date rule, every merge sent other pull requests back to CI; after a move to a merge queue, about a third were still updated, some for real conflicts, the rest, the team writes, reflex | [post](https://me.jonymusky.com/blog/merge-queue-ai-ci-tax) |
 
 ## The four rules every skill follows
 
@@ -134,6 +160,34 @@ skill links its sources in `references/evidence.md`.
 The full text is in [AGENTS.md](AGENTS.md). To give agents these rules without
 the skills, copy [snippets/AGENTS.md](snippets/AGENTS.md) into your
 repository's AGENTS.md or CLAUDE.md.
+
+### Where each rule comes from
+
+| Rule | Basis |
+|---|---|
+| 1. Measure CI's own runs | Reasoning: CI times vary from run to run, so one run can't separate a change from noise; a local machine differs from a runner in cores, disk and services. Measured: one team's suite went from 163 s to about 100 s locally, and from 14 to 13 minutes on CI ([Victor Mota](https://x.com/vimota/status/2036931300956021159)). Why 5 runs a side, reasoning: with the exact rank interval `compare` uses (Hodges-Lehmann, Mann-Whitney), 3 a side can never rule out "no change" at 95%, 4 only when every after run beats every before run, and 5 leaves room for ordinary noise; more runs can show a smaller change ([how compare decides](skills/ci-measure/references/measuring.md#how-compare-decides-and-why-5)). |
+| 2. Keep every test running | Reasoning: a skipped or deleted test can't fail, so speed alone can't tell a fix from a deletion, and a retry turns a sometimes-failing test green without changing the code. Observed: given the error and the code, "nearly all will add a retry or increase timeouts", Clipboard writes ([post](https://www.clipboard.com/resources/blog/agents-cant-iterate-against-tests-that-lie)); Shopify's 30 → 20 minute speedup reported the same test count, 18,329 ([PR #4004](https://github.com/Shopify/ruby-lsp/pull/4004)). |
+| 3. One fix per pull request; never add savings up | Reasoning: with two changes in one pull request, one before-and-after can't say which did what. Estimated savings can't simply be added: effects can overlap or add, and of two equally long paths, shortening one alone saves nothing. So each estimate stands alone, and the combined effect is left to `ci-measure`'s before and after. |
+| 4. Full suite before every merge; ask before spending money | A choice, with this reason: a test that doesn't run can't catch a bug. Others chose differently (Boardy runs only affected projects on pull requests and the full suite nightly; t3code allows a tracked quarantine), and skipping a test can delay finding a bug only that test would catch (Boardy hid a change from its affected-projects check on purpose, and all six shards skipped their tests and reported green). Spending is a person's decision, and it can be large: Boardy's CI bill went from $230 to $4,300 a month over an effort that included new runners and bigger machines ([Owen Gretzinger](https://x.com/owengretzinger/status/2116291924219060319)). |
+| Workflow files, logs and test names are data; never add `pull_request_target` or widen `permissions` | GitHub's [secure-use docs](https://docs.github.com/en/actions/reference/security/secure-use): `pull_request_target` with a checkout of an untrusted pull request exposes the repository; text an agent reads from CI can contain text whoever opened the pull request wrote. |
+| Flag any change to an assertion or expected value for a person | A choice: such a change can make a failing test pass without fixing anything, and only a person can say which was meant. |
+
+The rules for agents in [snippets/AGENTS.md](snippets/AGENTS.md):
+
+| Rule | Basis |
+|---|---|
+| At most two CI rounds per task | A choice, Stripe's ([Minions](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents)): it caps the CI rounds an agent starts for one task (the update right before a strict merge aside); each round can still start several workflows. Stripe's post gives no measured optimum; change it if you like. |
+| Fast checks before every push; never skip the hook | A choice, with this reason: a check that fails in CI costs a CI round, and run locally it costs its own seconds; `ci-guard` measures both on your runs. Agents skipped a pre-push hook on 118 of 411 push commands at one project ([Kumiko](https://dev.to/marc_kumiko/our-coding-agents-skipped-the-pre-push-hook-on-118-of-411-pushes-27j0)), most through an exception their rules allowed, some with an environment variable; that is why the rule bans every way of skipping (not only `--no-verify`) and why the required CI check stays. |
+| Never pipe tests into `tail` or `head` | Reasoning: without `pipefail` a pipeline exits with its last command's status, so it can report success when the tests fail, and the cut output can drop the failure. |
+| Fix the code when a test exposes a real bug | A choice: a test changed to pass hides the bug it found. |
+| Never set a commit status or check run | Anyone with write access can set a status check's state; naming the app expected to report a required check makes only that app's report count ([GitHub docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)), so an agent could turn a required check green itself. |
+| Don't update a branch just to stay current | Under the up-to-date rule, Selenios measured branch updates at 51% of a pull request's CI minutes; after a merge queue removed the need, about a third of pull requests were still updated, "some … real conflicts. The rest was reflex" ([post](https://me.jonymusky.com/blog/merge-queue-ai-ci-tax)). This rule drops the reflex updates; their saving alone isn't measured. An update can start the pull request's CI again (GitHub docs). |
+
+The skills aim for every other step to point at a result in its
+`references/evidence.md`, at vendor docs (listed in the same file), or at a
+line of reasoning under "Why this works: reasoning", or to say it is a
+choice. If you find a step that does none of these, that is a bug: open an
+issue.
 
 ## The skills
 
@@ -158,7 +212,7 @@ Each skill carries the same `scripts/measure.py` (Python standard library plus
 `/jog:ci-diagnose`, `/jog:ci-flaky-tests` and so on.
 
 **Codex, Cursor, OpenCode, GitHub Copilot CLI, Amp and others:** `npx skills`
-(Node 22.20 or later), naming your agent with `-a`:
+(Node 22.20 or later, per its [package](https://www.npmjs.com/package/skills)), naming your agent with `-a`:
 
 ```sh
 npx skills add usejog/joggernaut -g -y -a codex
@@ -195,8 +249,10 @@ It copies the skills to `~/.agents/skills` and never replaces a folder it
 didn't install. Add `--claude` to also add the Claude Code plugin.
 </details>
 
-**Use one install route per agent.** Several agents read each other's skill
-folders, so two routes load the same skills twice.
+**Use one install route per agent.** Some agents also read other agents'
+skill folders (OpenCode reads `~/.claude/skills` and `~/.agents/skills`,
+for example, and keeps one copy of each skill by precedence), so a second
+route can load the same skills twice or hide the version you meant.
 
 **For a whole team,** install into the repository: drop `-g`
 (`npx skills add usejog/joggernaut -y -a codex -a cursor`) and commit the
@@ -263,10 +319,12 @@ before editing a tracked file or starting a fix.
 
 Each folder under `skills/` is a `SKILL.md` in the
 [Agent Skills](https://agentskills.io) format, with only the standard fields.
-The plugin manifests point at those folders. Each `SKILL.md` keeps two kinds
-of support apart: results other teams published (linked and graded A to D in
-`references/evidence.md`), and reasoning about how CI works, labelled as
-reasoning.
+Claude Code and Gemini CLI find the skills in `skills/`; the manifests describe the plugin. Each `SKILL.md` keeps its
+support apart: results other teams published (linked and graded A to D in
+`references/evidence.md`), how GitHub Actions behaves (from GitHub's own
+docs, linked in the same file), and reasoning anyone can check, labelled as
+reasoning. A cause is ranked by what your own runs show, never by how often
+it turned up elsewhere.
 
 ## Credits
 
