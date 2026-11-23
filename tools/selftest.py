@@ -373,8 +373,47 @@ with tempfile.TemporaryDirectory() as t:
     open(t + "/sb1", "w").write("".join(json.dumps(x) + "\n" for x in sb1 + [dict(sb1[0], id=3999, conclusion="failure")]))
     r = run([M, "compare", "--before", t + "/sb1", "--after", t + "/fa7", "--json"])
     v = json.loads(r.stdout) if r.returncode == 0 else {}
-    if v.get("verdict_code") == "faster":
-        bad.append("compare: a failure before bought a clean faster beside 7 after: %r" % v.get("verdict"))
+    if (v.get("verdict_code"), v.get("failed_before"), v.get("failed_after")) != ("faster_more_failures", [1, 6], [7, 12]):
+        bad.append("compare: a failure before beside 7 after: %r" % v.get("verdict"))
+    # The failure check looks at every job and attempt whatever --job says: a green run
+    # with a failed sibling job, and a run cancelled after its first attempt failed, count.
+    green = [json.loads(l) for l in open(t + "/fa7") if l.strip() and json.loads(l)["conclusion"] == "success"]
+    odd = []
+    for i in range(7):
+        x = dict(green[0], id=9100 + i)
+        x["jobs"] = [green[0]["jobs"][0], dict(green[0]["jobs"][0], id=91000 + i, name="experimental", conclusion="failure")]
+        odd.append(x)
+    for i in range(7):
+        x = dict(green[0], id=9200 + i, conclusion="cancelled", run_attempt=2)
+        x["jobs"] = [dict(green[0]["jobs"][0], run_attempt=1, conclusion="failure"),
+                     dict(green[0]["jobs"][0], id=92000 + i, run_attempt=2, conclusion="cancelled")]
+        odd.append(x)
+    for name, extra, flags in (("sibling", odd[:7], ["--job", "test"]), ("cancelled", odd[7:], [])):
+        open(t + "/" + name, "w").write("".join(json.dumps(x) + "\n" for x in green + extra))
+        r = run([M, "compare", "--before", t + "/sb", "--after", t + "/" + name, "--json"] + flags)
+        v = json.loads(r.stdout) if r.returncode == 0 else {}
+        if v.get("failed_after") != [7, 12] or v.get("verdict_code") != "not_valid":
+            bad.append("compare: the %s failures weren't counted: %r %r" % (name, v.get("failed_after"), v.get("verdict")))
+    # Whole runs timed on two pools under differently named jobs: refused, not a speedup.
+    def pools(src, dst, slow):
+        rows2 = [json.loads(l) for l in open(src) if l.strip()]
+        for i, x in enumerate(rows2):
+            pool = "slow" if i < slow else "fast"
+            x["jobs"] = [dict(j, name="test-" + pool, labels=["self-hosted", pool]) for j in x["jobs"]]
+        open(dst, "w").write("".join(json.dumps(x) + "\n" for x in rows2))
+    pools(t + "/sb", t + "/poolb", 4)
+    pools(t + "/sa", t + "/poola", 1)
+    r = run([M, "compare", "--before", t + "/poolb", "--after", t + "/poola", "--label", "self-hosted"])
+    if r.returncode == 0 or "different sets of runners" not in r.stderr:
+        bad.append("compare: a shift between runner pools passed\n" + r.stdout + r.stderr)
+    # A job that ran with no labels (routed by group) is no evidence of the runner.
+    nogroup = [json.loads(l) for l in open(t + "/sa") if l.strip()]
+    for x in nogroup:
+        x["jobs"] = x["jobs"] + [dict(x["jobs"][0], id=x["id"] * 10 + 3, name="build", labels=[])]
+    open(t + "/nogroup", "w").write("".join(json.dumps(x) + "\n" for x in nogroup))
+    r = run([M, "compare", "--before", t + "/sb", "--after", t + "/nogroup", "--label", "ubuntu-latest", "--json"])
+    if (json.loads(r.stdout) if r.returncode == 0 else {}).get("verdict_code") != "not_enough_runs":
+        bad.append("compare: a job with no labels counted as on the runner\n" + r.stdout + r.stderr)
     # Under --label, a run where no job shows a runner can't be one of the 5.
     nolab = [json.loads(l) for l in open(t + "/sa") if l.strip()][:4]
     extra = dict(nolab[0], id=4999)
@@ -406,6 +445,9 @@ runs = json.load(open(os.environ["FAKE_RUNS"]))
 path = sys.argv[-1]
 if path == "rate_limit":
     print(json.dumps({"resources": {"core": {"remaining": 5000, "reset": 0}}}))
+elif "/commits/" in path:
+    sha = re.search(r"/commits/([^/]+)/pulls", path).group(1)
+    print(json.dumps(json.loads(os.environ.get("FAKE_PULLS") or "{}").get(sha, [])))
 elif "/jobs" in path:
     rid = int(re.search(r"/runs/(\d+)/jobs", path).group(1))
     print(json.dumps([{"jobs": [r for r in runs if r["id"] == rid][0]["jobs"]}]))
@@ -480,6 +522,18 @@ with tempfile.TemporaryDirectory() as t:
     ids = [json.loads(l)["id"] for l in open(out)] if os.path.exists(out) else []
     if r.returncode != 0 or len(ids) != 120 or len(set(ids)) != 120:
         bad.append("fetch: overlapping pages gave %d runs, %d distinct\n%s" % (len(ids), len(set(ids)), r.stderr))
+    # A closed pull request drops off its runs: fetch finds its branch from the commit.
+    shut = [dict(r, status="completed", pull_requests=[]) for r in rows]
+    json.dump(shut, open(t + "/shut.json", "w"))
+    pulls = {shut[0]["head_sha"]: [{"head": {"ref": "elsewhere"}, "base": {"ref": "release"}},
+                                   {"head": {"ref": shut[0]["head_branch"]}, "base": {"ref": "main"}}]}
+    out = t + "/out/shut.jsonl"
+    r = subprocess.run([sys.executable, M, "fetch", "--repo", "o/r", "--workflow", "ci.yml", "--out", out] + list(window),
+                       cwd=t, env=dict(env, FAKE_RUNS=t + "/shut.json", FAKE_PULLS=json.dumps(pulls)),
+                       capture_output=True, text=True)
+    got = [json.loads(l)["pull_request_bases"] for l in open(out)] if os.path.exists(out) else []
+    if r.returncode != 0 or not got or got[0] != ["main"] or got[1] != []:
+        bad.append("fetch: a closed pull request's branch wasn't found from its commit: %r\n%s" % (got[:2], r.stderr))
     r, n = fetch(["completed"] * 5 + ["queued"])
     if r.returncode != 0 or n != 5:
         bad.append("fetch: without a window, the finished runs should be written (%r runs)\n%s" % (n, r.stderr))

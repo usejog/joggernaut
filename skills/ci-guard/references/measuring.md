@@ -54,8 +54,9 @@ record the same way on both sides:
 
 - A `pull_request` run: keep it if the pull request targeted the branch
   the fix merged into. `fetch` records the branch GitHub lists with the run
-  (`pull_request_bases`); a run from a fork lists none, so leave it out
-  unless you can tell its branch. It tests its merge commit with the base
+  (`pull_request_bases`, looked up from the commit once the pull request
+  has closed). If no branch is recorded, leave a run that passed out; a
+  failed one stays (below). It tests its merge commit with the base
   as it was when the run started: the `HEAD is now at … Merge HEAD into
   BASE` line `actions/checkout` prints names that base.
 - A `push` run tests its own commit: keep it if the push was to that

@@ -131,8 +131,9 @@ def fmt(s):
     return "%s%dm %02ds" % (sign, m, r)
 
 
-def gh_get(path, paginate=False):
-    """GET only. Returns parsed JSON (a list of pages when paginating)."""
+def gh_get(path, paginate=False, missing=False):
+    """GET only. Returns parsed JSON (a list of pages when paginating); with missing,
+    None when the call fails instead of stopping."""
     cmd = ["gh", "api", "--method", "GET", "-H", "Accept: application/vnd.github+json", path]
     if paginate:
         cmd[2:2] = ["--paginate", "--slurp"]
@@ -141,6 +142,8 @@ def gh_get(path, paginate=False):
     except FileNotFoundError:
         die("gh is not installed; install the GitHub CLI and run `gh auth login`")
     except subprocess.CalledProcessError as e:
+        if missing:
+            return None
         first = (e.stderr or "").strip().splitlines()[:1]
         die("gh api %s failed: %s" % (path.split("?")[0], first[0] if first else e.returncode))
     return json.loads(out)
@@ -274,8 +277,8 @@ def cmd_fetch(a):
                 " runner) won't finish: ask a person to cancel it, then fetch again"
                 % (len(going), len(runs)))
     runs = runs[: a.limit]
-    if len(runs) + 10 > left:
-        die("%d runs need about %d requests; %d left" % (len(runs), len(runs) + 10, left))
+    if 2 * len(runs) + 10 > left:
+        die("%d runs need up to %d requests; %d left" % (len(runs), 2 * len(runs) + 10, left))
     prepare_out(a.out)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(a.out) or ".", prefix=".measure-", suffix=".partial")
     out = os.fdopen(fd, "w")
@@ -291,6 +294,18 @@ def cmd_fetch(a):
                 os.unlink(tmp)
         raise
     print("wrote %d runs to %s" % (len(runs), a.out))
+
+
+def pr_bases(a, r):
+    """The branch each pull request of a run targeted. GitHub lists a run's pull request
+    only while it is open, so for a closed one ask which pull requests hold the run's
+    commit (merged ones included), keeping those from the run's own head branch."""
+    listed = r.get("pull_requests") or []
+    if listed or not (r.get("event") or "").startswith("pull_request") or not r.get("head_sha"):
+        return [(p.get("base") or {}).get("ref") for p in listed]
+    prs = gh_get("repos/%s/commits/%s/pulls?per_page=100" % (a.repo, r["head_sha"]), missing=True) or []
+    mine = [p for p in prs if (p.get("head") or {}).get("ref") == r.get("head_branch")] or prs
+    return sorted({(p.get("base") or {}).get("ref") for p in mine})
 
 
 def write_runs(a, runs, out):
@@ -310,8 +325,7 @@ def write_runs(a, runs, out):
             "conclusion": r.get("conclusion"), "created_at": r.get("created_at"),
             "run_started_at": r.get("run_started_at"), "updated_at": r.get("updated_at"),
             "pull_requests": [p.get("number") for p in r.get("pull_requests") or []],
-            # The branch each pull request targeted, as GitHub lists it with the run.
-            "pull_request_bases": [(p.get("base") or {}).get("ref") for p in r.get("pull_requests") or []],
+            "pull_request_bases": pr_bases(a, r),
             "jobs": [{
                 "id": j["id"], "name": j.get("name"), "run_attempt": j.get("run_attempt", 1),
                 "conclusion": j.get("conclusion"), "created_at": j.get("created_at"),
@@ -649,16 +663,32 @@ def outside_cohort(r, a, cache):
     return None
 
 
+def executed(j):
+    """A job that ran, not one skipped (a skipped job never gets a runner)."""
+    return j.get("conclusion") != "skipped" and bool(j.get("started_at"))
+
+
 def on_runner(r, a):
     """Evidence a run can be timed under --label: with --job, a job of that name ran on
-    the runner; without, every job that ran (has labels) did, and at least one ran."""
+    the runner; without, every job that ran shows the label (a job that ran with no
+    labels, routed by runner group alone, is no evidence), and at least one ran."""
     if a.job:
-        return any(a.label in (j.get("labels") or []) for j in r.get("jobs", []) if j.get("name") == a.job)
-    labelled = [j for j in latest_jobs(r) if j.get("labels")]
-    return bool(labelled) and all(a.label in j["labels"] for j in labelled)
+        return any(a.label in (j.get("labels") or []) for j in r.get("jobs", [])
+                   if j.get("name") == a.job and executed(j))
+    ran = [j for j in latest_jobs(r) if executed(j)]
+    return bool(ran) and all(a.label in (j.get("labels") or []) for j in ran)
 
 
 FAILED = ("failure", "timed_out", "startup_failure")
+
+
+def run_failed(r):
+    """For the failure check, whatever is timed: the run failed, any job in any attempt
+    failed, or it was rerun. A run cancelled after an attempt failed still failed."""
+    jobs_failed = any(j.get("conclusion") in FAILED for j in r.get("jobs", []))
+    if r.get("conclusion") == "cancelled":
+        return jobs_failed
+    return r.get("conclusion") != "success" or (r.get("run_attempt") or 1) > 1 or jobs_failed
 
 
 def failed_somewhere(r, a):
@@ -808,6 +838,18 @@ def cmd_compare(a):
         if jb[name] != ja[name]:
             die("job %r ran on %s before and %s after; a runner change isn't a code speedup"
                 % (name, ",".join(next(iter(jb[name]))), ",".join(next(iter(ja[name])))))
+    if not a.job:
+        # Timing whole runs: every timed run must have run on the same set of runners, or
+        # a shift between pools (under differently named jobs) could pass for a speedup.
+        def runner_sets(rs):
+            return {frozenset(tuple(sorted(j.get("labels") or [])) for j in latest_jobs(r) if executed(j))
+                    for r in rs if workflow_matches(r, a.workflow) and r.get("conclusion") == "success"
+                    and not outside_cohort(r, a, cohort_cache)}
+        sets = runner_sets(rb) | runner_sets(ra)
+        if len(sets) > 1:
+            die("the timed runs ran on %d different sets of runners, so a shift in the mix could pass"
+                " for a speedup; pass --job to time one job, or --label with a label only one set has"
+                % len(sets))
     excluded = []
     before = durations(rb, a, "before", excluded)
     after = durations(ra, a, "after", excluded)
@@ -822,8 +864,9 @@ def cmd_compare(a):
         # Every finished run except ones a newer push cancelled. A failed or rerun first
         # attempt counts as a failure even if the rerun passed.
         rs = [r for r in rs if in_workflow(r)]
-        done = [r for r in rs if r.get("conclusion") not in (None, "cancelled", "skipped", "neutral")]
-        bad = [r for r in done if failed_somewhere(r, a)]
+        done = [r for r in rs if r.get("conclusion") not in (None, "skipped", "neutral")
+                and (r.get("conclusion") != "cancelled" or run_failed(r))]
+        bad = [r for r in done if run_failed(r)]
         return (len(bad), len(done))
     what = ("job %s" % a.job) if a.job else "run (start to last job done)"
     fewer = min(len(before), len(after))

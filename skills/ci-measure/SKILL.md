@@ -209,7 +209,7 @@ Joggernaut receipt
   PR wait, median: 14m 10s -> 9m 20s (24 runs before, 22 after)
   slowest 5%: 31m 02s -> 18m 40s (provisional)
   runner-minutes per run: 41 -> 27
-  failed runs: 1 of 25 before, 1 of 23 after
+  failed runs: 1 of 25 before, 0 of 22 after
   tests: 1,842 ran before, the same 1,842 after, by name; 0 new failures
   verdict: median faster (24 runs before, 22 after)
   change: seed the pnpm cache from main
