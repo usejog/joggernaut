@@ -10,9 +10,13 @@ metadata:
 
 # ci-guard: stop agents burning CI
 
-An agent that learns about a type error from CI pays a full run for it, then
+An agent that learns about a type error from CI pays a CI round for it, then
 pushes again. This skill moves the cheap checks before the push and caps the
 rounds, without weakening anything CI checks.
+
+Each step below rests on a result other teams published
+(`references/evidence.md`), on vendor docs (listed in the same file), or on
+the reasoning under "Why this works: reasoning", or says it is a choice.
 
 <!-- rules:start -->
 ## The rules for any change to CI
@@ -49,8 +53,10 @@ in `references/measuring.md`.
 
 1. **Measure the waste.** If there is no `.joggernaut/baseline.md`,
    record a baseline as `references/measuring.md` says. From
-   `measure.py split`: pushes per pull request, catch-up runs and their share
-   of runner-minutes, the share of runner-minutes on failed runs, and which
+   `measure.py split`: pushes per pull request (distinct commits seen per
+   pull request in the fetched runs, so a pull request cut off by the
+   window counts short), catch-up runs (merge commit messages; read a
+   sample) and their share of runner-minutes, the share of runner-minutes on failed runs, and which
    steps failed (read the failed
    step names with `gh run view RUN_ID --json jobs`). Count how many failed
    runs died on format, lint or type checks.
@@ -58,37 +64,51 @@ in `references/measuring.md`.
    type-check commands (package scripts, Makefile, CI workflow). Write
    `scripts/pre-push` (or the repository's existing hook tool: lefthook,
    husky, pre-commit) that runs them on the changed files where the tools
-   allow it, and keep it under about ten seconds. Install it as a git hook
-   with a one-line setup step in the README or the repository's setup script.
-   Time it and report the time.
+   allow it. Install it as a git hook with a one-line setup step in the
+   README or the repository's setup script. Time it, and report two
+   numbers from step 1 apart: runner-minutes it can save (the minutes of
+   failed rounds the hook would have caught: check that it catches those
+   errors on the changed files; the hook itself uses no runner) and wait
+   (it pays when the hook's total time, over every run of it, including the attempts it stopped and the fixed ones after, is less than the time until those rounds' failing checks reported; with only push counts, that is an estimate: say how many stopped attempts it assumes). Install it alongside any
+   pre-push hook already there, and check each one can still stop a push. Boardy's hook runs in under 9 seconds.
 3. **Keep the server check.** The same checks stay in CI as required checks.
-   Agents skip hooks, so a hook is a shortcut, never the gate. Never remove
+   Agents can skip hooks (at one project, 118 of 411 agent push commands
+   did; most of the reasons the agents wrote cited an exception the rules
+   allowed, unverified), so a hook is a shortcut, never the gate. Never remove
    or weaken a CI check because a hook now runs it.
 4. **Add the rules for agents.** Append to the repository's AGENTS.md (create it
    if missing; also CLAUDE.md if that is what the repository uses) with the
    rules in `references/agents-snippet.md` in this folder, which include:
    - at most two CI rounds per task, then stop and report;
-   - run the fast checks before every push; never `--no-verify`;
+   - run the fast checks before every push; never skip the hook, by `--no-verify` or a variable;
    - never pipe a test run into `tail` or `head`; write it to a file;
+   - never set a commit status or check run yourself;
    - if a test exposes a real bug, fix the code, not the test;
    - never bring a branch up to date with main just to be current; update
      it for a conflict, a change it needs, or once right before a merge when
      branch protection requires it.
 5. **For Claude Code users, offer a Stop hook** in `.claude/settings.json`
-   that runs the pre-push check when the agent finishes, so it sees failures
-   before it reports done. Offer; don't add unasked.
-6. **On the ask list, for a person:** if branch protection requires
+   that runs the pre-push check when the agent finishes and, on a failure,
+   exits 2 with the failed check's output on stderr: Claude Code's hook docs
+   say that keeps Claude working and shows it the message. Offer; don't add
+   unasked.
+6. **On the ask list, for a person:** the protection settings from the
+   reasoning below (admins, bypass roles, the expected source of each
+   required check), and if branch protection requires
    branches to be up to date and `measure.py split` shows many catch-up
    runs, a merge queue tests each pull request on top of main before it
    merges and removes the need for them. Every required workflow then needs
    the `merge_group` trigger, or the queue waits for a check that never
    reports. It is a settings change with costs of its own (each pull request
-   pays a full queue run), so it is the person's call. Never skip or hold CI
+   pays at least one queue run, more when a queue run fails or the queue
+   reorders), so it is the person's call. Never skip or hold CI
    on pull requests (drafts included) to save minutes: a job skipped by
    `if:` reports success.
-7. **One pull request** with the hook, the rules and the measured hook time.
-   After two weeks, measure as `references/measuring.md` says: pushes per pull request and runs
-   failed on format or lint, before and after.
+7. **Two pull requests**, measured apart: the hook with its measured time,
+   then the rules.
+   After each merges, measure as `references/measuring.md` says, on pull
+   requests opened after it: pushes per pull request and runs failed on
+   format or lint, before and after.
 
 ## What it measures
 
@@ -99,12 +119,22 @@ format, lint or type checks, and the hook's own time.
 
 This is reasoning from how CI works, not a measurement.
 
-- A format or type error costs seconds to catch locally and a full CI run
-  to catch remotely, and an agent pays that run again on every push.
-- A local hook can be skipped; a required server check can't. The hook makes
-  the common case fast and the server check keeps it honest.
-- An agent with no limit on CI rounds keeps pushing. A cap turns a loop into
-  a report a person can act on.
+- A format or type error costs the hook's own time to catch locally and a
+  CI round to catch remotely (a push to a pull request can start every
+  workflow subscribed to `synchronize`, the default: GitHub docs), and an
+  agent pays that round again on every push.
+- A local hook can be skipped. A required server check holds only as far
+  as branch protection does: by default it doesn't bind admins or roles
+  with the bypass permission, and anyone with write access can set a
+  status check's state, and naming the app expected to report a required
+  check makes only that app's report count (GitHub docs). So check those settings, put any change to them on the
+  person's list, and never let an agent set a status. The hook makes a
+  failure it can catch cost the hook's measured time, and the server check keeps it honest.
+- Without a limit, nothing stops an agent from pushing again. A cap on
+  rounds (pushes that start CI) bounds how many a task can spend and turns
+  a loop into a report a person can act on; one round can still start
+  several workflows. The number two is Stripe's; it is a choice, not a measured
+  optimum.
 
 ## Why this works: what others measured
 
@@ -113,8 +143,10 @@ As their authors reported them; we didn't reproduce them.
 - Boardy's pre-push hook runs format, lint and type check on changed files in
   under 9 seconds, "a hook rather than a line in AGENTS.md, because agents
   skip steps".
-- Yet agents skipped the pre-push hook on 118 of 411 push commands at one project,
-  which is why the server check stays.
+- Yet agents skipped the pre-push hook on 118 of 411 push commands at one
+  project; most of the reasons they wrote cited an exception the rules
+  allowed, which the author didn't verify. All of them still had to pass
+  the required checks, which applied to admins too. That is why the server check stays.
 - Stripe gives each agent task at most two rounds of CI, because CI runs cost
   tokens, compute and time. It reports no CI-time figure for the cap.
 - At Selenios, updates that brought a pull request up to date with main were
@@ -124,7 +156,9 @@ As their authors reported them; we didn't reproduce them.
   week, keeping pull requests current cost 6% more for those and 22% less for
   pull requests open 4 to 24 hours. The team then took `gh pr update-branch`
   off the agents' list and added an AGENTS-file rule.
-- In one reported case an agent piped a test suite into `tail` and reported
-  a red run as green, which is why the rules ban it.
+- A shell pipeline exits with its last command's status unless `pipefail`
+  is set, so `tests | tail` exits 0 when the tests fail, and the cut log can
+  drop the failure. Tw93 reports an agent that did this and reported a red
+  run as green.
 
 Sources and grades: `references/evidence.md`.

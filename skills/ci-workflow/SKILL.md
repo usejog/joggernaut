@@ -10,9 +10,14 @@ metadata:
 
 # ci-workflow: the shape of the job graph
 
-Seven lint jobs that each spend 50 seconds setting up to do six seconds of
-work pay that setup seven times. This skill cuts that overhead without
-changing what runs.
+If seven lint jobs each spend 50 seconds setting up to do six seconds of
+work (made-up numbers), they pay that setup seven times: each job on a
+GitHub-hosted runner gets a fresh job environment (GitHub docs). Linear
+had seven such checks and folded them into two jobs. This skill cuts that overhead without changing what runs.
+
+Each step below rests on a result other teams published
+(`references/evidence.md`), on vendor docs (listed in the same file), or on
+the reasoning under "Why this works: reasoning", or says it is a choice.
 
 <!-- rules:start -->
 ## The rules for any change to CI
@@ -48,21 +53,27 @@ in `references/measuring.md`.
 ## Steps
 
 1. **Baseline.** If there is no `.joggernaut/baseline.md`, record a baseline as `references/measuring.md` says. From `measure.py split`, note each job's setup and running
-   seconds, the job that finishes last, runner-minutes per run, and pushes per
-   pull request.
-2. **Pick one change**: the one that saves the most wait on the slowest
+   seconds, the job that finishes last, and runner-minutes by label;
+   `compare` prints the median runner-minutes per run on each side.
+2. **Pick one change** (ranked as ci-diagnose step 5 says: observed or
+   ceiling): the one that saves the most wait on the slowest
    path, or, when ci-diagnose ranked it off that path, the most runner-minutes:
-   - **Cancel superseded pull-request runs.** Give pull-request runs a
+   - **Cancel superseded pull-request runs.** For runs that only validate
+     the pull request's latest commit, give pull-request runs a
      concurrency group per pull request, and every other run a group of its
      own, so nothing on the default branch is ever cancelled or replaced
-     while pending (a shared group keeps only one pending run). Every commit
-     there needs a complete run. If the workflow already has a `concurrency`
+     while pending (by default a group keeps one pending run and cancels the
+     one before it: GitHub docs). A cancelled run there can leave a commit
+     without a complete run. If the workflow already has a `concurrency`
      group (deploys, a shared environment), keep it and ask before changing it.
+     Cancellation follows arrival order: a manual rerun of an older run
+     joins the group last and cancels the newer one, so rerun the newest.
+     `github.workflow` is the workflow's name, and GitHub compares group names ignoring case across the repository; if two workflow files share a name (or differ only in case), give each its own prefix.
 
      ```yaml
      concurrency:
-       group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref) || format('run-{0}', github.run_id) }}
-       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+       group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.action != 'closed' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+       cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
      ```
 
    - **Fold tiny jobs.** First read which checks are required
@@ -74,52 +85,81 @@ in `references/measuring.md`.
      side (for example, start each task in the background, `wait` on each
      pid, and fail the job if any task failed, printing each task's output
      and exit code). Every task still runs, and a failure in any one still
-     fails the job, with its name in the log. Prove that before the pull
-     request: run the folded step locally with each task made to fail in turn
-     (swap its command for `false`) and check the step exits non-zero every
-     time. Keep separate jobs where the separate status check is required or
-     the tasks need different runners.
+     fails the job, with its name in the log. Prove the exit codes before the
+     pull request: run the folded step locally with each task made to fail
+     in turn (swap its command for `false`) and check the step exits
+     non-zero every time. That proves only the exit codes: also check that
+     each task keeps its working directory, environment and matrix inputs,
+     that tasks sharing one machine don't collide on files, ports,
+     services or credentials, and that the pull request's own run shows
+     every task's output and result. Keep
+     separate jobs where the separate status check is required or the tasks
+     need different runners.
    - **Drop a `needs` edge** only when the upstream job passes no output or
      artifact and gates nothing. A deploy waiting on tests is a gate and
      stays.
-   - **Trim checkout.** Use the default shallow checkout where history isn't
-     read; where it is (versioning, changed-file lists), prefer a blobless
-     clone (`filter: blob:none`) with the history it needs over
-     `fetch-depth: 0`.
+   - **Trim checkout.** The default checkout fetches one commit (checkout
+     docs); keep it where history isn't read. Where it is (versioning,
+     changed-file lists), first set the depth, refs and tags the step needs
+     (`fetch-depth: 0` for all history), then add `filter: blob:none`: a
+     blobless clone fetches the commits and trees within the requested history but only the files it
+     checks out, fetching other files later on demand (GitHub's
+     partial-clone post). Check that the step reading history gives the same
+     answer, and compare checkout plus that step's seconds, since on-demand
+     fetches move time into it.
    - **Download prebuilt tools** (a release binary or a setup action) instead
-     of compiling them on every run.
+     of compiling them on every run, at the same version and features; time
+     both ways from the step seconds and keep the faster.
    - **Cap hung jobs.** A job with no `timeout-minutes` can run for GitHub's
-     default 360 minutes when it hangs. Set it to about three times the job's
-     slowest 5% from the split. That stops paying for a hang sooner; it
-     never hides a failure, because a timed-out job fails.
+     default 360 minutes when it hangs (GitHub docs; some runners cap lower, such as 15 minutes on `ubuntu-slim`). Find the longest
+     successful run of that job in the fetched history and set the cap well
+     above it, with headroom the person agrees to; report that longest run
+     beside the cap, so no run in the history that passed would have been
+     cut off. That stops paying for a hang sooner. GitHub cancels a job that
+     runs past it (GitHub docs), which isn't success;
+     check that its failure reaches a required check: the job is required
+     itself, or a required job that `needs` it runs with `if: always()`
+     and fails unless `needs.<job>.result` is `success`; then check, on a
+     run where the needed job fails, that the required check is red. A job
+     skipped after another job fails reports success (GitHub docs), and
+     `if: always()` alone only makes the downstream job run.
 3. **Never add path filters or conditions that skip a check yourself.**
    Running fewer checks is a decision for a person (rule 4). When reviewing
    existing filters, check the trap: if a workflow skipped by `paths:` holds a
    required check, that check stays pending and blocks the merge; a job
-   skipped by `if:` counts as passed. Report what you find.
+   skipped by `if:` reports success (both from GitHub's docs). Report what
+   you find.
 4. **Open one pull request per change** with the diff, the baseline, and the
    branch's runs marked provisional. Confirm in the description that every
    task that ran before still runs, by listing them.
 5. **Prove it** after merge, as `references/measuring.md` says: PR wait and runner-minutes per
-   pull request. GitHub bills each job rounded up to the minute, so folded
-   jobs also save rounding; `measure.py split` counts minutes that way.
+   run. GitHub rounds each job's minutes up to the whole minute
+   (GitHub docs), so folded jobs can also save each job's partial last
+   minute; `measure.py split` counts minutes that way.
 
 ## What it measures
 
-PR wait, and runner-minutes per pull request including per-job rounding.
+PR wait, and runner-minutes per run (median, from `compare`) including
+per-job rounding.
 
 ## Why this works: reasoning
 
 This is reasoning from how CI works, not a measurement.
 
-- Each job pays for a machine, a checkout, a toolchain and an install before
-  it does any work. Seven jobs that each work for seconds pay that overhead
-  seven times; one job running the same tasks pays it once.
+- Each job pays for the setup steps it runs (a machine, and often a
+  checkout, a toolchain and an install) before it does any work. Seven jobs
+  that each work for seconds pay that overhead seven times; one job running
+  the same tasks pays it once.
 - A run that a newer push made stale can't change what merges, so cancelling
-  it frees a machine for the run that matters. On the default branch every
-  commit needs a full run, so those are never cancelled.
+  it frees a machine for the run that matters. On the default branch a
+  cancelled run can leave a commit without a complete run, so those are
+  never cancelled.
 - A `needs` edge serialises jobs. If it carries no data and guards nothing,
-  it only adds the upstream job's time to the wait.
+  dropping it lets the downstream job start sooner, by up to the gap
+  between that job and the next-latest one it waits for, and shortens the
+  wait only if that path is the slowest.
+- A downloaded binary skips the compile; whether that is faster here shows
+  in the step seconds before and after.
 
 ## Why this works: what others measured
 

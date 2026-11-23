@@ -1,5 +1,5 @@
 {
   "name": "joggernaut",
   "version": "0.1.0",
-  "description": "Find out why your pull requests wait on CI, then let your coding agent fix the biggest cause with every test still running."
+  "description": "Fixes for slow CI, drawn from results other teams published, GitHub's docs and arithmetic anyone can check, as skills your coding agent runs on your GitHub Actions runs. Every test must keep running."
 }
