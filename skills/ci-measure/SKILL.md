@@ -79,8 +79,8 @@ steps below say what each command computes.
    preservation is **unverified**: a count can't show one test lost and
    another added.
 5. Write `.joggernaut/baseline.md`: the workflow, job and runner label
-   measured, the run count, the median and slowest 5%, the test count, and the
-   exact commands that reproduce it. Keep `.joggernaut/` out of commits
+   measured, the run count, the median and the slowest runs as `split`
+   printed them, the test count, and the exact commands that reproduce it. Keep `.joggernaut/` out of commits
    (add it to `.git/info/exclude`).
 
 ### 2. While the pull request is open
@@ -115,14 +115,15 @@ baseline now (step 3.3): a lost test fails the change before it merges.
      --after .joggernaut/after.jsonl --workflow "CI" --label ubuntu-latest [--job "test"]
    ```
 
-   It prints the medians, the slowest runs (the slowest run below 20 runs a
-   side, the slowest 5% from 20; provisional below 100), the Hodges-Lehmann
+   It prints the medians, the slowest runs (below 20 runs a side, the
+   slowest run, matched on the larger side; the slowest 5% from 20;
+   provisional below 100), the Hodges-Lehmann
    estimate of the change with its exact 95% interval, the runs it left out
    and why, the failure rate and the runner-minutes per run on each side, and
    one verdict with the run count: **median faster**, **median slower**,
-   **mixed** (most runs moved one way, the median didn't), **no measurable
-   change yet** (more runs can tighten it), **not enough runs yet**, or **not
-   valid** when more runs fail after than chance explains.
+   **mixed** (the runs tend one way, the median went the other or nowhere),
+   **no measurable change yet** (more runs can tighten it), **not enough runs
+   yet**, or **not valid** when more runs fail after than chance explains.
    `references/measuring.md` says why this method holds at 5 runs a side, and
    how to measure again without fooling yourself. Report the verdict as
    printed, with the slowest runs beside it, since the median can improve
@@ -187,7 +188,8 @@ This is reasoning from how CI works, not a measurement.
 - CI times vary run to run with machines, caches and load. Comparing two
   single runs measures the noise as often as the change. An exact rank
   interval over 5 or more runs a side separates the two, and says when it
-  can't yet: then a larger count, chosen before looking again, narrows it.
+  can't yet: then a larger count, chosen before looking again, can narrow
+  it.
 - A local machine differs from a CI runner in cores, disk, network and cache
   state, so a local speedup may not exist on CI at all.
 - Dropping a test makes CI look faster, so speed alone can't tell a

@@ -98,15 +98,20 @@ def tail(xs):
 
 
 def tails(before, after):
-    """Both sides' tails, like with like. From TAIL_RUNS runs a side, each side's slowest
-    5%. Below, the smaller side's slowest run, and for the larger side where the slowest
-    of that many of its runs typically falls (its k/(k+1) point, for k runs): the
-    slowest of 150 runs is an outlier the slowest of 5 almost never matches."""
+    """Both sides' tails, like with like, each as (label, seconds). From TAIL_RUNS runs a
+    side, each side's slowest 5%. Below, the smaller side's slowest run, and for the
+    larger side where the slowest of that many of its runs typically falls (the median
+    of the slowest of k runs is its 0.5^(1/k) point): the slowest of 150 runs is an
+    outlier the slowest of 5 almost never matches."""
     k = min(len(before), len(after))
-    if k >= TAIL_RUNS:
-        return "slowest 5%", pct(before, 0.95), pct(after, 0.95)
-    at = lambda xs: max(xs) if len(xs) == k else pct(xs, k / (k + 1.0))
-    return "slowest run", at(before), at(after)
+    if k == 0 or k >= TAIL_RUNS:
+        return tail(before), tail(after)
+
+    def at(xs):
+        if len(xs) == k:
+            return "slowest run", max(xs)
+        return "typical slowest of %d" % k, pct(xs, 0.5 ** (1.0 / k))
+    return at(before), at(after)
 
 
 def fmt(s):
@@ -370,6 +375,7 @@ def cmd_split(a):
     out["wait_all_workflows_median"] = median(cross) if cross else None
     out["wait_all_workflows_p95"] = pct(cross, 0.95) if cross else None
     out["wait_all_workflows_tail"] = list(tail(cross)) if cross else None
+    out["wait_all_workflows_provisional"] = len(cross) < P95_FIRM
     out["wait_all_workflows_commits"] = len(cross)
     # Runs a day, over the span the file covers: what a saving per run is multiplied by.
     starts = sorted(ts(r["created_at"]) for r in runs if r.get("created_at"))
@@ -487,7 +493,7 @@ def cmd_split(a):
             print("PR wait across workflows (%d in the file; per commit, the first run of each that ran,"
                   " all passed; %d commits): median %s, %s %s%s"
                   % (len(names), len(cross), fmt(out["wait_all_workflows_median"]), label, fmt(value),
-                     " (provisional: under %d commits)" % P95_FIRM if len(cross) < P95_FIRM else ""))
+                     " (provisional: under %d commits)" % P95_FIRM if out["wait_all_workflows_provisional"] else ""))
         else:
             print("PR wait across workflows: no commit has passing runs of two or more workflows here")
     sp = out["slowest_path_split"]
@@ -652,9 +658,20 @@ def fails_rose(fb, fa):
     return Fraction(tail, denom) < Fraction(1, 20)
 
 
-def fails_needed(fb, na):
-    """The fewest failures in na finished runs after that fails_rose counts, or None."""
-    return next((x for x in range(na + 1) if fails_rose(fb, (x, na))), None)
+def fails_needed(fb, passed):
+    """The fewest failed runs after, beside `passed` runs that passed, that fails_rose
+    counts as beyond chance; None if no number would (every run before failed)."""
+    if fb[0] >= fb[1]:
+        return None
+    rose = lambda x: fails_rose(fb, (x, passed + x))
+    hi = 1
+    while not rose(hi):  # the rate after climbs toward 1 > the rate before, so this ends
+        hi *= 2
+    lo = 0  # rose(lo) is false, rose(hi) true; the p-value falls as failures rise
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if rose(mid) else (mid, hi)
+    return hi
 
 
 def cmd_compare(a):
@@ -734,11 +751,11 @@ def cmd_compare(a):
         return (len(bad), len(done))
     what = ("job %s" % a.job) if a.job else "run (start to last job done)"
     fewer = min(len(before), len(after))
-    label, before_tail, after_tail = tails(before, after)
+    before_tail, after_tail = tails(before, after)
     res = {"measure": what, "before_runs": len(before), "after_runs": len(after),
            "before_median": median(before), "after_median": median(after),
            "before_p95": pct(before, 0.95), "after_p95": pct(after, 0.95),
-           "tail": label, "before_tail": before_tail, "after_tail": after_tail,
+           "before_tail": list(before_tail), "after_tail": list(after_tail),
            "p95_provisional": fewer < P95_FIRM,
            "excluded": excluded}
     fb, fa = fail_rate(rb), fail_rate(ra)
@@ -794,14 +811,18 @@ def cmd_compare(a):
         print(json.dumps(res, indent=2))
         return
     print("measure: " + what + (" | cache: %s" % a.cache if a.cache else ""))
-    print("before: %d runs, median %s, %s %s" % (len(before), fmt(res["before_median"]), label, fmt(before_tail)))
-    print("after:  %d runs, median %s, %s %s" % (len(after), fmt(res["after_median"]), label, fmt(after_tail)))
+    print("before: %d runs, median %s, %s %s" % (len(before), fmt(res["before_median"]),
+                                                 before_tail[0], fmt(before_tail[1])))
+    print("after:  %d runs, median %s, %s %s" % (len(after), fmt(res["after_median"]),
+                                                 after_tail[0], fmt(after_tail[1])))
     if res["p95_provisional"]:
-        print("%s: provisional, under %d runs a side" % (label, P95_FIRM))
-    need = fails_needed(fb, fa[1])
+        print("%s: provisional, under %d runs a side"
+              % ("slowest 5%" if fewer >= TAIL_RUNS else "slowest runs", P95_FIRM))
+    need = fails_needed(fb, fa[1] - fa[0])
     print("failed runs: before %d of %d, after %d of %d%s%s" % (fb + fa + (
         " (higher after, within chance: report it)" if rate(fa) > rate(fb) and not fails_rose(fb, fa) else "",
-        "; beyond chance from %d of %d after" % (need, fa[1]) if need is not None and fa[0] < need else "")))
+        "; beyond chance from %d failed beside these %d" % (need, fa[1] - fa[0])
+        if need is not None and fa[0] < need else "")))
     if mb and ma:
         print("runner-minutes per run (every job and attempt, cancelled runs included, rounded up per job):"
               " median %g before, %g after" % (median(mb), median(ma)))

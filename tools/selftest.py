@@ -288,9 +288,9 @@ better = 0
 for _ in range(400):
     b = [rng.lognormvariate(6, 0.3) for _ in range(150)]
     c = [rng.lognormvariate(6, 0.3) for _ in range(5)]
-    label, tb, tc = mm.tails(b, c)
+    (lb, tb), (lc, tc) = mm.tails(b, c)
     better += tc < tb
-if label != "slowest run" or not 0.3 < better / 400.0 < 0.7:
+if (lb, lc) != ("typical slowest of 5", "slowest run") or not 0.3 < better / 400.0 < 0.7:
     bad.append("tails: with no change, the 5-run side looked better in %d of 400 draws" % better)
 # Five runs a side are enough for a verdict, named with its count; four are not.
 with tempfile.TemporaryDirectory() as t:
@@ -308,6 +308,11 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "compare", "--before", t + "/b4", "--after", t + "/a4"])
     if "verdict: not enough runs yet" not in r.stdout:
         bad.append("compare: 4 runs a side should not get a verdict\n" + r.stdout + r.stderr)
+    # 24 runs before against 5 after: the larger side's tail is named for what it is.
+    r = run([M, "compare", "--before", E + "/ci-measure/repo/ci-history/before.jsonl", "--after", t + "/a5"])
+    if ("before: 24 runs" not in r.stdout or "typical slowest of 5" not in r.stdout.split("after:")[0]
+            or "slowest run" not in r.stdout.split("after:")[1]):
+        bad.append("compare: unequal sides should show the larger side's typical slowest of 5\n" + r.stdout + r.stderr)
     r = run([M, "compare", "--before", t + "/b4", "--after", t + "/a4", "--min-runs", "4"])
     if r.returncode == 0:
         bad.append("compare: --min-runs 4 should be refused\n" + r.stdout)
@@ -341,8 +346,12 @@ for rec in src:
 rerun = tempfile.mktemp(suffix=".jsonl")
 open(rerun, "w").write("".join(json.dumps(x) + "\n" for x in src))
 r = run([M, "compare", "--before", "ci-history/before.jsonl", "--after", rerun], cwd=E + "/ci-measure/repo")
-if "median faster" in r.stdout:
-    bad.append("compare: timed-out first attempts still earned a speed verdict\n" + r.stdout)
+if r.returncode != 0 or "verdict: not enough runs yet" not in r.stdout:
+    bad.append("compare: timed-out first attempts should leave too few runs, not a verdict\n" + r.stdout + r.stderr)
+r = run([M, "compare", "--before", "ci-history/before.jsonl", "--after", "ci-history/after.jsonl",
+         "--event", "push"], cwd=E + "/ci-measure/repo")
+if r.returncode != 0 or "verdict: not enough runs yet" not in r.stdout:
+    bad.append("compare: no comparable runs at all should say not enough runs\n" + r.stdout + r.stderr)
 
 # every check.py fails on its untouched sample (the planted cause is there)
 for case in sorted(glob.glob(E + "/ci-*/")):

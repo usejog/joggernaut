@@ -57,11 +57,13 @@ measurement, and stop. Never trigger runs to fill the count without asking:
 runs cost money.
 
 **If the verdict is "no measurable change yet"**, the change may be real but
-smaller than the run-to-run noise at this count. Say so, and mark it
-provisional. To measure again, choose the larger count first (20 a side, say),
-wait until it is there, and report that comparison and how many times you
-compared. Running `compare` again and again until it says "faster" would make
-a chance result look like a real one.
+smaller than the run-to-run noise at this count. Say so. The 95% holds for one
+comparison at a count chosen before looking. Each further look adds to the
+chance of a false verdict (two looks: up to about 10%), so if you measure
+again, choose the larger count first (20 a side, say), wait until it is there,
+and report every comparison you made, the first included. A verdict that only
+shows on a later look is weaker evidence; say so. Never run `compare` again and
+again until it says "faster".
 
 ## How compare decides, and why 5
 
@@ -70,8 +72,10 @@ The verdict comes from the Hodges-Lehmann estimate of how far the times moved
 Mann-Whitney confidence interval (Bauer, 1972): two of those differences,
 picked by the exact distribution of the rank-sum count under "no change".
 
-- **median faster**: the whole interval is below zero and the median fell.
-- **median slower**: the whole interval is above zero and the median rose.
+- **median faster**: the whole interval is below zero and the median of
+  these runs fell.
+- **median slower**: the whole interval is above zero and the median of
+  these runs rose.
 - **mixed**: the interval excludes zero, but the median moved the other way
   or not at all, as when a change makes most runs faster and the middle one
   slower. Report both numbers; don't call it faster.
@@ -81,13 +85,14 @@ We chose it over a bootstrap and over a permutation test on the medians:
 
 - A bootstrap interval is a large-sample approximation: nothing guarantees
   its 95% with 5 runs a side.
-- The exact interval holds its 95% at any count. Excluding zero is a
-  two-sided rank-sum test at 5% that the after runs tend to be faster (or
-  slower); that part needs no assumption about how the times are spread.
-  Read as a size, the interval assumes the change moves times without
-  reshaping them, which is why the median must agree before the verdict
-  says "median". Ties, common with whole-second times, only make it more
-  cautious.
+- The exact interval holds its 95% at any count. If nothing changed, it
+  wrongly rules out zero at most 5% of the time, however the times are
+  spread. When it does rule zero out, the runs changed, but not always by a
+  shift: a change that only widens or narrows the spread can tip it too.
+  Read as how far the median moved, it assumes the change moves times
+  without reshaping them. That is why the observed medians must agree before
+  the verdict says "median", and why you report the medians as measured.
+  Ties, common with whole-second times, only make it more cautious.
 - A permutation test on the medians gives a yes or no, not a size, and its
   interval would need a search over shifts. The rank interval gives both.
 
@@ -101,13 +106,15 @@ may disagree, so 5 is the fewest that leaves room for ordinary noise.
 Few runs still cost something, and the output says what:
 
 - The slowest 5% of under 20 runs is just the slowest run, so below 20 runs
-  on the smaller side the tail is "slowest run". The side with more runs
-  shows where the slowest of that many of its runs typically falls, so the
-  two compare like with like. Either is provisional below 100 runs a side.
+  on the smaller side that side shows its "slowest run". The side with more
+  runs shows its "typical slowest of 5" (for 5 runs on the other side): where
+  the slowest of that many of its runs typically falls, so the two compare
+  like with like. Both are provisional below 100 runs a side.
 - The failure-rate test has little power with few runs: with 5 runs before,
   none failed, and 5 passed after, it takes 7 failed after to count as beyond
-  chance. `compare` prints how many would count. Name the cause of every
-  failure after the change whatever the test says.
+  chance. `compare` prints how many failed runs, beside the ones that
+  passed, would count. Name the cause of every failure after the change
+  whatever the test says.
 
 ## Break-it probe
 
