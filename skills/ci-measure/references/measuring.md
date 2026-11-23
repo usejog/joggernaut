@@ -12,10 +12,12 @@ isn't logged in, stop and ask the person to run `gh auth login`.
 ## Baseline, before any change
 
 If `git ls-files .joggernaut` lists anything, the folder is tracked: stop
-and ask before writing there.
+and ask before writing there. Pick the `--created` time before you look, a
+few hours ago, so every run up to it has finished.
 
 ```sh
 MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request --limit 150 \
+  --created '<=YYYY-MM-DDTHH:MM:SSZ' \
   --out .joggernaut/before.jsonl   # several workflows: before-<name>.jsonl each
 MEASURE split --in .joggernaut/before.jsonl
 ```
@@ -45,8 +47,9 @@ MEASURE tests --before JUNIT-BEFORE --after JUNIT-AFTER   # each downloaded into
 ```
 
 Choose the window before looking (a day or two after the merge, say), and
-fetch it only once every run created in it has finished; `fetch` warns when
-some are still going. Fast runs finish first, so stopping at the fifth run to
+fetch it only once it has ended and every run created in it has finished;
+`fetch` refuses it otherwise, and refuses a window with more runs than
+`--limit`. Fast runs finish first, so stopping at the fifth run to
 finish keeps the fastest of the window and can pass for a speedup with no
 change at all.
 
@@ -57,10 +60,10 @@ you report it. Report its verdict as printed, with the run count it names, for
 example "median faster (5 runs a side)". `tests` fails if any test stopped
 running, was newly skipped or newly fails.
 
-**If the window has fewer than 5 a side**, say "not enough runs yet", write the
-exact commands above into the pull request so anyone can finish the
-measurement, and stop. Never trigger runs to fill the count without asking:
-runs cost money.
+**If the window has fewer than 5 a side**, say "not enough runs yet", choose
+a longer window before looking at any timings, write the exact commands for
+it into the pull request so anyone can finish the measurement, and stop.
+Never trigger runs to fill the count without asking: runs cost money.
 
 **If the verdict is "no measurable change yet"**, the change may be real but
 smaller than the run-to-run noise at this count. Say so. The 95% holds for one
@@ -123,7 +126,8 @@ Few runs still cost something:
   median of the slowest of 5 drawn from its runs, so the two compare like
   with like. Both are provisional below 100 runs a side, and which side's is
   lower is weak evidence on its own: with 9 runs against 5, the 5-run side
-  shows the lower one 9 times in 14 with no change at all.
+  shows the lower one 9 times in 14 with no change at all, when no times
+  are tied.
 - The failure-rate test has little power with few runs: with 5 runs before,
   none failed, and 5 passed after, it takes 7 failed after to count as beyond
   chance. `compare` prints how many failed runs, beside the ones that

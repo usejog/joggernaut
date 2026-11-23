@@ -66,8 +66,13 @@ steps below say what each command computes.
 
    ```sh
    python3 scripts/measure.py fetch --repo OWNER/NAME --workflow ci.yml \
-     --event pull_request --limit 150 --out .joggernaut/before.jsonl
+     --event pull_request --limit 150 --created '<=YYYY-MM-DDTHH:MM:SSZ' \
+     --out .joggernaut/before.jsonl
    ```
+
+   Pick the time before you look, a few hours ago, so every run up to it
+   has finished: `fetch` refuses runs still going, since fast runs finish
+   first and a set read early keeps the fast ones.
 
 3. Read where the time goes, so you measure the part the fix touches:
    `python3 scripts/measure.py split --in .joggernaut/before.jsonl`.
@@ -96,8 +101,8 @@ baseline now (step 3.3): a lost test fails the change before it merges.
 1. Fetch only runs created in a window after the merge, chosen before you
    look (a day or two, say), and only once every run created in it has
    finished: fast runs finish first, so a window read early holds its
-   fastest runs and can pass for a speedup. `fetch` warns when runs in the
-   window are still going.
+   fastest runs and can pass for a speedup. `fetch` refuses a window that
+   hasn't ended, has runs still going, or holds more runs than `--limit`.
    `python3 scripts/measure.py fetch ... --created 'MERGE-TIME..WINDOW-END' --out .joggernaut/after.jsonl`
    (times as `YYYY-MM-DDTHH:MM:SSZ`).
    A `pull_request` run tests the pull request merged into its base as the
@@ -107,8 +112,8 @@ baseline now (step 3.3): a lost test fails the change before it merges.
    instead of the merge commit, and `push` runs on branches without the fix
    (`git merge-base --is-ancestor FIX_SHA RUN_SHA` tells you).
    You need at least 5 comparable runs a side. If the window ends with fewer,
-   report "not enough runs yet", write the exact commands into the pull
-   request so
+   report "not enough runs yet", choose a longer window before looking at
+   any timings, write the exact commands for it into the pull request so
    anyone can finish the measurement, and stop; never trigger runs to fill
    the count without asking. Comparable means the
    same workflow, event and runner label, and successful runs only. Count

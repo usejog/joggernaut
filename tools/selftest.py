@@ -299,6 +299,62 @@ for _ in range(300):
     if mm.tails(xs, xs[:k])[0] != ("typical slowest of %d" % k, maxes[(len(maxes) - 1) // 2]):
         bad.append("tails: typical slowest of %d of %r should be %r" % (k, xs, maxes[(len(maxes) - 1) // 2]))
         break
+# fetch, against a fake gh: a window is written only when every run in it has finished and
+# all of it fits under --limit; without a window (a diagnosis) the finished runs are kept.
+FAKE_GH = r'''#!/usr/bin/env python3
+import json, os, re, sys
+runs = json.load(open(os.environ["FAKE_RUNS"]))
+path = sys.argv[-1]
+if path == "rate_limit":
+    print(json.dumps({"resources": {"core": {"remaining": 5000, "reset": 0}}}))
+elif "/jobs" in path:
+    rid = int(re.search(r"/runs/(\d+)/jobs", path).group(1))
+    print(json.dumps([{"jobs": [r for r in runs if r["id"] == rid][0]["jobs"]}]))
+else:
+    keep = [r for r in runs if "status=completed" not in path or r["status"] == "completed"]
+    page = int(re.search(r"[?&]page=(\d+)", path).group(1))
+    print(json.dumps({"total_count": len(keep), "workflow_runs": keep[(page - 1) * 100:page * 100]}))
+'''
+with tempfile.TemporaryDirectory() as t:
+    os.makedirs(t + "/bin")
+    open(t + "/bin/gh", "w").write(FAKE_GH)
+    os.chmod(t + "/bin/gh", 0o755)
+    rows = [json.loads(l) for l in open(E + "/ci-measure/repo/ci-history/after.jsonl") if l.strip()][:6]
+    env = dict(os.environ, PATH=t + "/bin" + os.pathsep + os.environ["PATH"], FAKE_RUNS=t + "/runs.json")
+
+    calls = itertools.count()
+
+    def fetch(statuses, *extra):
+        json.dump([dict(r, status=s, pull_requests=[{"number": n} for n in r["pull_requests"]])
+                   for r, s in zip(rows, statuses)], open(t + "/runs.json", "w"))
+        out = t + "/out/%d.jsonl" % next(calls)
+        r = subprocess.run([sys.executable, M, "fetch", "--repo", "o/r", "--workflow", "ci.yml", "--out", out]
+                           + list(extra), cwd=t, env=env, capture_output=True, text=True)
+        return r, (sum(1 for _ in open(out)) if os.path.exists(out) else None)
+    window = ("--created", "2026-10-01T00:00:00Z..2026-10-08T00:00:00Z")
+    r, n = fetch(["completed"] * 5 + ["in_progress"], *window)
+    if r.returncode == 0 or n is not None or "haven't finished" not in r.stderr:
+        bad.append("fetch: a window with a run still going was written\n" + r.stdout + r.stderr)
+    r, n = fetch(["completed"] * 6, "--limit", "5", *window)
+    if r.returncode == 0 or n is not None:
+        bad.append("fetch: a window larger than --limit was written\n" + r.stdout + r.stderr)
+    r, n = fetch(["completed"] * 6, *window)
+    if r.returncode != 0 or n != 6:
+        bad.append("fetch: a finished window should be written whole (%r runs)\n%s" % (n, r.stderr))
+    r, n = fetch(["completed"] * 5 + ["queued"])
+    if r.returncode != 0 or n != 5:
+        bad.append("fetch: without a window, the finished runs should be written (%r runs)\n%s" % (n, r.stderr))
+    # A baseline up to a past time keeps the newest --limit runs; all must have finished.
+    r, n = fetch(["completed"] * 6, "--limit", "4", "--created", "<=2026-10-08T00:00:00Z")
+    if r.returncode != 0 or n != 4:
+        bad.append("fetch: a baseline up to a past time should keep its newest 4 runs (%r)\n%s" % (n, r.stderr))
+    r, n = fetch(["in_progress"] + ["completed"] * 5, "--limit", "4", "--created", "<=2026-10-08T00:00:00Z")
+    if r.returncode == 0 or n is not None:
+        bad.append("fetch: a baseline with a run still going was written")
+    for open_window in (">=2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z..2999-01-01"):
+        r, n = fetch(["completed"] * 6, "--created", open_window)
+        if r.returncode == 0 or n is not None:
+            bad.append("fetch: a window that hasn't ended (%s) was written" % open_window)
 # Tails compare like with like: with no change, 150 runs before and 5 after, the after
 # side's slowest run must not look better nearly every time (a max of 150 against a max of 5).
 better = 0

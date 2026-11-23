@@ -63,8 +63,13 @@ in `references/measuring.md`.
 
    ```sh
    python3 scripts/measure.py fetch --repo OWNER/NAME --workflow ci.yml \
-     --event pull_request --limit 150 --out .joggernaut/before.jsonl
+     --event pull_request --limit 150 --created '<=YYYY-MM-DDTHH:MM:SSZ' \
+     --out .joggernaut/before.jsonl
    ```
+
+   Pick the `--created` time a few hours ago, so every run up to it has
+   finished: the file is also the baseline a fix is measured against, and
+   `fetch` refuses runs still going, since the fast ones finish first.
 
    With several workflows, `split` prints the PR wait across all of them per
    commit; split each one too (`--workflow NAME`) to see its jobs.

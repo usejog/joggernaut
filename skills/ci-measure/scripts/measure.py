@@ -206,36 +206,63 @@ def prepare_out(path):
                 f.write("\n.joggernaut/\n")
 
 
+def window_end(created):
+    """The end of a --created window as a timestamp: None when it has no end (>=, >,
+    or ..*). A bare date ends with its day."""
+    if created.startswith(">"):
+        return None
+    end = created.split("..")[-1].lstrip("<=")
+    if end in ("", "*"):
+        return None
+    if re.match(r"^\d{4}-\d\d-\d\d$", end):
+        return ts(end + "T00:00:00Z") + 86400
+    return ts(end)
+
+
 def cmd_fetch(a):
+    if a.created:
+        end = window_end(a.created)
+        if end is None or end > datetime.now().timestamp():
+            die("the window %s hasn't ended; give a closed one that has (START..END, or <=END for a"
+                " baseline), so the runs in it are fixed before you look" % a.created)
     left = check_rate()
     base = "repos/%s/actions" % a.repo
     base += "/workflows/%s/runs" % a.workflow if a.workflow else "/runs"
-    q = "status=completed&per_page=100"
+    # With a time window, list every run in it, finished or not: fast runs finish
+    # first, so a window read while some of its runs are still going would keep its
+    # fastest runs and could pass for a speedup. Without one (a diagnosis), the newest
+    # finished runs.
+    q = "per_page=100" if a.created else "status=completed&per_page=100"
     if a.event:
         q += "&event=" + quote(a.event, safe="")
     if a.branch:
         q += "&branch=" + quote(a.branch, safe="")
     if a.created:
         q += "&created=" + quote(a.created, safe="")
-    runs, page = [], 1
+    runs, seen, page, total = [], set(), 1, None
     while len(runs) < a.limit:
         data = gh_get("%s?%s&page=%d" % (base, q, page))
-        batch = data.get("workflow_runs", [])
-        if not batch:
+        total = data.get("total_count") if total is None else total
+        batch = [r for r in data.get("workflow_runs", []) if r["id"] not in seen]
+        if not data.get("workflow_runs"):
             break
+        seen.update(r["id"] for r in batch)  # a run created mid-listing shifts the pages
         runs.extend(batch)
         page += 1
+    # START..END is read whole; <=END keeps the newest --limit runs up to END.
+    if a.created and ".." in a.created and not a.created.startswith("*.."):
+        if (total or 0) > a.limit or len(runs) > a.limit:
+            die("the window holds %d runs, more than --limit %d; raise --limit or choose a shorter"
+                " window, so the comparison sees all of it" % (max(total or 0, len(runs)), a.limit))
+        if len(runs) < (total or 0):
+            die("GitHub listed %d of the window's %d runs (it lists at most 1,000 for a filtered"
+                " query); choose a shorter window" % (len(runs), total))
     runs = runs[: a.limit]
-    if a.created:
-        # Fast runs finish first: a window read while some of its runs are still going
-        # holds its fastest runs and can pass for a speedup. Count the unfinished ones.
-        going = sum(gh_get("%s?%s" % (base, q.replace("status=completed&per_page=100",
-                                                      "status=%s&per_page=1" % st))).get("total_count", 0)
-                    for st in ("queued", "waiting", "in_progress"))
-        if going:
-            print("measure.py: %d run(s) created in this window haven't finished; the fastest finish"
-                  " first, so wait for them (or end the window earlier) before comparing" % going,
-                  file=sys.stderr)
+    going = [r for r in runs if r.get("status", "completed") != "completed"]
+    if going:
+        die("%d of the %d runs created in this window haven't finished (the fastest finish"
+            " first); fetch the same window again once they have, and don't end it earlier"
+            " to leave them out" % (len(going), len(runs)))
     if len(runs) + 10 > left:
         die("%d runs need about %d requests; %d left" % (len(runs), len(runs) + 10, left))
     prepare_out(a.out)
