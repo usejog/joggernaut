@@ -7,7 +7,7 @@
 
 <h1 align="center">Joggernaut</h1>
 
-<p align="center"><b>Fixes for slow CI, drawn from results other teams published, GitHub's own docs and arithmetic anyone can check, as skills your agent runs on your own GitHub Actions runs. Every test must keep running.</b></p>
+<p align="center"><b>The ultimate collection of skills to improve CI speed, reliability and cost. Joggernaut takes what's worked for world-class, AI-first teams and packages it so your agent can apply it to your codebase.</b></p>
 
 <p align="center"><sub>Agent skills for GitHub Actions CI · jog + juggernaut</sub></p>
 
@@ -18,23 +18,50 @@
   <img alt="rule: keep every test" src="https://img.shields.io/badge/rule-keep_every_test-brightgreen">
 </p>
 
-Joggernaut is a collection, not a method of its own; what is its own is arithmetic, shown where it is used, and a few safety choices, labelled as choices. Each fix in it rests on one of three
-things, named where it is used: a result a team published with numbers
-before and after; how the tools behave, from their own docs (GitHub's,
-mostly); or reasoning short enough to check in a line. Where a step can
-point at none of these, the skill measures it on your runs instead. The few
-limits it sets itself, such as two CI rounds per task or never quarantining
-a test, are safety choices, labelled as choices, and each says why.
-[Where each rule comes from](#where-each-rule-comes-from) links the basis
-of every rule.
+We read 554 public posts about slow CI and about 85 write-ups and pull
+requests, and kept the teams' results that show numbers before and after. Joggernaut turns those fixes into skills for Claude Code, Codex and
+other agents. Your agent checks which ones apply to your own GitHub Actions
+runs, makes the one you pick, and measures it. Every test must keep running.
+
+**Built on what these teams published.** Each row is the team's own
+write-up; we didn't reproduce the numbers, and no team endorses Joggernaut.
+
+| Team | What they found | Result |
+|---|---|---|
+| OpenAI Core Experimentation | Ranked CI ideas by estimated minutes saved a day, from run history | Median CI about 10 → 4.5 min ([blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family)) |
+| OpenAI Core Experimentation | One missing mock | One suite 592.6 s → 29.8 s, all 63 tests kept ([blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family)) |
+| Linear | Seven small jobs each paid setup; folded into two | About 87,000 runner-minutes a month saved, 11.8% of CI (June usage) ([blog](https://linear.app/now/ci-bottleneck-reworked)) |
+| Shopify Ruby LSP | Test-time work in one PR | CI about 30 → 20 min, with the same reported count of 18,329 tests ([PR #4004](https://github.com/Shopify/ruby-lsp/pull/4004)) |
+| Sidelab | A compile cache at 0% hits for two weeks, among other fixes | Full CI 68 → 15 min ([post](https://x.com/sireton_builds/status/2117864723404451924)) |
+| Boardy | Pull-request caches never seeded from main, all year | Node modules restore in 13 s instead of a 33 s install ([post](https://x.com/owengretzinger/status/2116291924219060319)) |
+| CloudX | Lint and test jobs shared one Go cache key; the test jobs' median had regressed 76 s → 180 s | A per-job cache brought the median job to 41 s, partly by reusing Go's test results ([blog](https://www.cloudx.ai/posts/setup-go)) |
+| Clipboard | Agents "add a retry or increase timeouts"; the team cut end-to-end tests from 174 to 87 instead | End-to-end flake rate 100% → under 15% in six weeks ([blog](https://www.clipboard.com/resources/blog/agents-cant-iterate-against-tests-that-lie)) |
+| Selenios | Catch-up runs after other merges | Catch-up runs were 51% of a pull request's CI minutes ([post](https://me.jonymusky.com/blog/merge-queue-ai-ci-tax)) |
+
+Where no team's result covers a step, it rests on GitHub's own docs or on
+arithmetic you can check in a line, or the skill measures it on your runs.
+[Where each rule comes from](#where-each-rule-comes-from) links the basis of
+every rule.
+
+In Claude Code:
+
+```text
+/plugin marketplace add usejog/joggernaut
+/plugin install jog@joggernaut
+/reload-plugins
+/jog:ci-diagnose
+```
+
+Other agents: [Install](#install).
 
 Ask your agent to **diagnose my CI**. It reads your recent GitHub Actions
-runs (by default 150 a workflow; fetching them costs about 155 API requests per workflow: one for each run's jobs, more
-for a run with over 100 jobs, plus the run list; the usual limit for a
-signed-in user is 5,000 an hour, and `gh api rate_limit` shows yours), splits the wait into waiting for a machine, setup and
-running, and ranks the causes by the wait each one costs on your own runs.
-It changes no tracked file until you say yes. An example of what it
-prints, for a made-up repository with made-up numbers:
+runs (by default 150 a workflow; fetching them costs about 155 API requests
+per workflow: one for each run's jobs, more for a run with over 100 jobs,
+plus the run list; the usual limit for a signed-in user is 5,000 an hour,
+and `gh api rate_limit` shows yours), splits the wait into waiting for a
+machine, setup and running, and ranks the causes by the wait each one costs
+on your own runs. It changes no tracked file until you say yes. An example
+of what it prints, for a made-up repository with made-up numbers:
 
 ```text
 Joggernaut · made-up example: acme/web · 150 PR runs over 3.75 days   read-only
@@ -126,22 +153,8 @@ the timing half of a diagnosis; the ranking is your agent's work.
 **What it won't do.** It never makes CI faster by hiding failures: no
 retries, longer timeouts, skipped tests or quarantines, and no fewer tests
 before a merge. Anything that costs money goes on a list for you. And the
-numbers below are other teams', not ours: we haven't measured these skills on
+numbers above are other teams', not ours: we haven't measured these skills on
 anyone's CI yet.
-
-## What other teams measured
-
-Each row is a result its team published. We didn't reproduce them; each
-skill links its sources in `references/evidence.md`.
-
-| Team | Result | What they found | Source |
-|---|---|---|---|
-| OpenAI Core Experimentation | CI median roughly 10 → 4.5 min | Codex ranked ideas by estimated CI minutes saved a day; about 30 PRs | [blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family) |
-| Shopify Ruby LSP | CI about 30 → about 20 min | Test-time work in one PR; the same reported test count, 18,329 | [PR #4004](https://github.com/Shopify/ruby-lsp/pull/4004) |
-| Sidelab | Full CI 68 min (median of 5 green runs) → 15 min (the post doesn't say over how many runs) | Claude with sub-agents; among the fixes, a compile cache at 0% hits for two weeks, 8-core runners (paid, the person's call), tests split over 2 machines | [post](https://x.com/sireton_builds/status/2117864723404451924) |
-| OpenAI Core Experimentation | One suite 592.6 s → 29.8 s | Adding one missing mock; all 63 tests retained | [blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family) |
-| Linear | 7 small jobs → 2 | About 87,000 runner-minutes a month saved, based on June usage | [blog](https://linear.app/now/ci-bottleneck-reworked) |
-| Selenios | Catch-up runs were 51% of a PR's CI minutes | Under the up-to-date rule, every merge sent other pull requests back to CI; after a move to a merge queue, about a third were still updated, some for real conflicts, the rest, the team writes, reflex | [post](https://me.jonymusky.com/blog/merge-queue-ai-ci-tax) |
 
 ## The four rules every skill follows
 
