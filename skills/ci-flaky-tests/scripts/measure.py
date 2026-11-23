@@ -57,7 +57,7 @@ def ts(value):
     v = value.replace("Z", "+00:00")
     m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?([+-]\d\d:?\d\d)?$", v)
     if not m:
-        die("unreadable timestamp %r" % value)
+        die("unreadable timestamp %r; use YYYY-MM-DDTHH:MM:SSZ" % value)
     frac = float(m.group(2)) if m.group(2) else 0.0
     off = (m.group(3) or "+00:00").replace(":", "")
     return datetime.strptime(m.group(1) + off, "%Y-%m-%dT%H:%M:%S%z").timestamp() + frac
@@ -249,20 +249,26 @@ def cmd_fetch(a):
         seen.update(r["id"] for r in batch)  # a run created mid-listing shifts the pages
         runs.extend(batch)
         page += 1
-    # START..END is read whole; <=END keeps the newest --limit runs up to END.
-    if a.created and ".." in a.created and not a.created.startswith("*.."):
-        if (total or 0) > a.limit or len(runs) > a.limit:
+    if a.created:
+        # A window (START..END, or one day) is read whole; <=END (a baseline) keeps the
+        # newest --limit runs up to END. Either way, every run kept must have finished.
+        whole = not a.created.lstrip().startswith("<")
+        if whole and ((total or 0) > a.limit or len(runs) > a.limit):
             die("the window holds %d runs, more than --limit %d; raise --limit or choose a shorter"
                 " window, so the comparison sees all of it" % (max(total or 0, len(runs)), a.limit))
-        if len(runs) < (total or 0):
-            die("GitHub listed %d of the window's %d runs (it lists at most 1,000 for a filtered"
-                " query); choose a shorter window" % (len(runs), total))
+        want = (total or 0) if whole else min(total or 0, a.limit)
+        if len(runs) < want:
+            die("GitHub listed %d of the %d runs asked for (it lists at most 1,000 for a filtered"
+                " query); choose a shorter window" % (len(runs), want))
+        runs = runs[: a.limit]
+        going = [r for r in runs if r.get("status") != "completed"]
+        if going:
+            die("%d of the %d runs created in this window haven't finished (the fastest finish"
+                " first); fetch the same window again once they have, and don't end it earlier"
+                " to leave them out. A run stuck before it started (waiting for an approval or a"
+                " runner) won't finish: ask a person to cancel it, then fetch again"
+                % (len(going), len(runs)))
     runs = runs[: a.limit]
-    going = [r for r in runs if r.get("status", "completed") != "completed"]
-    if going:
-        die("%d of the %d runs created in this window haven't finished (the fastest finish"
-            " first); fetch the same window again once they have, and don't end it earlier"
-            " to leave them out" % (len(going), len(runs)))
     if len(runs) + 10 > left:
         die("%d runs need about %d requests; %d left" % (len(runs), len(runs) + 10, left))
     prepare_out(a.out)
@@ -854,15 +860,27 @@ def cmd_compare(a):
         else:
             res["verdict_code"] = "no_change_yet"
             res["verdict"] = "no measurable change yet with %s; more runs can tighten this" % sides
+    hidden = res["verdict_code"] == "not_enough_runs"
+    if hidden:
+        # No timings until there are enough runs, so a longer window is chosen without
+        # seeing how the short one looked.
+        for k in ("before_median", "after_median", "before_p95", "after_p95", "before_tail", "after_tail",
+                  "runner_minutes_median_before", "runner_minutes_median_after",
+                  "runner_minutes_a_day_before", "runner_minutes_a_day_after"):
+            res[k] = None
     if a.json:
         print(json.dumps(res, indent=2))
         return
     print("measure: " + what + (" | cache: %s" % a.cache if a.cache else ""))
-    print("before: %d runs, median %s, %s %s" % (len(before), fmt(res["before_median"]),
-                                                 before_tail[0], fmt(before_tail[1])))
-    print("after:  %d runs, median %s, %s %s" % (len(after), fmt(res["after_median"]),
-                                                 after_tail[0], fmt(after_tail[1])))
-    if res["p95_provisional"]:
+    if hidden:
+        print("before: %d runs\nafter:  %d runs\ntimings: not shown until there are %d a side, so a longer"
+              " window is chosen without seeing them" % (len(before), len(after), a.min_runs))
+    else:
+        print("before: %d runs, median %s, %s %s" % (len(before), fmt(res["before_median"]),
+                                                     before_tail[0], fmt(before_tail[1])))
+        print("after:  %d runs, median %s, %s %s" % (len(after), fmt(res["after_median"]),
+                                                     after_tail[0], fmt(after_tail[1])))
+    if res["p95_provisional"] and not hidden:
         print("%s: provisional, under %d runs a side"
               % ("slowest 5%" if fewer >= TAIL_RUNS else "slowest runs", P95_FIRM))
     need = fails_needed(fb, fa[1] - fa[0])
@@ -870,7 +888,7 @@ def cmd_compare(a):
         " (higher after, within chance: report it)" if rate(fa) > rate(fb) and not fails_rose(fb, fa) else "",
         "; beyond chance from %d failed beside these %d" % (need, fa[1] - fa[0])
         if need is not None and fa[0] < need else "")))
-    if mb and ma:
+    if mb and ma and not hidden:
         print("runner-minutes per run (every job and attempt, cancelled runs included, rounded up per job):"
               " median %g before, %g after" % (median(mb), median(ma)))
         if res["runner_minutes_a_day_before"] and res["runner_minutes_a_day_after"]:

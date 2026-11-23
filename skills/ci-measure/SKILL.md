@@ -111,9 +111,10 @@ baseline now (step 3.3): a lost test fails the change before it merges.
    into other branches, workflows that check out the pull request's head
    instead of the merge commit, and `push` runs on branches without the fix
    (`git merge-base --is-ancestor FIX_SHA RUN_SHA` tells you).
-   You need at least 5 comparable runs a side. If the window ends with fewer,
-   report "not enough runs yet", choose a longer window before looking at
-   any timings, write the exact commands for it into the pull request so
+   If `fetch` refuses, stop there: `compare` would read an older file. You
+   need at least 5 comparable runs a side. If the window ends with fewer,
+   `compare` reports "not enough runs yet" and shows no timings; choose a
+   longer window, write the exact commands for it into the pull request so
    anyone can finish the measurement, and stop; never trigger runs to fill
    the count without asking. Comparable means the
    same workflow, event and runner label, and successful runs only. Count

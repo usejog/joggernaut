@@ -312,21 +312,33 @@ elif "/jobs" in path:
     print(json.dumps([{"jobs": [r for r in runs if r["id"] == rid][0]["jobs"]}]))
 else:
     keep = [r for r in runs if "status=completed" not in path or r["status"] == "completed"]
+    m = re.search(r"[?&]created=([^&]+)", path)
+    if m:
+        from urllib.parse import unquote
+        value = unquote(m.group(1))
+        lo, _, hi = value.rpartition("..") if ".." in value or value.startswith("<") else (value, "", value)
+        hi = hi.lstrip("<=")
+        hi = hi + "T23:59:59Z" if len(hi) == 10 else hi  # a bare date takes its whole day
+        keep = [r for r in keep if (not lo or r["created_at"] >= lo) and r["created_at"] <= hi]
     page = int(re.search(r"[?&]page=(\d+)", path).group(1))
-    print(json.dumps({"total_count": len(keep), "workflow_runs": keep[(page - 1) * 100:page * 100]}))
+    total = int(os.environ.get("FAKE_TOTAL") or len(keep))  # GitHub lists at most 1,000
+    print(json.dumps({"total_count": total, "workflow_runs": keep[(page - 1) * 100:page * 100]}))
 '''
 with tempfile.TemporaryDirectory() as t:
     os.makedirs(t + "/bin")
     open(t + "/bin/gh", "w").write(FAKE_GH)
     os.chmod(t + "/bin/gh", 0o755)
-    rows = [json.loads(l) for l in open(E + "/ci-measure/repo/ci-history/after.jsonl") if l.strip()][:6]
+    rows = [dict(r, pull_requests=[{"number": n} for n in r["pull_requests"]])
+            for r in (json.loads(l) for l in open(E + "/ci-measure/repo/ci-history/after.jsonl") if l.strip())][:6]
     env = dict(os.environ, PATH=t + "/bin" + os.pathsep + os.environ["PATH"], FAKE_RUNS=t + "/runs.json")
 
     calls = itertools.count()
 
+    # Outside every window below: a run still going, which only a lost --created would see.
+    outside = dict(rows[0], id=99, created_at="2026-09-01T09:00:00Z", status="in_progress")
+
     def fetch(statuses, *extra):
-        json.dump([dict(r, status=s, pull_requests=[{"number": n} for n in r["pull_requests"]])
-                   for r, s in zip(rows, statuses)], open(t + "/runs.json", "w"))
+        json.dump([dict(r, status=s) for r, s in zip(rows, statuses)] + [outside], open(t + "/runs.json", "w"))
         out = t + "/out/%d.jsonl" % next(calls)
         r = subprocess.run([sys.executable, M, "fetch", "--repo", "o/r", "--workflow", "ci.yml", "--out", out]
                            + list(extra), cwd=t, env=env, capture_output=True, text=True)
@@ -341,6 +353,17 @@ with tempfile.TemporaryDirectory() as t:
     r, n = fetch(["completed"] * 6, *window)
     if r.returncode != 0 or n != 6:
         bad.append("fetch: a finished window should be written whole (%r runs)\n%s" % (n, r.stderr))
+    r, n = fetch(["completed"] * 6, "--limit", "5", "--created", "2026-10-06")
+    if r.returncode == 0 or n is not None:
+        bad.append("fetch: a one-day window larger than --limit was written\n" + r.stdout + r.stderr)
+    env["FAKE_TOTAL"] = "1200"
+    r, n = fetch(["completed"] * 6, "--limit", "2000", *window)
+    env["FAKE_TOTAL"] = ""
+    if r.returncode == 0 or n is not None or "listed 6 of" not in r.stderr:
+        bad.append("fetch: a window GitHub listed only in part was written\n" + r.stderr)
+    r, n = fetch(["completed"] * 5 + [None], *window)
+    if r.returncode == 0 or n is not None:
+        bad.append("fetch: a run with no status was taken as finished")
     r, n = fetch(["completed"] * 5 + ["queued"])
     if r.returncode != 0 or n != 5:
         bad.append("fetch: without a window, the finished runs should be written (%r runs)\n%s" % (n, r.stderr))
@@ -379,7 +402,7 @@ with tempfile.TemporaryDirectory() as t:
     if "verdict: no measurable change yet with 5 a side; more runs can tighten this" not in r.stdout:
         bad.append("compare: the same 5 runs should say more runs can tighten it\n" + r.stdout + r.stderr)
     r = run([M, "compare", "--before", t + "/b4", "--after", t + "/a4"])
-    if "verdict: not enough runs yet" not in r.stdout:
+    if "verdict: not enough runs yet" not in r.stdout or "median" in r.stdout or "slowest" in r.stdout:
         bad.append("compare: 4 runs a side should not get a verdict\n" + r.stdout + r.stderr)
     # 24 runs before against 5 after: the larger side's tail is named for what it is.
     r = run([M, "compare", "--before", E + "/ci-measure/repo/ci-history/before.jsonl", "--after", t + "/a5"])

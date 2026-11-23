@@ -39,8 +39,9 @@ change now, not after merge.
 ```sh
 MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request \
   --created 'MERGE-TIME..WINDOW-END' --out .joggernaut/after.jsonl   # times as YYYY-MM-DDTHH:MM:SSZ
-# keep only runs that tested the fix: pull requests into the same branch (not
-# ones that check out the PR head), or commits with the fix in their history
+# if fetch refused, stop: compare would read an older file. Keep only runs that
+# tested the fix: pull requests into the same branch (not ones that check out
+# the PR head), or commits with the fix in their history
 MEASURE compare --before .joggernaut/before.jsonl --after .joggernaut/after.jsonl \
   --label RUNNER-LABEL [--job NAME]     # always pass the runner label; add --job when jobs run on different runners
 MEASURE tests --before JUNIT-BEFORE --after JUNIT-AFTER   # each downloaded into a new, empty folder
@@ -60,9 +61,10 @@ you report it. Report its verdict as printed, with the run count it names, for
 example "median faster (5 runs a side)". `tests` fails if any test stopped
 running, was newly skipped or newly fails.
 
-**If the window has fewer than 5 a side**, say "not enough runs yet", choose
-a longer window before looking at any timings, write the exact commands for
-it into the pull request so anyone can finish the measurement, and stop.
+**If the window has fewer than 5 a side**, `compare` says "not enough runs
+yet" and shows no timings. Say so, choose a longer window (and a longer
+baseline, if that side is short), write the exact commands for it into the
+pull request so anyone can finish the measurement, and stop.
 Never trigger runs to fill the count without asking: runs cost money.
 
 **If the verdict is "no measurable change yet"**, the change may be real but
