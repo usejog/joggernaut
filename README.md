@@ -7,7 +7,7 @@
 
 <h1 align="center">Joggernaut</h1>
 
-<p align="center"><b>CI fixes that teams at OpenAI, Linear, Shopify's Ruby LSP and others published, as skills your coding agent runs on your repo.</b></p>
+<p align="center"><b>The ultimate collection of skills to improve CI speed, reliability and cost. Joggernaut takes what's worked for world-class, AI-first teams and packages it so your agent can apply it to your codebase.</b></p>
 
 <p align="center"><sub>Agent skills for GitHub Actions CI · jog + juggernaut</sub></p>
 
