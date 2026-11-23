@@ -143,7 +143,8 @@ def prepare_out(path):
     if not inside:
         here = os.path.abspath(".")
         while True:
-            if os.path.exists(os.path.join(here, ".git")):
+            # A .jj folder is a Jujutsu workspace whose tracked files git can't see.
+            if os.path.exists(os.path.join(here, ".git")) or os.path.exists(os.path.join(here, ".jj")):
                 die("this looks like a git repository, but git can't say whether %s is tracked;"
                     " not writing it" % path)
             up = os.path.dirname(here)
@@ -360,8 +361,8 @@ def cmd_split(a):
     per_job = {}
     ok_runs = [r for r in runs if r.get("conclusion") == "success"]
     for r in ok_runs:
-        # The same cohort as the PR wait: a cancelled or failed run stops early and
-        # would make setup look like most of the time.
+        # The same cohort as the PR wait: a cancelled or failed run can stop early and
+        # make setup look like most of the time.
         sj = slowest_job(r)
         if sj:
             sp = job_split(sj, a.setup_pattern)
@@ -404,8 +405,9 @@ def cmd_split(a):
     total_min = sum(mins.values()) or 1
     out["runner_minutes"] = mins
     out["runner_minutes_by_label"] = by_label
-    # Every minute of a run that failed, timed out or was cancelled, its green jobs included:
-    # the whole run has to be paid for again.
+    # Every minute of a run that failed, timed out or was cancelled, its green jobs included.
+    # Not all of it is waste: a failed run may have caught a real bug, and a cancelled one
+    # may never be run again.
     lost = sum(run_minutes(r) for r in runs if r.get("conclusion") in ("failure", "timed_out", "cancelled"))
     out["wasted_share"] = lost / float(total_min)
 
@@ -419,8 +421,9 @@ def cmd_split(a):
     out["pushes_per_pr_median"] = median(counts)
     out["pushes_per_pr_max"] = max(counts) if counts else None
 
-    # Catch-up runs: pushes whose commit only merged another branch in, usually to bring
-    # the pull request up to date with main. A rebase can't be seen this way.
+    # Catch-up runs: pushes whose commit message says it merged another branch in. The
+    # message can't tell an update a conflict needed from one to stay current, and a
+    # rebase can't be seen this way.
     catch_up = [r for r in runs if CATCH_UP.match(r.get("head_message") or "")]
     cu_min = sum(run_minutes(r) for r in catch_up)
     out["catch_up_runs"] = len(catch_up)
@@ -432,17 +435,16 @@ def cmd_split(a):
     for r in runs:
         by_name = {}
         for j in r.get("jobs", []):
-            by_name.setdefault(j.get("name"), []).append(j)
-        for name, js in by_name.items():
-            js.sort(key=lambda j: j.get("run_attempt", 1))
-            seen_fail = False
-            for j in js:
-                if j.get("conclusion") == "failure":
-                    seen_fail = True
-                elif seen_fail and j.get("conclusion") == "success":
-                    k = "%s / %s" % (r.get("name"), name)
-                    flakes[k] = flakes.get(k, 0) + 1
-                    break
+            # A job is its name and runner labels, so same-name legs on other runners stay apart.
+            by_name.setdefault((j.get("name"), tuple(sorted(j.get("labels") or []))), []).append(j)
+        for (name, _), js in by_name.items():
+            # Only a pass in a later attempt than a failure counts: two same-name jobs in
+            # one attempt (a failed and a passing leg) are not a rerun.
+            failed = [j.get("run_attempt", 1) for j in js if j.get("conclusion") in ("failure", "timed_out")]
+            if failed and any(j.get("conclusion") == "success" and j.get("run_attempt", 1) > min(failed)
+                              for j in js):
+                k = "%s / %s" % (r.get("name"), name)
+                flakes[k] = flakes.get(k, 0) + 1
     out["rerun_flakes"] = sorted(flakes.items(), key=lambda kv: -kv[1])
 
     if a.json:
@@ -751,17 +753,25 @@ SHARD = re.compile(r"((?:shard|part|chunk|split|slice|group|batch|worker|index|n
                    re.I)
 NOT_RUN = {"notrun", "skipped", "suppressed", "disabled", "ignored", "pending"}
 FAILED_TAGS = {"failure", "error", "flakyFailure", "flakyError", "rerunFailure", "rerunError"}
+FAILED_WORDS = {"failed", "failure", "fail", "error", "errored", "broken"}
 
 
 def junit_results(path):
-    """Map test id -> outcome (passed, failed, skipped).
+    """Map test id -> list of outcomes (passed, failed, skipped), one per copy.
 
     A test's id is its report's path (shard numbers blanked, so shard-1 to
-    shard-4 read as one place), its suite, its class and its name. The same
-    test in several reports is counted, so a lost leg shows as a lost copy and
-    a test moved from linux to windows, or py39 to py312, shows as moved,
-    while re-sharding changes nothing."""
+    shard-4 read as one place), its suites from the outermost in, its class,
+    its file and its name, each kept apart. The same test in several reports
+    is counted, so a lost leg shows as a lost copy and a test moved from linux
+    to windows, or py39 to py312, shows as moved, while re-sharding changes
+    nothing. Copies are compared as counts, never by the order they were read.
+    An error or failure recorded on a suite rather than a case counts as a
+    failure of that suite."""
     res = {}
+
+    def add(fields, out):
+        res.setdefault(json.dumps(fields), []).append(out)
+
     for f in junit_files(path):
         try:
             root = ET.parse(f).getroot()
@@ -770,53 +780,77 @@ def junit_results(path):
         where = os.path.relpath(f, path) if os.path.isdir(path) else ""
         where = SHARD.sub(lambda m: m.group(1) + "#", re.sub(r"\.xml$", "", where))
         cases = 0
+        parent = {c: p for p in root.iter() for c in p}
         suites = [e for e in root.iter() if local(e.tag) == "testsuite"] or [root]
         for suite in suites:
+          # The suite's whole nesting, outermost first, and the nearest file a suite names.
+          chain, e = [], suite
+          while e is not None:
+              if local(e.tag) == "testsuite":
+                  chain.append(e)
+              e = parent.get(e)
+          chain.reverse()
+          suite_path = [s.get("name") or "" for s in chain]
+          suite_file = next((s.get("file") for s in reversed(chain) if s.get("file")), "")
+          if any(local(c.tag) in FAILED_TAGS for c in suite):
+              add([where, suite_path, "", suite_file, "(suite error)"], "failed")
           for tc in [c for c in suite if local(c.tag) == "testcase"]:
             cases += 1
             kids = {local(c.tag) for c in tc}
-            tid = "%s::%s::%s::%s" % (where, suite.get("name") or "",
-                                      tc.get("classname") or tc.get("file") or "", tc.get("name"))
             status = (tc.get("status") or "").lower()
             result = (tc.get("result") or "").lower()
-            if kids & FAILED_TAGS:
+            if kids & FAILED_TAGS or status in FAILED_WORDS or result in FAILED_WORDS:
                 out = "failed"
             elif "skipped" in kids or status in NOT_RUN or result in NOT_RUN:
                 out = "skipped"
             else:
                 out = "passed"
-            # The same test in several reports (matrix jobs) is kept apart by count.
-            n = 1
-            while "%s#%d" % (tid, n) in res:
-                n += 1
-            res["%s#%d" % (tid, n)] = out
+            add([where, suite_path, tc.get("classname") or "", tc.get("file") or suite_file or "",
+                 tc.get("name") or ""], out)
         if not cases:
             die("no test cases in %s; is it a JUnit report?" % f)
     return res
+
+
+def show_test(t):
+    where, suites, cls, src, name = json.loads(t)
+    return "::".join(x for x in [where, "/".join(suites), cls, src, name] if x)
 
 
 def cmd_tests(a):
     b, c = junit_results(a.before), junit_results(a.after)
     if not b or not c:
         die("no test cases found in %s" % (a.before if not b else a.after))
-    ran_b = {t for t, o in b.items() if o != "skipped"}
-    ran_c = {t for t, o in c.items() if o != "skipped"}
-    stopped = sorted(ran_b - ran_c)
-    new_fail = sorted(t for t, o in c.items() if o == "failed" and b.get(t) != "failed")
-    newly_skipped = sorted(t for t in ran_b if c.get(t) == "skipped")
+    ran = lambda outs: sum(1 for o in outs if o != "skipped")
+    failed = lambda outs: sum(1 for o in outs if o == "failed")
+    if not sum(ran(v) for v in b.values()):
+        die("no test ran in %s (every case skipped); nothing to compare, so this verifies nothing"
+            % a.before)
+    stopped, newly_skipped, new_fail = [], [], []
+    for t in sorted(set(b) | set(c)):
+        ob, oc = b.get(t, []), c.get(t, [])
+        lost = ran(ob) - ran(oc)
+        if lost > 0:
+            stopped.append((t, lost, len(ob)))
+            if oc.count("skipped") > ob.count("skipped"):
+                newly_skipped.append(t)
+        if failed(oc) > failed(ob):
+            new_fail.append((t, failed(oc) - failed(ob)))
     ok = not stopped and not new_fail
-    res = {"ran_before": len(ran_b), "ran_after": len(ran_c), "stopped_running": stopped,
-           "newly_skipped": newly_skipped, "new_failures": new_fail,
+    label = lambda t, k, n: show_test(t) + ("" if n <= 1 else " (%d of %d copies)" % (k, n))
+    res = {"ran_before": sum(ran(v) for v in b.values()), "ran_after": sum(ran(v) for v in c.values()),
+           "stopped_running": [label(t, k, n) for t, k, n in stopped],
+           "newly_skipped": [show_test(t) for t in newly_skipped],
+           "new_failures": [label(t, k, k) for t, k in new_fail],
            "verdict": "tests kept" if ok else "FAIL: tests lost or newly failing"}
     if a.json:
         print(json.dumps(res, indent=2))
     else:
-        print("tests that ran: before %d, after %d" % (len(ran_b), len(ran_c)))
-        show = lambda t: re.sub(r"#1$", "", t)
-        for t in stopped:
-            print("  stopped running: " + show(t) + ("  (now skipped)" if t in newly_skipped else ""))
-        for t in new_fail:
-            print("  new failure: " + show(t))
+        print("tests that ran: before %d, after %d" % (res["ran_before"], res["ran_after"]))
+        for t, k, n in stopped:
+            print("  stopped running: " + label(t, k, n) + ("  (now skipped)" if t in newly_skipped else ""))
+        for t, k in new_fail:
+            print("  new failure: " + show_test(t) + ("" if k == 1 else " (%d more copies)" % k))
         print("verdict: " + res["verdict"])
     sys.exit(0 if ok else 1)
 
@@ -831,7 +865,8 @@ CACHE_OUTCOMES = [
     (re.compile(r"cache saved", re.I), "save: saved"),
     (re.compile(r"failed to save|unable to reserve cache", re.I), "save: failed"),
 ]
-KEY = re.compile(r"(?:input keys|key):?\s+([^\s,]+)", re.I)
+# A key ends at a comma or the line's end (actions/cache refuses commas in keys); it may hold spaces.
+KEY = re.compile(r"(?:input keys|key):?\s+([^,]+?)\s*(?:,|$)", re.I)
 SCCACHE = re.compile(r"^\s*(cache hits|cache misses|compile requests)\s+(\d+)\s*$", re.I)
 
 
@@ -848,13 +883,41 @@ def cmd_cachelog(a):
             if rx.search(text):
                 k = KEY.search(text)
                 # A short hash names the key without printing it.
-                tag = " key#" + hashlib.sha1(k.group(1).encode()).hexdigest()[:8] if k else ""
+                # actions/cache compares keys ignoring case, so the hash does too.
+                tag = " key#" + hashlib.sha1(k.group(1).lower().encode()).hexdigest()[:8] if k else ""
                 print(label + tag)
                 break
         else:
             m = SCCACHE.match(text)
             if m:
                 print("sccache %s: %s" % (m.group(1).lower(), m.group(2)))
+
+
+# ---------------------------------------------------------------- flakebound
+
+def cmd_flakebound(a):
+    """Exact binomial arithmetic, no approximation. From x failures in a batch of n runs
+    whose size was fixed beforehand: the low end of a two-sided 95% interval for the
+    failure rate (the rate at which x or more failures has a 2.5% chance), and the
+    runs a re-test needs so that a flake that still failed at that rate would fail at
+    least once with 95% probability."""
+    x, n = a.failures, a.runs
+    if n < 1 or not 0 <= x <= n:
+        die("need 0 <= failures <= runs and runs >= 1")
+    if x == 0:
+        print("no failures in %d runs: the rate's low end is 0, so no number of green runs"
+              " can show a fix; reproduce it first" % n)
+        sys.exit(1)
+    tail = lambda p: sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i) for i in range(x, n + 1))
+    lo, hi = 0.0, x / float(n)
+    for _ in range(100):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if tail(mid) < 0.025 else (lo, mid)
+    p = hi
+    need = 1 if p >= 1 else int(math.ceil(math.log(0.05) / math.log(1 - p)))
+    print("failure rate: %d of %d; low end of its 95%% interval %.4f" % (x, n, p))
+    print("re-test with at least %d runs: a flake still failing at that rate passes them all"
+          " with chance under 5%%" % need)
 
 
 # ---------------------------------------------------------------- main
@@ -899,12 +962,16 @@ def main(argv=None):
     g.add_argument("--repo", required=True)
     g.add_argument("--job", required=True)
 
+    fb = sub.add_parser("flakebound", help="runs that would show an unchanged flake, from a reproduction")
+    fb.add_argument("--failures", type=int, required=True, help="failures seen in the reproduction batch")
+    fb.add_argument("--runs", type=int, required=True, help="runs in that batch, fixed before it ran")
+
     a = p.parse_args(argv)
     if not a.cmd:
         p.print_help()
         return 2
     {"fetch": cmd_fetch, "split": cmd_split, "compare": cmd_compare,
-     "tests": cmd_tests, "cachelog": cmd_cachelog}[a.cmd](a)
+     "tests": cmd_tests, "cachelog": cmd_cachelog, "flakebound": cmd_flakebound}[a.cmd](a)
     return 0
 
 

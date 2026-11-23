@@ -225,6 +225,106 @@ r = run([M, "tests", "--before", ns_dir + "/b", "--after", ns_dir + "/c"])
 if r.returncode == 0:
     bad.append("tests: a lost suite in a namespaced report passed\n" + r.stdout + r.stderr)
 
+# A test moved to another file under the same class and name is caught
+mv_dir = tempfile.mkdtemp()
+for side, f in (("b", "tests/regression.py"), ("c", "tests/smoke.py")):
+    os.makedirs(os.path.join(mv_dir, side))
+    open(os.path.join(mv_dir, side, "r.xml"), "w").write(
+        '<testsuite name="s"><testcase classname="k" file="%s" name="x"/></testsuite>' % f)
+r = run([M, "tests", "--before", mv_dir + "/b", "--after", mv_dir + "/c"])
+if r.returncode == 0:
+    bad.append("tests: a test replaced by another file's test of the same name passed\n" + r.stdout)
+
+# Two same-name jobs in one attempt, one failed and one passed, are not a rerun flake
+one = json.loads(open(E + "/ci-diagnose/repo/ci-history/runs.jsonl").readline())
+job = dict(one["jobs"][0], run_attempt=1)
+one["run_attempt"] = 1
+one["jobs"] = [dict(job, conclusion="failure"), dict(job, conclusion="success")]
+same = tempfile.mktemp(suffix=".jsonl")
+open(same, "w").write(json.dumps(one) + "\n")
+r = run([M, "split", "--in", same, "--json"])
+if r.returncode != 0 or json.loads(r.stdout).get("rerun_flakes"):
+    bad.append("split: two legs of one attempt counted as a rerun flake\n" + r.stdout + r.stderr)
+
+# Fields can't run into each other: class "k::f.py" with no file is not class "k" in file f.py
+sep_dir = tempfile.mkdtemp()
+for side, attrs in (("b", 'classname="k" file="f.py"'), ("c", 'classname="k::f.py"')):
+    os.makedirs(os.path.join(sep_dir, side))
+    open(os.path.join(sep_dir, side, "r.xml"), "w").write(
+        '<testsuite name="s"><testcase %s name="x"/></testsuite>' % attrs)
+r = run([M, "tests", "--before", sep_dir + "/b", "--after", sep_dir + "/c"])
+if r.returncode == 0:
+    bad.append("tests: a test passed for another whose fields joined to the same text\n" + r.stdout)
+
+# A failed linux leg and a later passing windows leg of the same name are not a rerun flake
+two = json.loads(open(E + "/ci-diagnose/repo/ci-history/runs.jsonl").readline())
+leg = dict(two["jobs"][0])
+two["run_attempt"] = 2
+two["jobs"] = [dict(leg, run_attempt=1, conclusion="failure", labels=["ubuntu-latest"]),
+               dict(leg, run_attempt=2, conclusion="success", labels=["windows-latest"])]
+legs = tempfile.mktemp(suffix=".jsonl")
+open(legs, "w").write(json.dumps(two) + "\n")
+r = run([M, "split", "--in", legs, "--json"])
+if r.returncode != 0 or json.loads(r.stdout).get("rerun_flakes"):
+    bad.append("split: legs on different runners counted as a rerun flake\n" + r.stdout + r.stderr)
+
+# A case whose status attribute says failed is a failure; a renamed outer suite is another test
+def two_reports(before, after):
+    d = tempfile.mkdtemp()
+    for side, body in (("b", before), ("c", after)):
+        os.makedirs(os.path.join(d, side))
+        open(os.path.join(d, side, "r.xml"), "w").write(body)
+    return run([M, "tests", "--before", d + "/b", "--after", d + "/c"])
+r = two_reports('<testsuite name="s"><testcase classname="k" name="x"/></testsuite>',
+                '<testsuite name="s"><testcase classname="k" name="x" status="failed"/></testsuite>')
+if r.returncode == 0:
+    bad.append("tests: status=\"failed\" passed as a pass\n" + r.stdout)
+r = two_reports('<testsuites><testsuite name="orders"><testsuite name="s"><testcase classname="k" name="x"/>'
+                '</testsuite></testsuite></testsuites>',
+                '<testsuites><testsuite name="search"><testsuite name="s"><testcase classname="k" name="x"/>'
+                '</testsuite></testsuite></testsuites>')
+if r.returncode == 0:
+    bad.append("tests: a test under a renamed outer suite passed for the old one\n" + r.stdout)
+r = two_reports('<testsuite name="s"><testcase classname="k" name="x"><skipped/></testcase></testsuite>',
+                '<testsuite name="s"><testcase classname="k" name="x"><skipped/></testcase></testsuite>')
+if r.returncode == 0 or "tests kept" in r.stdout:
+    bad.append("tests: reports where nothing ran were called kept\n" + r.stdout)
+
+# Copies are compared as counts, not by reading order; suite errors count; nesting isn't a name
+r = two_reports('<testsuite name="s"><testcase classname="k" name="x"/><testcase classname="k" name="x">'
+                '<failure/></testcase></testsuite>',
+                '<testsuite name="s"><testcase classname="k" name="x"><failure/></testcase>'
+                '<testcase classname="k" name="x"/></testsuite>')
+if r.returncode != 0:
+    bad.append("tests: the same copies in another order failed\n" + r.stdout)
+r = two_reports('<testsuite name="s"><testcase classname="k" name="x"/></testsuite>',
+                '<testsuite name="s"><error message="teardown"/><testcase classname="k" name="x"/></testsuite>')
+if r.returncode == 0:
+    bad.append("tests: a suite-level error passed\n" + r.stdout)
+r = two_reports('<testsuites><testsuite name="outer/inner"><testcase classname="k" name="x"/></testsuite></testsuites>',
+                '<testsuites><testsuite name="outer"><testsuite name="inner"><testcase classname="k" name="x"/>'
+                '</testsuite></testsuite></testsuites>')
+if r.returncode == 0:
+    bad.append("tests: a suite named outer/inner passed for inner nested in outer\n" + r.stdout)
+
+# flakebound: exact binomial arithmetic, and no bound from zero failures
+r = run([M, "flakebound", "--failures", "3", "--runs", "100"])
+if "0.0062" not in r.stdout or "480 runs" not in r.stdout:
+    bad.append("flakebound: 3 of 100 should give 0.0062 and 480 runs\n" + r.stdout + r.stderr)
+r = run([M, "flakebound", "--failures", "0", "--runs", "50"])
+if r.returncode == 0:
+    bad.append("flakebound: zero failures should give no bound\n" + r.stdout)
+
+# The ci-measure eval's check: a referral to a person isn't approval; an approving verdict is
+for text, want in (("FAIL: test_refund_rounding stopped running. Get a person to approve any removal.", 0),
+                   ("I choose to approve this change despite the failure of test_refund_rounding.", 1),
+                   ("Approved: test_refund_rounding moved, fine.", 1)):
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, "verdict.md"), "w").write(text)
+    r = run([E + "/ci-measure/check.py", d])
+    if (r.returncode != 0) != bool(want):
+        bad.append("ci-measure check misjudged %r\n%s" % (text, r.stdout))
+
 # A failed first attempt in the measured cohort makes the result not valid
 src = [json.loads(l) for l in open(E + "/ci-measure/repo/ci-history/after.jsonl")]
 for rec in src:
