@@ -2690,8 +2690,11 @@ with tempfile.TemporaryDirectory() as t:
     del mixed_b[0]["jobs"][0]["runner_group_id"]
     v, r = _cmp(t, mixed_b, [_cr(39000 + i, [_J("test", 0, 30, labels=("self-hosted",), group=2)]) for i in range(30)],
                 "--label", "self-hosted")
-    if "error" not in v or "runner group" not in r.stderr:
-        bad.append("compare #12: one row without a group hid two groups: %r" % v.get("verdict"))
+    # (Groups count only when every job read has a known one: here one doesn't, so labels
+    # alone, and the output says groups weren't compared.)
+    if not (v.get("verdict_code") or "").startswith("faster") or v.get("runner_groups_checked") is not False:
+        bad.append("compare #12: one row without a group should compare labels alone, and say so: %r"
+                   % (v.get("verdict") or v))
     # Round 3. Whole runs: a canary failing in group 2 (same labels), on the fast pushes
     # before and the slow after; the runner sets differ by group.
     def canary_group(base_id, fast_canary):
@@ -2704,8 +2707,8 @@ with tempfile.TemporaryDirectory() as t:
             rows.append(_cr(base_id + i, jobs))
         return rows
     v, r = _cmp(t, canary_group(40000, True), canary_group(41000, False), "--label", "L")
-    if "error" not in v or "runner groups" not in r.stderr:
-        bad.append("compare: runner groups of differently named jobs were lost for whole runs: %r" % v.get("verdict"))
+    if "error" not in v or "different sets of runners" not in r.stderr:
+        bad.append("compare: runner groups of differently named jobs were lost for whole runs: %r" % (v.get("verdict") or r.stderr))
     # A group change seen only on failed runs, without --label: refused, as for labels.
     def failed_groups(base_id, fail_fast, fail_group):
         rows = []
@@ -2718,8 +2721,8 @@ with tempfile.TemporaryDirectory() as t:
                 rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100, labels=("self-hosted", "L"), group=1)]))
         return rows
     v, r = _cmp(t, failed_groups(42000, True, 2), failed_groups(43000, False, 3), "--job", "test")
-    if "error" not in v or "runner groups" not in r.stderr:
-        bad.append("compare: a group change on failed runs passed without --label: %r" % v.get("verdict"))
+    if "error" not in v or "runner group 2" not in r.stderr:
+        bad.append("compare: a group change on failed runs passed without --label: %r" % (v.get("verdict") or r.stderr))
     # --end --label L: a rerun that first failed on M and was retried on L (after) or M
     # (before) is the routing count's, not a refusal.
     def end_retry(base_id, retry_on):
@@ -2735,7 +2738,7 @@ with tempfile.TemporaryDirectory() as t:
     # A job that moved wholly from group 0 to group 7 is refused (0 is a group id).
     v, r = _cmp(t, [_cr(46000 + i, [_J("test", 0, 100 + i, labels=("L",), group=0)]) for i in range(6)],
                 [_cr(47000 + i, [_J("test", 0, 50 + i, labels=("L",), group=7)]) for i in range(6)], "--label", "L")
-    if "error" not in v or "runner group 0 before and 7 after" not in r.stderr:
+    if "error" not in v or "L (runner group 0) before and L (runner group 7) after" not in r.stderr:
         bad.append("compare #12: a move from group 0 to group 7 passed: %r" % (v.get("verdict") or r.stderr))
     # Round 4. A canary on another pool fails and is retried there: the reruns' first attempts
     # show the extra pool, on the fast pushes before and the slow after. Refused.
@@ -2792,8 +2795,54 @@ with tempfile.TemporaryDirectory() as t:
                              _J("test", 5, 50 + i, labels=("macos-latest",), group=0)]) for i in range(6)]
     v, r = _cmp(t, old_b, new_a)
     text = run([M, "compare", "--before", t + "/b", "--after", t + "/a"]).stdout
-    if not (v.get("verdict_code") or "").startswith("faster") or "have none saved" not in text:
+    if not (v.get("verdict_code") or "").startswith("faster") or "runner groups: not compared" not in text:
         bad.append("compare: an older before file refused, or no note: %r\n%s" % (v.get("verdict") or v, text))
+    # Round 6. Jobs cancelled in the queue still show which runner the push asked for: fast
+    # pushes asked for M before, slow ones for N after. Refused, as before.
+    def asked(base_id, fast_pool):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            if fast == (fast_pool == "M"):
+                c = _cr(base_id + i, [_J("test", 0, 1, labels=(fast_pool,), conclusion="cancelled")], conclusion="cancelled")
+                c["jobs"][0]["runner_name"] = None
+                rows.append(c)
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100, labels=("L",))]))
+        return rows
+    v, r = _cmp(t, asked(60000, "M"), asked(61000, "N"), "--job", "test")
+    if "error" not in v:
+        bad.append("compare: the runners queued jobs asked for were ignored: %r" % v.get("verdict"))
+    # Two jobs named test (ambiguous to time) still count in the --end job-set check.
+    def twin(base_id, fast_twin):
+        return [_cr(base_id + i, [_J("test", 0, 10 if i < 12 else 100, labels=("L",))]
+                    + ([_J("test", 0, 10 if i < 12 else 100, labels=("L",))] if (i < 12) == fast_twin else []))
+                for i in range(24)]
+    v, r = _cmp(t, twin(62000, True), twin(63000, False), "--job", "test", "--end", "--label", "L")
+    if "error" not in v:
+        bad.append("compare --end: runs left out as ambiguous dropped out of the job-set check: %r" % v.get("reading"))
+    # One unknown group: groups aren't compared, so a known group seen only before refuses nothing.
+    b_ = [_cr(64000 + i, [_J("test", 0, 100 + i, labels=("L",), group=1)]) for i in range(6)]
+    b_.append(_cr(64006, [_J("test", 0, 5, labels=("L",), group=2, conclusion="failure")], conclusion="failure"))
+    a_ = [_cr(65000 + i, [_J("test", 0, 50 + i, labels=("L",), group=1)]) for i in range(6)]
+    a_.append(_cr(65006, [_J("test", 0, 5, labels=("L",), group=None, conclusion="failure")], conclusion="failure"))
+    v, r = _cmp(t, b_, a_, "--job", "test")
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare: one unknown group made a group change: %r" % (v.get("verdict") or v))
+    # --ran gate: a gate cancelled in the queue never ran, so its run isn't in the workload.
+    def gated(base_id, off):
+        rows = [_cr(base_id + i, [_J("gate", 0, 1, labels=("L",)), _J("test", 1, 100 - 50 * (off == "M") + i, labels=("L",))])
+                for i in range(6)]
+        for i in range(12):
+            g = _J("gate", 0, 1, labels=("L",), conclusion="cancelled")
+            x = _cr(base_id + 100 + i, [g, _J("test", 1, 5, labels=(off,))])
+            x["jobs"][0]["runner_name"] = None
+            rows.append(x)
+        return rows
+    v, r = _cmp(t, gated(66000, "L"), gated(67000, "M"), "--ran", "gate", "--job", "test", "--label", "L")
+    if "_routing_changed" in (v.get("reading_code") or ""):
+        bad.append("compare --ran: runs outside the workload moved the routing count: %r %r"
+                   % (v.get("off_runner_before"), v.get("off_runner_after")))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))

@@ -206,9 +206,10 @@ the verdict.
 
 Where the pushes ran matters as much as what they ran. `compare` keys a
 runner by its labels and its runner group (two self-hosted groups can share
-every label; `fetch` saves each job's group, and a file from an older
-version compares labels alone where it lacks them, and says to fetch
-again). Each job must have run on one runner, the same on both sides, read
+every label; `fetch` saves each job's group). Groups are compared only when
+every job read that got a runner has a known one: with any unknown (a file
+from an older version, a group GitHub didn't report) the runners compare by
+labels alone, and `compare` says so. Each job must have run on one runner, the same on both sides, read
 over every green run of the selection, reruns included, not only the timed
 ones (a canary that fails on one pool keeps those runs from being timed, so
 which pushes went there decides which are timed, and leaving reruns' pools
