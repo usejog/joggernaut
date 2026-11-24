@@ -1545,26 +1545,26 @@ def cmd_compare(a):
     if comparable and not a.label:
         # Where the compared pushes were routed, failed and cancelled runs included (a pool
         # only failed runs used still shows the pushes were routed differently).
-        named = lambda j: (not a.job or j.get("name") == a.job) and j.get("labels")
+        named = lambda j: not a.job or j.get("name") == a.job
         first_in = {}
 
-        def labels(rs):
+        def labels(rs, pick, by_group):
             out = set()
-            for r in selected(rs):
+            for r in pick(rs):
                 for j in latest_jobs(r):
-                    if named(j):
-                        out.add(key(j))
-                        first_in.setdefault(key(j), r)
+                    for k in ([key(j)] if named(j) and j.get("labels") else []) + (
+                            [gkey(j)] if by_group and named(j) and on_a_runner(j) else []):
+                        out.add(k)
+                        first_in.setdefault(k, r)
             return out
-        if groups:
-            labels = (lambda base: lambda rs: base(rs) | {gkey(j) for r in selected(rs) for j in latest_jobs(r)
-                                                         if (not a.job or j.get("name") == a.job) and on_a_runner(j)
-                                                         and first_in.setdefault(gkey(j), r)})(labels)
-        lb, la = labels(rb), labels(ra)
-        if lb != la:
-            only = lambda x, y: "; ".join("%s, first in %s" % (show(k), where(first_in[k])) for k in sorted(x - y, key=str))
-            die("runner labels differ between before and after (before only: %s; after only: %s); pass --label"
-                " (and --job) to compare the same runner" % (only(lb, la) or "none", only(la, lb) or "none"))
+        # Over the selection, with groups; and by labels over every run of each file, as before
+        # (a narrower selection, --ran's say, must never hide a runner the file shows).
+        for pick, by_group in ((selected, groups), (lambda rs: rs, False)):
+            lb, la = labels(rb, pick, by_group), labels(ra, pick, by_group)
+            if lb != la:
+                only = lambda x, y: "; ".join("%s, first in %s" % (show(k), where(first_in[k])) for k in sorted(x - y, key=str))
+                die("runner labels differ between before and after (before only: %s; after only: %s); pass --label"
+                    " (and --job) to compare the same runner" % (only(lb, la) or "none", only(la, lb) or "none"))
 
     # Each job must run on one runner, the same on both sides: otherwise a shift in which
     # runner a job lands on can pass for a speedup. A job present on one side only is fine.

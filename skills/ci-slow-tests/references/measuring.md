@@ -209,7 +209,11 @@ runner by its labels and its runner group (two self-hosted groups can share
 every label; `fetch` saves each job's group). Groups are compared only when
 every job read that got a runner has a known one: with any unknown (a file
 from an older version, a group GitHub didn't report) the runners compare by
-labels alone, and `compare` says so. Each job must have run on one runner, the same on both sides, read
+labels alone, and `compare` says so. Without `--label`, the runners of
+every run in each file must match, any outcome, as they always had to, and
+so must those of the selected runs (the workflow, event and base, and with
+`--ran` the runs where that job asked for a runner), groups included: a
+narrower selection never hides a runner the file shows. Each job must have run on one runner, the same on both sides, read
 over every green run of the selection, reruns included, not only the timed
 ones (a canary that fails on one pool keeps those runs from being timed, so
 which pushes went there decides which are timed, and leaving reruns' pools

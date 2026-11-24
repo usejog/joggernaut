@@ -15,8 +15,34 @@ E = os.path.join(ROOT, "evals")
 bad = []
 
 
+def base_measure():
+    """The base's measure.py, for the never-laxer check: JOGGERNAUT_BASE_MEASURE, or, on a pull
+    request's merge commit (CI checks out two commits deep), its first parent's copy."""
+    if os.environ.get("JOGGERNAUT_BASE_MEASURE"):
+        return os.environ["JOGGERNAUT_BASE_MEASURE"]
+    git = lambda *a: subprocess.run(["git", "-C", ROOT] + list(a), capture_output=True, text=True)
+    if git("rev-parse", "-q", "--verify", "HEAD^2").returncode:
+        return None
+    r = git("show", "HEAD^1:skills/ci-measure/scripts/measure.py")
+    if r.returncode:
+        return None
+    path = os.path.join(tempfile.mkdtemp(prefix="joggernaut-base-"), "measure.py")
+    open(path, "w").write(r.stdout)
+    return path
+
+
+BASE = base_measure()
+import differential  # noqa: E402  (beside this file)
+
+
 def run(args, cwd=None):
-    return subprocess.run([sys.executable] + args, cwd=cwd, capture_output=True, text=True)
+    r = subprocess.run([sys.executable] + args, cwd=cwd, capture_output=True, text=True)
+    # Every compare and split here also runs on the base's measure.py: never laxer than it.
+    if BASE and args[:1] == [M] and args[1:2] in (["compare"], ["split"]):
+        msg = differential.check_args(BASE, args[1:], cwd)
+        if msg:
+            bad.append("laxer than the base: measure.py %s: %s" % (" ".join(args[1:]), msg))
+    return r
 
 
 # measure.py on the recorded histories
@@ -2567,13 +2593,14 @@ with tempfile.TemporaryDirectory() as t:
     v, r = _cmp(t, grouped(7000, 25, False), grouped(8000, 5, False), "--label", "self-hosted")
     if v.get("runner_groups_checked") is not False:
         bad.append("compare #12: files without runner groups weren't flagged: %r" % v)
-    # #39: another base branch's runs, on another runner, don't make --base main refuse.
+    # #39: another base branch's runs on another runner still refuse --base main, as before:
+    # the label check never reads fewer runs than every run of each file.
     before = [_cr(9000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before += [_cr(9100 + i, [_J("test", 0, 300, labels=("self-hosted", "old"))], base="release") for i in range(3)]
     after = [_cr(9200 + i, [_J("test", 0, 50 + i)]) for i in range(5)]
     v, r = _cmp(t, before, after, "--base", "main")
-    if not (v.get("verdict_code") or "").startswith("faster"):
-        bad.append("compare #39: another branch's runner refused --base main: %r" % (v.get("verdict") or v))
+    if "error" not in v or "before only: old,self-hosted" not in r.stderr:
+        bad.append("compare #39: another branch's runner no longer refused --base main: %r" % (v.get("verdict") or v))
     # #39: a job new after the change is not enough runs, not a runner change.
     before = [_cr(9300 + i, [_J("build", 0, 100)]) for i in range(5)]
     after = [_cr(9400 + i, [_J("build", 0, 100), _J("lint", 0, 20)]) for i in range(4)]
@@ -3142,6 +3169,43 @@ for case in sorted(glob.glob(E + "/ci-*/")):
             print("ok   %-15s untouched sample fails: %s" % (name, first))
     finally:
         shutil.rmtree(work)
+
+# compare, #46 review: a downstream --ran gate (it runs only when test passed) must not hide
+# the runners only failed tests used. Every run of each file is read for labels, as before.
+def _gate_run(rid, t, lab, ok, took):
+    st = differential.stamp
+    j = lambda i, name, c, s, e, labels, runner: {
+        "id": rid * 10 + i, "name": name, "run_attempt": 1, "conclusion": c, "created_at": st(s),
+        "started_at": st(s) if runner else None, "completed_at": st(e), "labels": labels,
+        "runner_name": runner, "runner_group_id": 1 if runner else None, "runner_group_name": "g" if runner else None,
+        "steps": []}
+    jobs = [j(1, "test", "success" if ok else "failure", t + 1, t + 1 + took, [lab], "r" + lab),
+            j(2, "gate", "success", t + 2 + took, t + 8 + took, ["L"], "rL") if ok
+            else j(2, "gate", "skipped", t + 2 + took, t + 2 + took, [], None)]
+    return {"id": rid, "name": "CI", "path": ".github/workflows/ci.yml", "workflow_id": 1, "event": "pull_request",
+            "head_branch": "b", "head_sha": "%040x" % rid, "head_repo": "o/r", "run_attempt": 1,
+            "conclusion": "success" if ok else "failure", "created_at": st(t), "run_started_at": st(t),
+            "updated_at": st(t + 20 + took), "pull_requests": [rid], "pull_request_bases": ["main"],
+            "pull_requests_found": [], "head_message": "x", "jobs": jobs}
+with tempfile.TemporaryDirectory() as t:
+    differential.write(t + "/b.jsonl", [_gate_run(100 + i, i * 3600, "M", False, 10) for i in range(12)]
+                       + [_gate_run(200 + i, (20 + i) * 3600, "L", True, 100) for i in range(12)])
+    differential.write(t + "/a.jsonl", [_gate_run(300 + i, (50 + i) * 3600, "N", False, 100) for i in range(12)]
+                       + [_gate_run(400 + i, (70 + i) * 3600, "L", True, 10) for i in range(12)])
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--job", "test", "--ran", "gate"])
+    if r.returncode != 2 or "before only: M" not in r.stderr or "after only: N" not in r.stderr:
+        bad.append("compare --ran gate: a runner only failed tests used went unread\n" + r.stdout + r.stderr)
+
+# Never laxer than the base, on random histories (seeded: a failure names its seed, and
+# `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).
+if BASE:
+    found = differential.run_generated(BASE, range(200))
+    bad += ["laxer than the base: " + x for x in found]
+    if not found:
+        print("ok   never laxer than the base on 200 random histories and every compare and split above")
+else:
+    print("note never-laxer check not run: no base measure.py (set JOGGERNAUT_BASE_MEASURE to one, or run on"
+          " a pull request's merge commit)")
 
 # ci-guard's pre-push template, in scratch git repositories under each shell present
 import selftest_hook  # noqa: E402
