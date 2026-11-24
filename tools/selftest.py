@@ -2482,7 +2482,11 @@ with tempfile.TemporaryDirectory() as t:
     rows_id = copy.deepcopy(rows2)
     rows_id[0]["workflow_id"], rows_id[1]["workflow_id"] = 17, 35
     rows_id[1]["name"] = "Lint"
-    got = json.loads(_split(t, rows_id, "--json").stdout or "{}")
+    legacy = copy.deepcopy(rows_id[1])
+    legacy.update(id=legacy["id"] + 700, path=".github/workflows/legacy.yml", conclusion="failure",
+                  head_sha="%040d" % 998, pull_requests=[998])
+    del legacy["workflow_id"]
+    got = json.loads(_split(t, rows_id + [legacy], "--json").stdout or "{}")
     if got.get("wait_all_workflows_commits") != 1 or got.get("wait_all_workflows_unplaced_commits") != 0 \
             or sorted(got.get("workflows") or []) != ["CI", "Lint"]:
         bad.append("split #7: a run with its workflow id but no file wasn't placed: %r %r"
