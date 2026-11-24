@@ -66,16 +66,14 @@ else
   mode=all remote='' url=''
 fi
 
-# Run the pre-push hook core.hooksPath turned off, with git's exact input. A
-# byte-for-byte copy of this file there would only run the same checks again.
+# Run the pre-push hook core.hooksPath turned off, with git's exact input.
 chain() {
   [ "$mode" = push ] || return 0
   legacy="$(git rev-parse --git-common-dir)/hooks/pre-push"
-  if ! [ -x "$legacy" ] || [ "$legacy" -ef "$0" ]; then
-    :
-  elif cmp -s "$legacy" "$0"; then
-    say "not running $legacy: a copy of this hook, so its checks just ran"
-  else
+  if [ -x "$legacy" ] && ! [ "$legacy" -ef "$0" ]; then
+    # A copy of this file there is still run (it could read files beside it), but say so.
+    ! cmp -s "$legacy" "$0" ||
+      say "WARNING: $legacy is a copy of this hook, so its checks run twice; delete it if nothing else needs it"
     "$legacy" "$remote" "$url" <"$tmp/refs"
   fi
 }
