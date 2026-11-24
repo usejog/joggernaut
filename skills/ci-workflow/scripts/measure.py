@@ -854,9 +854,11 @@ def run_minutes(r, exact=False):
 
 
 PR_EVENTS = ("pull_request", "pull_request_target")
-# A workflow is its file. Two files can share a display name; a record without a file
-# names a workflow it can't place.
-wf_key = lambda r: r.get("path") or r.get("name") or ""
+# A workflow is its file, or its saved id when the file wasn't saved. Two files can share a
+# display name, so a record with neither names a workflow it can't place.
+wf_key = lambda r: r.get("path") or ("workflow %s" % r["workflow_id"] if r.get("workflow_id") is not None else "") \
+    or r.get("name") or ""
+placed_wf = lambda r: bool(r.get("path")) or r.get("workflow_id") is not None
 
 
 def pr_pushes(runs):
@@ -960,22 +962,22 @@ def cmd_split(a):
     # With several workflows in one file, a pull request waits for all of them:
     # per commit, from the first run's start to the last job done, where every run passed.
     # Workflows are files; only a file with no run that names its file falls back to names.
-    names = {r["path"] for r in runs if r.get("path")} or {r.get("name") or "" for r in runs}
+    names = {wf_key(r) for r in runs if placed_wf(r)} or {r.get("name") or "" for r in runs}
     pushes, guessed = pr_pushes(runs)
     cross, unplaced = [], 0
     # A run with no file beside runs with one could be another workflow, so look per commit.
-    if len(names) > 1 or (any(r.get("path") for r in runs) and not all(r.get("path") for r in runs)):
+    if len(names) > 1 or (any(placed_wf(r) for r in runs) and not all(placed_wf(r) for r in runs)):
         for rs in (rs for by_head in pushes.values() for rs in by_head.values()):
             rs = sorted(rs, key=lambda x: ts(x["created_at"]))
             t0 = ts(rs[0]["created_at"])
             # A reopened PR runs again days later: keep each workflow's first run of the day.
             rs = [x for x in rs if ts(x["created_at"]) - t0 <= 86400]
-            if any(not x.get("path") for x in rs):
+            if any(not placed_wf(x) for x in rs):
                 unplaced += 1  # a run with no workflow file: which workflows ran is unknown
                 continue
             first = {}
             for x in rs:
-                first.setdefault(x["path"], x)
+                first.setdefault(wf_key(x), x)
             rs = list(first.values())
             if len(rs) > 1 and all(x.get("conclusion") == "success" for x in rs):
                 # From the push (creation), so a rerun's extra wait counts.

@@ -2478,6 +2478,14 @@ with tempfile.TemporaryDirectory() as t:
             or len(got.get("workflows") or []) != 1 or "1 commits left out" not in _split(t, rows2).stdout:
         bad.append("split #7: a run with no workflow file made a second workflow: %r %r"
                    % (got.get("wait_all_workflows_commits"), got.get("wait_all_workflows_unplaced_commits")))
+    # ... unless its workflow id was saved: then that is its workflow.
+    rows_id = copy.deepcopy(rows2)
+    rows_id[0]["workflow_id"], rows_id[1]["workflow_id"] = 17, 35
+    rows_id[1]["name"] = "Lint"
+    got = json.loads(_split(t, rows_id, "--json").stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 1 or got.get("wait_all_workflows_unplaced_commits") != 0:
+        bad.append("split #7: a run with its workflow id but no file wasn't placed: %r %r"
+                   % (got.get("wait_all_workflows_commits"), got.get("wait_all_workflows_unplaced_commits")))
     # ... and one 48 hours later, outside the commit's window, changes nothing.
     rows3 = [rows[0], rows[2]] + copy.deepcopy(rows2[1:])
     rows3[-1].update(created_at=_at(200 + 48 * 3600), run_started_at=_at(200 + 48 * 3600))
