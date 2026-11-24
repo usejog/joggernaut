@@ -165,13 +165,16 @@ reports compared, and it passes a run that ran more tests. Where selection
 can vary inside a job, a speed verdict needs every timed run to have run the
 same tests: compare each run's report with one reference run's both ways
 (`--before A --after B`, then `--before B --after A`; both pass only when
-the names match), and time only those runs. Otherwise report the timings as
-unverified (issue #32 tracks a tool check). The same holds for a step that
+the names match). If they all match, the verdict stands; if timing only the
+matching runs would mean dropping rows from the files, don't build such
+files (the failure rate must read every run): report the timings as
+unverified instead (issue #32 tracks a tool check). The same holds for a step that
 runs on some runs only (an `if:` on a step, such as a site build on some
-paths): compare runs that ran the same steps (the run file records each
-step's conclusion; a skipped step shows `skipped`), or report the timings as
-unverified. A step a cache hit skips is the cache's effect: measure it with
-`--cache-state`. `compare` also counts each side's runs cancelled with no
+paths): if the timed runs didn't all run the same steps (the run file records
+each step's conclusion; a skipped step shows `skipped`), report the timings
+as unverified, for the same reason. A step a cache hit skips is the cache's
+effect: time hits and misses apart, each with both options
+(`--cache-state STATE.json --cache hit`, then `--cache-state STATE.json --cache miss`). `compare` also counts each side's runs cancelled with no
 failure (a newer push, a concurrency group): they are in neither the
 timings nor the failure rate. When the share cancelled rose beyond chance
 (the failure check's one-sided exact test), a faster (or mixed) verdict ends

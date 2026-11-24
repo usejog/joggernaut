@@ -217,7 +217,10 @@ in `references/measuring.md`.
      it (search every workflow that calls it); and no other job that needs
      the calling job (a publish, a deploy, on push or release too) relied on
      the removed gate's checks: if one did, it must now need the gate that
-     stays, so it still stops when those checks fail. Then check on the pull
+     stays, and any condition it has on the old result
+     (`needs.checks.result == 'success'`) must read the gate that stays too,
+     so it does on that gate's success, failure, skip and cancellation what
+     it did before. Show it on a run of each, on push and release too. Then check on the pull
      request that a failed, a skipped and a cancelled leg each still block
      the merge. Make the gate that stays cheap: no checkout, no toolchain.
      Moving it to another runner type is for a person, as is changing which

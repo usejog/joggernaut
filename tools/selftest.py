@@ -1482,6 +1482,21 @@ with tempfile.TemporaryDirectory() as t:
     if r.returncode == 0:
         bad.append("compare --end: runs whose job sets differ must be refused\n" + r.stdout)
 
+# --end: a job allowed to fail before the timed one rules the run out, as for a whole run.
+with tempfile.TemporaryDirectory() as t:
+    def allowed(i, fail_after):
+        t0 = i * 4000
+        comp = _job("compile", t0, t0 + 1, t0 + (fail_after or 180), conclusion="failure" if fail_after else "success")
+        end = mm.ts(comp["completed_at"]) - 1793000000
+        return _run(i, [comp, _job("required", end, end + 1, end + 21)], t0)
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(allowed(i, 0 if i < 5 else 180)) + "\n" for i in range(25)))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(allowed(100 + i, 0 if i < 5 else 10)) + "\n" for i in range(25)))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--job", "required", "--end", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("before_runs") != 5 or got.get("after_runs") != 5 or (got.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare --end: runs with a failed job before the timed one were timed: %r\n%s"
+                   % ({k: got.get(k) for k in ("before_runs", "after_runs", "verdict_code")}, r.stderr))
+
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
 if mm.run_minutes(two) != 2 or abs(mm.run_minutes(two, True) - 2.0) > 1e-9:
@@ -1816,6 +1831,28 @@ reps = {rows[0]["id"]: {"r.xml": _rep("p")}, rows[1]["id"]: {"r.xml": _rep("f")}
 got, r = _flaky_rows(rows, reps)
 if not got or got["tests"][0]["alone_on_pull_requests"] != 0:
     bad.append("flaky: a rerun's passing report was taken as a pass around a failure: %r" % got)
+# A single-attempt run that failed on another test, with T passing, still separates T's failures.
+rows, reps = [], {}
+for i, st in enumerate("pfpfpfp"):
+    x = _fr(i, i + 1, False)  # every run failed: on U where T passed
+    rows.append(x)
+    reps[x["id"]] = {"r.xml": '<testsuite name="s"><testcase classname="c" name="T">%s</testcase>'
+                              '<testcase classname="c" name="U">%s</testcase></testsuite>'
+                              % ("<failure/>" if st == "f" else "", "" if st == "f" else "<failure/>")}
+got, r = _flaky_rows(rows, reps)
+t_ = [x for x in (got or {"tests": []})["tests"] if x["test"].endswith("::T")]
+if not t_ or t_[0]["alone_on_pull_requests"] != 3:
+    bad.append("flaky: a failed run showing T passing should separate T's failures: %r" % t_)
+# --short keeps the leg: T passing on Linux never separates T's failures on Windows.
+rows, reps = [], {}
+for i in range(7):
+    x = _fr(i, i + 1, i % 2 == 0)
+    rows.append(x)
+    leg = "junit-linux" if i % 2 == 0 else "junit-windows"
+    reps[x["id"]] = {"%s/r.xml" % leg: _rep("p" if i % 2 == 0 else "f")}
+got, r = _flaky_rows(rows, reps, "--short")
+if not got or any(x["alone_on_pull_requests"] for x in got["tests"]):
+    bad.append("flaky --short: a pass in another leg separated failures: %r\n%s" % (got, r.stderr))
 # --short counts a skipped namesake: Unit.T passed and Integration.T skipped in one report.
 rows = [_fr(0, 1, True), _fr(1, 2, False)]
 both = ('<testsuite name="s"><testcase classname="Unit" name="T"/>'

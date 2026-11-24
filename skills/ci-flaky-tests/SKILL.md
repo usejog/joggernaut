@@ -75,7 +75,10 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    the log where there is no report. `gh run download` keeps one artifact
    per name: save each artifact under its name
    (`.joggernaut/reports/RUN_ID/ARTIFACT_NAME/`, which keeps a matrix leg's
-   reports apart from another's), and where a rerun uploaded a name again,
+   reports apart from another's; where the workflow puts the run id in the
+   artifact's name, save it under the name without it, so the same test
+   matches across runs; put a `failed.txt` in the folder of the leg it came
+   from, since a test is known by its leg), and where a rerun uploaded a name again,
    each attempt's under `RUN_ID/attempt-N/ARTIFACT_NAME/`, or a passing
    attempt's report replaces the failed one's. Folders named by a number or
    `attempt-N` don't become part of a test's name; `--short` (names alone,

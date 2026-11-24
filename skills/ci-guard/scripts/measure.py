@@ -1330,8 +1330,10 @@ def failed_somewhere(r, a):
     """The run failed, or any attempt of the measured job(s) failed, or it was rerun."""
     if r.get("conclusion") != "success" or (r.get("run_attempt") or 1) > 1:
         return True
+    # With --end the clock runs through every job before the timed one, so any job's
+    # failure (one allowed to fail included) rules the run out, as for a whole run.
     return any(j.get("conclusion") in FAILED for j in r.get("jobs", [])
-               if not a.job or j.get("name") == a.job)
+               if not a.job or getattr(a, "end", False) or j.get("name") == a.job)
 
 
 def durations(runs, a, side, excluded, keep=None):
@@ -1945,13 +1947,16 @@ def failed_tests(folder, short=None):
     and the report's file name are left out, so the same test matches across runs. With short
     (a dict), names are the test's name alone, and short records what each stood for."""
     failed, passed, skipped, found = set(), set(), [], False
+    leg = lambda path: "/".join(x for x in os.path.relpath(path, folder).split(os.sep)[:-1]
+                                if not re.match(r"^(?:\d+|attempt[-_ ]?\d+)$", x, re.I))
     for root, _, files in os.walk(folder):
         for f in sorted(files):
             path = os.path.join(root, f)
             if f == "failed.txt":
+                # Named by the artifact folder it sits in (a matrix leg's), as JUnit tests are.
                 found = True
                 with open(path) as fh:
-                    failed.update(l.strip() for l in fh if l.strip())
+                    failed.update("::".join(x for x in (leg(path), l.strip()) if x) for l in fh if l.strip())
                 continue
             if not f.endswith(".xml"):
                 continue
@@ -1965,17 +1970,15 @@ def failed_tests(folder, short=None):
                 skipped.append(os.path.relpath(path, folder))
                 continue
             found = True
-            parts = [x for x in os.path.relpath(path, folder).split(os.sep)[:-1]
-                     if not re.match(r"^(?:\d+|attempt[-_ ]?\d+)$", x, re.I)]
-            where = SHARD.sub(lambda m: m.group(1) + "#", "/".join(parts))
+            where = SHARD.sub(lambda m: m.group(1) + "#", leg(path))
             res, errs, _ = junit_results(path)
             def name(fields):
                 if short is not None:
-                    # Shortened to the test's name, so it matches failed.txt lines; over every
-                    # report read, one short name must stand for one suite, class and file
-                    # (the same test in several matrix legs is fine).
+                    # Shortened to the leg and the test's name, so it matches failed.txt lines
+                    # in the same leg's folder; over every report read, one short name must
+                    # stand for one suite, class and file.
                     short.setdefault(fields[-1], set()).add(json.dumps(fields[1:]))
-                    return fields[-1]
+                    return "::".join(x for x in (where, fields[-1]) if x)
                 return show_test(json.dumps([where] + fields[1:]))
             for t, outs in res.items():
                 fields = json.loads(t)
@@ -2059,9 +2062,10 @@ def cmd_flaky(a):
             if r["id"] in fail_set:
                 return "fail"
             if r["id"] in reports:
-                # A pass separates only in a run with no failed attempt: in a run that was rerun
-                # after a failure, the report read may be the passing attempt's alone.
-                if t in reports[r["id"]][1] and not run_failed(r):
+                # A pass separates, except in a rerun: there the report read may be the
+                # passing attempt's alone. A run that failed on another test, in one attempt,
+                # shows this one passing all the same.
+                if t in reports[r["id"]][1] and (r.get("run_attempt") or 1) == 1:
                     return "pass"
                 # A run with a failure whose reports don't show this test either way (another
                 # suite's report, an empty failed.txt) might have failed it: unknown.
