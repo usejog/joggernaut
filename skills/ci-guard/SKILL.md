@@ -116,8 +116,7 @@ in `references/measuring.md`.
    hook tool, its own command for the same checks:
 
    ```sh
-   python3 -I -c 'import json, sys; d = json.load(sys.stdin.buffer, parse_constant=int)
-   sys.exit(d.get("stop_hook_active") is not True)' 2>/dev/null && exit 0
+   python3 -I -c 'import json,sys;sys.exit(json.load(sys.stdin.buffer,parse_constant=int).get("stop_hook_active") is not True)' 2>/dev/null && exit 0
    top=$(git rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] && cd "$top" || exit 0
    if dir=$(git config --path --get core.hooksPath); then hook=$dir/pre-push
    else hook=$(git rev-parse --git-path hooks/pre-push) || exit 0
@@ -202,8 +201,10 @@ for hooks only in that folder (git-config docs), so a hook in `.git/hooks`
 stops running. The template runs `.git/hooks/pre-push` itself, with git's
 exact input, after its own checks pass (git-lfs installs one there). A copy
 of the template left there runs every check a second time; the template
-warns when that file is a byte-for-byte copy of itself: delete it, unless
-something added to it still needs to run. For
+warns when that file is a byte-for-byte copy of itself: delete it. Anything
+that reads git's input (`git lfs pre-push`) must be a hook file of its own
+there, never a line added to a copy of the template, which has read all of
+the input by then. For
 each other executable hook there (git-lfs also installs post-checkout,
 post-commit and post-merge), commit a wrapper of the same name in
 `.githooks` that runs it, or list it for the person. A relative

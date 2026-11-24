@@ -276,7 +276,8 @@ def _cases(bad, sh, t):
     expect("legacy hook fails", hook([line("refs/heads/code", code, Z)]), 1, ALL)
     env["LEGACY_EXIT"] = "0"
     # A copy of the template there still runs (it could read files beside it), with a
-    # warning that the checks run twice; a copy with a line added gets no warning.
+    # warning that the checks run twice; a copy with a line added gets no warning (and,
+    # as SKILL.md says, a line added there gets no input: git-lfs needs a file of its own).
     legacy_text = open(legacy).read()
     open(legacy, "w").write(hook_text(sh))
     expect("template copy in .git/hooks", hook([line("refs/heads/code", code, Z)]), 0, ALL + ALL,
@@ -478,8 +479,11 @@ def _cases(bad, sh, t):
     def could_fetch(calls, local):
         """Calls other than the version probe, config, and rev-parse of local names only."""
         flags = ("-q", "--verify", "--is-inside-work-tree", "--show-toplevel", "--git-common-dir")
-        config = lambda c: c[:1] == ["config"] and "--blob" not in c and c[1:2] in (
-            ["--get"], ["--name-only"], ["--type=bool"])
+        config = lambda c: (c == ["config", "--get", "extensions.partialClone"]
+                            or c == ["config", "--name-only", "--get-regexp",
+                                     r"^remote\..*\.(promisor|partialclonefilter)$"]
+                            or len(c) == 4 and c[:3] == ["config", "--type=bool", "--get-all"]
+                            and re.match(r"^remote\.origin\.promisor$", c[3]))
         ok = lambda c: (c == ["--no-lazy-fetch", "version"] or config(c)
                         or c[:1] == ["rev-parse"] and all(x in flags or x in local for x in c[1:]))
         return [c for c in calls if not ok(c)] if calls else ["no git call recorded"]
