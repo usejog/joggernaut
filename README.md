@@ -33,15 +33,15 @@ write-up; we didn't reproduce the numbers, and no team endorses Joggernaut.
 
 | Team | What they found | Result |
 |---|---|---|
-| OpenAI Core Experimentation | Ranked CI ideas by estimated minutes saved a day, from run history | Median CI about 10 → 4.5 min ([blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family)) |
-| OpenAI Core Experimentation | One missing mock | One suite 592.6 s → 29.8 s, all 63 tests kept ([blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family)) |
-| Linear | Seven small jobs each paid setup; folded into two | About 87,000 runner-minutes a month saved, 11.8% of CI (June usage) ([blog](https://linear.app/now/ci-bottleneck-reworked)) |
-| Shopify Ruby LSP | Test-time work in one PR | CI about 30 → 20 min, with the same reported count of 18,329 tests ([PR #4004](https://github.com/Shopify/ruby-lsp/pull/4004)) |
-| Sidelab | A compile cache at 0% hits for two weeks, among other fixes | Full CI 68 → 15 min ([post](https://x.com/sireton_builds/status/2117864723404451924)) |
-| Boardy | Pull-request caches never seeded from main, all year | Node modules restore in 13 s instead of a 33 s install ([post](https://x.com/owengretzinger/status/2116291924219060319)) |
-| CloudX | Lint and test jobs shared one Go cache key; the test jobs' median had regressed 76 s → 180 s | A per-job cache brought the median job to 41 s, partly by reusing Go's test results ([blog](https://www.cloudx.ai/posts/setup-go)) |
-| Clipboard | Agents "add a retry or increase timeouts"; the team cut end-to-end tests from 174 to 87 instead | End-to-end flake rate 100% → under 15% in six weeks ([blog](https://www.clipboard.com/resources/blog/agents-cant-iterate-against-tests-that-lie)) |
-| Selenios | Catch-up runs after other merges | Catch-up runs were 51% of a pull request's CI minutes ([post](https://me.jonymusky.com/blog/merge-queue-ai-ci-tax)) |
+| <img src="assets/teams/openai.svg" width="20" height="20" align="absmiddle" alt=""> OpenAI Core Experimentation | Ranked CI ideas by estimated minutes saved a day, from run history | Median CI about 10 → 4.5 min ([blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family)) |
+| <img src="assets/teams/openai.svg" width="20" height="20" align="absmiddle" alt=""> OpenAI Core Experimentation | One missing mock | One suite 592.6 s → 29.8 s, all 63 tests kept ([blog](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family)) |
+| <img src="assets/teams/linear.svg" width="20" height="20" align="absmiddle" alt=""> Linear | Seven small jobs each paid setup; folded into two | About 87,000 runner-minutes a month saved, 11.8% of CI (June usage) ([blog](https://linear.app/now/ci-bottleneck-reworked)) |
+| <img src="assets/teams/shopify.svg" width="20" height="20" align="absmiddle" alt=""> Shopify Ruby LSP | Test-time work in one PR | CI about 30 → 20 min, with the same reported count of 18,329 tests ([PR #4004](https://github.com/Shopify/ruby-lsp/pull/4004)) |
+| <img src="assets/teams/sidelab.svg" width="20" height="20" align="absmiddle" alt=""> Sidelab | A compile cache at 0% hits for two weeks, among other fixes | Full CI 68 → 15 min ([post](https://x.com/sireton_builds/status/2117864723404451924)) |
+| <img src="assets/teams/boardy.svg" width="20" height="20" align="absmiddle" alt=""> Boardy | Pull-request caches never seeded from main, all year | Node modules restore in 13 s instead of a 33 s install ([post](https://x.com/owengretzinger/status/2116291924219060319)) |
+| <img src="assets/teams/cloudx.svg" width="20" height="20" align="absmiddle" alt=""> CloudX | Lint and test jobs shared one Go cache key; the test jobs' median had regressed 76 s → 180 s | A per-job cache brought the median job to 41 s, partly by reusing Go's test results ([blog](https://www.cloudx.ai/posts/setup-go)) |
+| <img src="assets/teams/clipboard.svg" width="20" height="20" align="absmiddle" alt=""> Clipboard | Agents "add a retry or increase timeouts"; the team cut end-to-end tests from 174 to 87 instead | End-to-end flake rate 100% → under 15% in six weeks ([blog](https://www.clipboard.com/resources/blog/agents-cant-iterate-against-tests-that-lie)) |
+| <img src="assets/teams/selenios.svg" width="20" height="20" align="absmiddle" alt=""> Selenios | Catch-up runs after other merges | Catch-up runs were 51% of a pull request's CI minutes ([post](https://me.jonymusky.com/blog/merge-queue-ai-ci-tax)) |
 
 Where no team's result covers a step, it rests on GitHub's own docs or on
 arithmetic you can check in a line, or the skill measures it on your runs.
