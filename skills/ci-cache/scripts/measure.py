@@ -569,7 +569,11 @@ def write_runs(a, runs, out, may_leave_out):
                     else "more than one run in 20 couldn't be read; fetch again later"))
             continue
         jobs = [j for p in pages for j in p.get("jobs", [])]
-        out.write(json.dumps(record(r, jobs, bases, found)) + "\n")
+        rec = record(r, jobs, bases, found)
+        # How the run was read: the --created window (null without one), so compare can tell a
+        # side read while slow runs were still going from a closed window.
+        rec["fetch_window"] = a.created
+        out.write(json.dumps(rec) + "\n")
     return left_out
 
 
@@ -1486,6 +1490,17 @@ def cmd_compare(a):
     names = {r.get("path") or r.get("name") for r in rb + ra if workflow_matches(r, a.workflow)}
     if len(names) > 1:
         die("runs from %d workflows; pass --workflow to compare one" % len(names))
+    # How each side was read (#22). fetch records its --created window on every run; without one
+    # it keeps only runs that had finished, so a side read while slow runs were still going
+    # holds the fast ones. A file from an older measure.py, or built by hand, records nothing.
+    windows = {}
+    for side, rs in (("before", rb), ("after", ra)):
+        rs = [r for r in rs if workflow_matches(r, a.workflow)]
+        if any("fetch_window" in r and not r["fetch_window"] for r in rs):
+            die("the %s file holds runs fetched without --created, which keeps only the runs that had"
+                " finished (read while slow runs were going, it holds the fast ones); fetch each side"
+                " with --created START..END once that window has ended" % side)
+        windows[side] = sorted({r["fetch_window"] for r in rs}) if all("fetch_window" in r for r in rs) else None
     for side, rs in (("before", rb), ("after", ra)):
         ids = [r["id"] for r in rs]
         if len(ids) != len(set(ids)):
@@ -1676,7 +1691,7 @@ def cmd_compare(a):
            "before_tail": list(before_tail), "after_tail": list(after_tail),
            "p95_provisional": fewer < P95_FIRM,
            "job_sets": sets, "jobs_changed": graph_changed, "ran": a.ran, "runner_groups_checked": groups,
-           "excluded": excluded}
+           "fetch_windows": windows if all(windows.values()) else None, "excluded": excluded}
     fb, fa = fail_rate(rb), fail_rate(ra)
     res["failed_before"], res["failed_after"] = fb, fa
     # A named job (--ran, or --job) picks a workload: the runs where that job ran, in any
@@ -1931,6 +1946,46 @@ def cmd_compare(a):
         res["verdict"] += ("; but the sides ran different jobs: a speed verdict holds only if the workflow's"
                            " diff explains every difference and every removed job's work still runs"
                            " (compare the tests by name); otherwise the mix of work changed")
+    # The work inside the timed jobs (#36, #32): the steps each timed job ran (a step's `if:`
+    # skips it on some runs; with --cache, a cache state's skips are alike), and with --tests
+    # the tests each timed run ran. Timed runs that did different work, within a side or across
+    # the two, move a median with the mix, so the verdict says so.
+    timed_jobs = lambda r, j: [j] if j is not None else [x for x in latest_jobs(r) if executed(x)]
+    steps_of = lambda r, j: tuple(sorted((x.get("name") or "", tuple(
+        s_.get("name") or "" for s_ in x.get("steps") or [] if s_.get("conclusion") not in (None, "skipped")))
+        for x in timed_jobs(r, j)))
+
+    def tests_of(r, j):
+        folder = os.path.join(a.tests, str(r["id"]))
+        if not os.path.isdir(folder) or not any(junit_files(folder)):
+            die("--tests: no JUnit report in %s for timed run %s; every timed run needs its own, or leave"
+                " --tests out" % (folder, r["id"]))
+        found, _, _ = junit_results(folder)
+        return tuple(sorted((t, n) for t, n in ((t, sum(1 for o in outs if o in ("passed", "failed")))
+                                                for t, outs in found.items()) if n))
+    inner = [("steps", steps_of)] + ([("tests", tests_of)] if a.tests else [])
+    res["work_sets"] = {k: [len({f(r, j) for r, _, j in tb}), len({f(r, j) for r, _, j in ta})]
+                        for k, f in inner} if comparable else {}
+    # Across the sides only where the jobs were the same (_jobs_changed already says they weren't).
+    differs = [k for k, f in inner if comparable and (
+        len({f(r, j) for r, _, j in tb}) > 1 or len({f(r, j) for r, _, j in ta}) > 1
+        or (len({f(r, j) for r, _, j in tb + ta}) > 1 and not (k == "steps" and graph_changed)))]
+    if differs and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
+        res["verdict_code"] += "_work_differs"
+        res["verdict"] += ("; but the timed runs did different work inside %s (%s): a step's `if:`, a cache"
+                           " state or a test selection that varies by pull request moves a median with the"
+                           " mix; compare runs that did the same work, or name why before calling it faster"
+                           % ("job %s" % a.job if a.job else "their jobs", "; ".join(
+                               "%s: %d sets before, %d after%s" % (k, res["work_sets"][k][0], res["work_sets"][k][1],
+                                                                 "" if len({f(r, j) for r, _, j in tb}) > 1
+                                                                 or len({f(r, j) for r, _, j in ta}) > 1
+                                                                 else ", one a side but not the same")
+                               for k, f in inner if k in differs)))
+    if a.end and comparable:
+        # Beside a job's end on the run's clock, its own duration in the same runs (#36): an end
+        # that moved while the job's own time didn't moved with what ran before it.
+        own = lambda tr: median([secs(j.get("started_at"), j.get("completed_at")) for _, _, j in tr])
+        res["own_duration_median_before"], res["own_duration_median_after"] = own(tb), own(ta)
     if (a.end or a.ran) and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
         # A job's end on the run's clock moves with which runs reached it, their queue order
         # and the runners of every job before it; the runs where a job ran (--ran) change with
@@ -1942,7 +1997,10 @@ def cmd_compare(a):
         res["verdict"] = ("descriptive only (%s): %s; a verdict comes from whole runs that ran one set of jobs a"
                           " side, or a job's own duration (--job) where its eligibility is the same on both sides"
                           " and the same pushes reach the measured runner"
-                          % (res["reading"], (
+                          % (res["reading"] + (
+                              "; the job's own duration in the same runs: median %s before, %s after"
+                              % (fmt(res["own_duration_median_before"]), fmt(res["own_duration_median_after"]))
+                              if a.end else ""), (
                               "a job's end on the run's clock moves with which runs reached it, their queue order"
                               " and their runners") if a.end else (
                               "the runs where %s ran can change with the change itself (a path filter, a matrix)" % a.ran)))
@@ -1997,6 +2055,10 @@ def cmd_compare(a):
             (a.job or "every job", a.label) + tuple(res["off_runner_before"]) + tuple(res["off_runner_after"]) + (
                 ": the verdict holds only if the same pushes reach %s on both sides (counts can't show a swap)"
                 % a.label if res["off_runner_before"][0] or res["off_runner_after"][0] else "",)))
+    if not res["fetch_windows"]:
+        print("how the sides were read: not recorded (a file from an older measure.py, or built by hand), so a"
+              " side fetched without --created while slow runs were still going can't be ruled out; fetch"
+              " each side with --created START..END to check")
     if not groups:
         print("runner groups: not compared, since %d of the %d jobs read have none saved (a file from an older"
               " measure.py, or none reported), so a shift between groups that share these labels can't be"
@@ -2715,6 +2777,8 @@ def main(argv=None):
     c.add_argument("--label", help="runner label the job must have")
     c.add_argument("--cache-state", help="JSON file: run id -> hit or miss")
     c.add_argument("--cache", choices=["hit", "miss"], help="keep only runs with this cache state")
+    c.add_argument("--tests", help="a folder holding one folder per run id with that run's JUnit XML: a"
+                   " verdict over timed runs that ran different tests is qualified")
     c.add_argument("--min-runs", type=int, default=MIN_RUNS,
                    help="successful comparable runs needed a side (default %d, the floor)" % MIN_RUNS)
     c.add_argument("--json", action="store_true")
