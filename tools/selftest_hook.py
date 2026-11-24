@@ -332,10 +332,11 @@ def _cases(bad, sh, t):
                  '{"stop_hook_active":"true"}', '{"stop_hook_active":1}',
                  '{"stop_hook_active":true,"n":NaN}', '[true]', 'not json', ''):
         expect("Stop hook, not active: %r" % data, stop(data), 0, ALL)
-    # A json.py in the working tree isn't imported, and a non-ASCII path decodes in any locale.
+    # A json.py in the working tree isn't imported, and a non-ASCII path decodes in an ASCII
+    # locale (where the system has one; elsewhere Python reads UTF-8 anyway).
     write("json.py", "load = None\n")
     env["LC_ALL"] = "en_US.US-ASCII"
-    expect("Stop hook, active, json.py and C locale", stop('{"cwd":"/tmp/caf\u00e9","stop_hook_active":true}'),
+    expect("Stop hook, active, json.py and an ASCII locale", stop('{"cwd":"/tmp/caf\u00e9","stop_hook_active":true}'),
            0, [])
     del env["LC_ALL"]
     os.remove(os.path.join(work, "json.py"))

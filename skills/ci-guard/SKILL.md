@@ -201,7 +201,9 @@ for hooks only in that folder (git-config docs), so a hook in `.git/hooks`
 stops running. The template runs `.git/hooks/pre-push` itself, with git's
 exact input, after its own checks pass (git-lfs installs one there). A copy
 of the template left there runs every check a second time; the template
-warns when that file is a byte-for-byte copy of itself: delete it. Anything
+warns when that file is a byte-for-byte copy of itself: delete it once you
+have checked it runs nothing the copy in use doesn't (an identical copy can
+still read different files beside it). Anything
 that reads git's input (`git lfs pre-push`) must be a hook file of its own
 there, never a line added to a copy of the template, which has read all of
 the input by then. For
