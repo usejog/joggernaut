@@ -1907,9 +1907,9 @@ with tempfile.TemporaryDirectory() as t:
                   and got.get("fewer_reached_by") in ("listed", "listed by name"))
         else:
             ok = code.startswith("faster") and ("_%s_reached" % way) in code
-        if kind == "widened":
+        if kind in ("widened", "planner"):  # one widens, one shrinks: both reach wordings run
             head_ = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl"] + extra).stdout.splitlines()[:1]
-            if head_ != ["measure: run (start to last job done), runs that ran job preview"]:
+            if head_ != ["measure: run (start to last job done), runs that ran job %s" % extra[1]]:
                 bad.append("compare --ran: the heading should name the whole-run measure: %r" % head_)
         if not ok:
             bad.append("compare %s (%s): a changed workload passed for a speedup: %r %r %r\n%s"
@@ -1942,8 +1942,10 @@ with tempfile.TemporaryDirectory() as t:
     open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
     r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--job", "integration (postgres)"])
     got = json.loads(r.stdout) if r.returncode == 0 else {}
-    if (got.get("failed_before") != got.get("failed_after") or got.get("fewer_reached_by") != "missed with a failure"
-            or not (got.get("verdict_code") or "").startswith("faster") or "_missed_with_failure" not in got.get("verdict_code")):
+    if (got.get("failed_before") != got.get("failed_after")
+            or got.get("fewer_reached_by") != ("all" if "all" in rose_checks(got) else "missed with a failure")
+            or not (got.get("verdict_code") or "").startswith("faster")
+            or ("_fewer_reached" if "all" in rose_checks(got) else "_missed_with_failure") not in got.get("verdict_code")):
         bad.append("compare --job: a planner failing before the leg should qualify through missed-with-a-failure: %r %r %r"
                    % (got.get("verdict_code"), got.get("fewer_reached_by"), (got.get("failed_before"), got.get("failed_after"))))
     # A run cancelled while queued (no jobs at all) also counts as missed with a failure.

@@ -1541,7 +1541,8 @@ def cmd_compare(a):
         die("the timed runs%s ran different sets of jobs (a path filter or an `if:`), so a median %s"
             " moves with the mix (before: %d sets, after: %d). Before: %s. Time one job's own duration with"
             " --job for a verdict, if that job's eligibility (its if: and path filters) is the same on both"
-            " sides; --ran JOB (runs that ran that job, leaving one set a side) gives a descriptive reading only"
+            " sides and the same pushes reach the measured runner; --ran JOB (runs that ran that job, leaving"
+            " one set a side) gives a descriptive reading only"
             % (" that ran %s" % a.ran if a.ran else "", "of a job's end on the run's clock" if a.end
                else "over the whole runs", len(mb_), len(ma_), show))
     graph_changed = (not a.job or a.end) and len(mb_) == 1 and len(ma_) == 1 and mb_[0][0] != ma_[0][0]
@@ -1633,7 +1634,9 @@ def cmd_compare(a):
         res["reach_checks"] = [{"check": c, "missed_before": list(f(rb)), "missed_after": list(f(ra))} for c, f in checks]
         res["not_reaching_before"], res["not_reaching_after"] = checks[0][1](rb), checks[0][1](ra)
         rose = [x for x in res["reach_checks"] if fails_rose(tuple(x["missed_before"]), tuple(x["missed_after"]))]
-        res["fewer_reached_by"] = rose[0]["check"] if rose else None
+        # A direct reach count first: the failure-based ones name only the joint count.
+        direct = [x for x in rose if x["check"] not in ("stopped", "missed with a failure")]
+        res["fewer_reached_by"] = (direct or rose)[0]["check"] if rose else None
         # Both ways: a workload that grew (a path filter widened, a matrix leg added) changes
         # which runs are timed as much as one that shrank.
         hit = lambda c: (c[1] - c[0], c[1])

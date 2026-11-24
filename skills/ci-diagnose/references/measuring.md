@@ -158,7 +158,8 @@ with counts, so matrix legs count):
   is the verdict, as long as that job's eligibility is the same on both
   sides (its `if:` and path filters unchanged, and about the same share of
   runs running it; `compare` prints the counts and qualifies a change
-  beyond chance); otherwise report it as unverified. `--ran JOB` times whole runs that ran that job (it must
+  beyond chance) and the same kind of pushes reach the measured runner
+  (routing unchanged); otherwise report it as unverified. `--ran JOB` times whole runs that ran that job (it must
   leave one set a side), a descriptive reading only (`ran_descriptive`,
   the reading in `reading`): which runs ran a job can change with the
   change itself (a path filter moved from slow pushes to fast ones keeps
@@ -210,8 +211,8 @@ named: each one's runs and the runs where both ran, the worst counting). When fe
 runs reached the named job after than chance explains, a faster or mixed
 verdict ends in `_fewer_reached`; when more did (a filter or a matrix that
 widened), in `_more_reached`; when only the runs that missed it with a
-failure or cancellation in the run rose, in `_missed_with_failure` (seen
-together, not a claimed cause). Either way the runs timed may not be like the
+failure or cancellation in the run rose, and no direct count did, in
+`_missed_with_failure` (seen together, not a claimed cause). Either way the runs timed may not be like the
 runs before, so say why. Runs can miss a job in several ways (a failure or
 cancellation before it, a condition, a matrix leg left out, a skipped
 caller), and no one count sees them all without other traffic diluting it,
