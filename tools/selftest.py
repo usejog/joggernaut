@@ -2627,6 +2627,70 @@ with tempfile.TemporaryDirectory() as t:
     if v.get("off_runner_before") != [0, 6] or not (v.get("verdict_code") or "").startswith("faster"):
         bad.append("compare #39: a matrix leg on the runner in every run counted as off it: %r %r"
                    % (v.get("off_runner_before"), v.get("verdict")))
+    # Round 2. A pool where test fails and passes on a retry: fast pushes there before, slow
+    # after. The reruns' first attempts show test on two pools: refused.
+    def pool_retry(base_id, exp_fast):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            secs = 10 if fast else 100
+            if fast == exp_fast:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "exp"), conclusion="failure"),
+                                              _J("test", 200, secs, labels=("self-hosted", "exp"), attempt=2)], attempt=2))
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "std"))]))
+        return rows
+    for flags in (("--label", "self-hosted"), ("--job", "test", "--label", "self-hosted")):
+        v, r = _cmp(t, pool_retry(30000, True), pool_retry(31000, False), *flags)
+        if "error" not in v:
+            bad.append("compare: a pool reached through reruns hid a swap under %s: %r" % (flags, v.get("verdict")))
+    # Jobs cancelled in the queue never got a runner: they aren't routing evidence either way.
+    def queued(base_id, after):
+        rows = [_cr(base_id + i, [_J("test", 0, 100 if i < 25 else 10,
+                                     labels=("self-hosted", "M" if after and i < 25 else "L"))]) for i in range(30)]
+        for i in range(25):
+            c = _cr(base_id + 100 + i, [_J("test", 0, 1, labels=("self-hosted", "L"), conclusion="cancelled")],
+                    conclusion="cancelled")
+            if not after:
+                c["jobs"][0]["runner_name"] = None
+            rows.append(c)
+        return rows
+    v, r = _cmp(t, queued(32000, False), queued(33000, True), "--job", "test", "--label", "L")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare: cancellations in the queue masked a move off the runner: %r %r"
+                   % (v.get("verdict"), (v.get("off_runner_before"), v.get("off_runner_after"))))
+    calm = lambda base_id, n_q, secs: ([_cr(base_id + i, [_J("test", 0, secs + i % 3, labels=("ubuntu-latest",))])
+                                        for i in range(20)]
+                                       + [_cr(base_id + 100 + i, [_J("test", 0, 1, labels=("ubuntu-latest",),
+                                                                     conclusion="cancelled")], conclusion="cancelled")
+                                          for i in range(n_q)])
+    b_, a_ = calm(34000, 1, 100), calm(35000, 8, 50)
+    for x in b_ + a_:
+        if x["conclusion"] == "cancelled":
+            x["jobs"][0]["runner_name"] = None
+    v, r = _cmp(t, b_, a_, "--job", "test", "--label", "ubuntu-latest")
+    if "_routing_changed" in (v.get("verdict_code") or ""):
+        bad.append("compare: jobs cancelled in the queue counted as run elsewhere: %r" % v.get("verdict"))
+    # --end: only the timed job says where it ran; build on L in every run stands in for nothing.
+    def ended(base_id, l_slow):
+        rows = []
+        for i in range(20):
+            slow = i < 15
+            rows.append(_cr(base_id + i, [_J("build", 0, 5, labels=("self-hosted", "L")),
+                                          _J("test", 5, 90 if slow else 10,
+                                             labels=("self-hosted", "L" if slow == l_slow else "X"))]))
+        return rows
+    v, r = _cmp(t, ended(36000, True), ended(37000, False), "--job", "test", "--end", "--label", "L")
+    if "_routing_changed" not in (v.get("reading_code") or ""):
+        bad.append("compare --end: a sibling on the runner hid the timed job moving off it: %r %r"
+                   % (v.get("reading_code"), (v.get("off_runner_before"), v.get("off_runner_after"))))
+    # One row with no saved group doesn't hide the groups the others show.
+    mixed_b = grouped(38000, 25)
+    del mixed_b[0]["jobs"][0]["runner_group_id"]
+    v, r = _cmp(t, mixed_b, [_cr(39000 + i, [_J("test", 0, 30, labels=("self-hosted",), group=2)]) for i in range(30)],
+                "--label", "self-hosted")
+    if "error" not in v or "runner group" not in r.stderr:
+        bad.append("compare #12: one row without a group hid two groups: %r" % v.get("verdict"))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))
