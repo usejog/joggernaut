@@ -78,7 +78,9 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    reports apart from another's; where the workflow puts the run id in the
    artifact's name, save it under the name without it, so the same test
    matches across runs; put a `failed.txt` in the folder of the leg it came
-   from, since a test is known by its leg), and where a rerun uploaded a name again,
+   from, since a test is known by its leg; a folder named only by a number is
+   read as an artifact id, so name legs with a word, `node-22` not `22`), and
+   where a rerun uploaded a name again,
    each attempt's under `RUN_ID/attempt-N/ARTIFACT_NAME/`, or a passing
    attempt's report replaces the failed one's. Folders named by a number or
    `attempt-N` don't become part of a test's name; `--short` (names alone,

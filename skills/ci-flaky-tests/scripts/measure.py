@@ -1946,9 +1946,12 @@ def failed_tests(folder, short=None):
     (a matrix leg's) and its suites, class, file and name: folders named by number or attempt
     and the report's file name are left out, so the same test matches across runs. With short
     (a dict), names are the test's name alone, and short records what each stood for."""
-    failed, passed, skipped, found = set(), set(), [], False
-    leg = lambda path: "/".join(x for x in os.path.relpath(path, folder).split(os.sep)[:-1]
-                                if not re.match(r"^(?:\d+|attempt[-_ ]?\d+)$", x, re.I))
+    failed, passed, skipped, found, txt, junit = set(), set(), [], False, set(), set()
+    # A file's leg: its artifact folders, numbered and attempt folders left out and shard
+    # numbers blanked, the same for JUnit reports and failed.txt.
+    leg = lambda path: SHARD.sub(lambda m: m.group(1) + "#", "/".join(
+        x for x in os.path.relpath(path, folder).split(os.sep)[:-1]
+        if not re.match(r"^(?:\d+|attempt[-_ ]?\d+)$", x, re.I)))
     for root, _, files in os.walk(folder):
         for f in sorted(files):
             path = os.path.join(root, f)
@@ -1956,7 +1959,9 @@ def failed_tests(folder, short=None):
                 # Named by the artifact folder it sits in (a matrix leg's), as JUnit tests are.
                 found = True
                 with open(path) as fh:
-                    failed.update("::".join(x for x in (leg(path), l.strip()) if x) for l in fh if l.strip())
+                    names = {"::".join(x for x in (leg(path), l.strip()) if x) for l in fh if l.strip()}
+                failed.update(names)
+                txt.update(names)
                 continue
             if not f.endswith(".xml"):
                 continue
@@ -1970,7 +1975,7 @@ def failed_tests(folder, short=None):
                 skipped.append(os.path.relpath(path, folder))
                 continue
             found = True
-            where = SHARD.sub(lambda m: m.group(1) + "#", leg(path))
+            where = leg(path)
             res, errs, _ = junit_results(path)
             def name(fields):
                 if short is not None:
@@ -1982,7 +1987,7 @@ def failed_tests(folder, short=None):
                 return show_test(json.dumps([where] + fields[1:]))
             for t, outs in res.items():
                 fields = json.loads(t)
-                name(fields)  # every case's identity counts for --short, skipped ones too
+                junit.add(name(fields))  # every case's identity counts for --short, skipped ones too
                 if any(o in ("failed", "errored") for o in outs):
                     failed.add(name(fields))
                 elif "passed" in outs:
@@ -1992,8 +1997,8 @@ def failed_tests(folder, short=None):
                 if fields[-1] == "(retried)":
                     failed.add(name(fields[:-1]))
     if not found:
-        return None if not skipped else ([], [], skipped)
-    return failed, passed - failed, skipped
+        return None if not skipped else ([], [], skipped, set(), set())
+    return failed, passed - failed, skipped, txt, junit
 
 
 def cmd_flaky(a):
@@ -2020,7 +2025,7 @@ def cmd_flaky(a):
         return wf, (ev,) + (tuple(r.get("pull_request_bases") or []) or ("base unknown",) + pr_of(r))
     if not os.path.isdir(a.reports):
         die("%s isn't a folder" % a.reports)
-    reports, empty, not_junit = {}, [], []
+    reports, empty, not_junit, txt_names, junit_names = {}, [], [], set(), set()
     short_of = {} if a.short else None
     for d in sorted(os.listdir(a.reports)):
         folder = os.path.join(a.reports, d)
@@ -2038,6 +2043,8 @@ def cmd_flaky(a):
             continue
         reports[int(d)] = got[:2]
         not_junit += [os.path.join(d, x) for x in got[2]]
+        txt_names |= got[3]
+        junit_names |= got[4]
     if not reports:
         die("no report in %s for any run in %s" % (a.reports, a.input))
     twice = sorted(k for k, v in (short_of or {}).items() if len(v) > 1)
@@ -2102,8 +2109,12 @@ def cmd_flaky(a):
                      "alone": [{"owner": list(k), "runs": sorted(v)} for k, v in sorted(alone.items(), key=str)]})
     rows.sort(key=lambda x: (-x["alone_on_pull_requests"], -x["failed_runs"], x["workflow"], x["test"]))
     unread = sum(1 for r in runs if r.get("conclusion") in FAILED and r["id"] not in reports)
+    # A failed.txt name no JUnit report shows (a file at the run's root beside reports in a
+    # leg's folder, a name spelled otherwise): its failures can't meet a pass of the same test.
+    lone = sorted(txt_names - junit_names) if junit_names else []
     if a.json:
         print(json.dumps({"tests": rows, "failed_runs_without_reports": unread, "empty_report_folders": empty,
+                          "failed_txt_names_no_report_shows": lone,
                           "runs_without_base": sum(1 for r in runs if (r.get("event") or "").startswith("pull_request")
                                                    and not r.get("pull_request_bases")),
                           "xml_not_junit": not_junit}, indent=2))
@@ -2119,6 +2130,9 @@ def cmd_flaky(a):
         print("  folders with no report in them, counted as unread: %s" % ", ".join(empty[:10]))
     if not_junit:
         print("  XML files that aren't JUnit, not read: %s" % ", ".join(not_junit[:10]))
+    if lone:
+        print("  failed.txt names no JUnit report shows (put failed.txt in its leg's folder and spell names"
+              " as the reports do; use --short for names alone): %s" % ", ".join(lone[:5]))
     print("tests that failed, by the pull requests (or pushed branches) where a failure stood alone (a"
           " report showing the test passed before and after it, on the same workflow and base, no one else's"
           " run failing it between), most first:")

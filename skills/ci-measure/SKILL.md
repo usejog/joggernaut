@@ -218,7 +218,11 @@ under a merge-commit policy, ask before adding them.
    `references/measuring.md` says why this method holds at 5 runs a side, and
    how to measure again without fooling yourself. Report the verdict as
    printed, with the slowest runs beside it, since the median can improve
-   while the tail gets worse. If any run failed after the change,
+   while the tail gets worse, unless the timed runs didn't all do the same
+   work: where tests or steps run on some runs only (selection inside a job,
+   an `if:` on a step), and the timed runs didn't all run the same ones,
+   report the timings as unverified, never as the verdict
+   (`references/measuring.md`). If any run failed after the change,
    name the cause of each before reporting a speedup: at a few runs a side,
    only a large rise in failures counts as beyond chance. The failure rate
    reads every finished run of the workflow and event; `--label`, `--job`

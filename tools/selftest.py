@@ -1853,6 +1853,22 @@ for i in range(7):
 got, r = _flaky_rows(rows, reps, "--short")
 if not got or any(x["alone_on_pull_requests"] for x in got["tests"]):
     bad.append("flaky --short: a pass in another leg separated failures: %r\n%s" % (got, r.stderr))
+# failed.txt in a shard folder matches its JUnit test (both shard-blanked); a failed.txt at the
+# run's root beside a leg's reports is named as matching nothing.
+rows, reps = [], {}
+for i in range(7):
+    x = _fr(i, i + 1, i % 2 == 0)
+    rows.append(x)
+    reps[x["id"]] = ({"tests-shard-%d/r.xml" % (i % 3): _rep("p")} if i % 2 == 0
+                     else {"tests-shard-%d/failed.txt" % (i % 3): "T\n"})
+got, r = _flaky_rows(rows, reps, "--short")
+if not got or [x["alone_on_pull_requests"] for x in got["tests"]] != [3]:
+    bad.append("flaky: failed.txt in a shard folder should match its JUnit test: %r\n%s" % (got, r.stderr))
+reps = {x["id"]: ({"test-results/r.xml": _rep("p")} if i % 2 == 0 else {"failed.txt": "T\n"})
+        for i, x in enumerate(rows)}
+got, r = _flaky_rows(rows, reps, "--short")
+if not got or got.get("failed_txt_names_no_report_shows") != ["T"]:
+    bad.append("flaky: a failed.txt name no report shows should be named: %r" % (got,))
 # --short counts a skipped namesake: Unit.T passed and Integration.T skipped in one report.
 rows = [_fr(0, 1, True), _fr(1, 2, False)]
 both = ('<testsuite name="s"><testcase classname="Unit" name="T"/>'
