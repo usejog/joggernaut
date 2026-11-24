@@ -26,8 +26,9 @@ MEASURE split --in .joggernaut/before.jsonl
 `split` heads its output with the PR wait of one group of runs. Runs that
 ran different jobs (a path filter, an `if:`, a suite skipped on docs-only
 pushes) wait different times, so it groups the successful runs by the
-longest job each one ran, lists every group with its run count, median,
-slowest runs and share of the total wait, and heads with the group that
+longest job each one ran, lists the groups (the six with the most of the
+wait; `--json` has all) with each one's run count, median, slowest runs and
+share of the total wait, and heads with the group of 5 runs or more that
 holds the most of the wait (`--cohort JOB` picks another). The median over
 all of them comes last, labelled as a blend; it is no group's wait. The
 slowest path is the chain of jobs that decided when each run ended, read
@@ -38,9 +39,11 @@ If GitHub answers a read with a server error (HTTP 5xx), drops the
 connection or cuts the answer off, `fetch` tries twice more, waiting a few
 seconds between tries. A run whose jobs still can't be read is left out
 and named (`left out: run N (failure), jobs read failed 3 times: HTTP
-502`), never written without its jobs. A window read whole
-(`START..END`, the after side below) isn't written at all then, since the
-run left out could be a failure the comparison must count: fetch it again.
+502`), never written without its jobs. If more than one run in 20 (or more
+than one, in a short fetch) can't be read, `fetch` stops: fetch again
+later. A window read whole (`START..END`, the after side below) stops at
+the first such run and isn't written, since the run left out could be a
+failure the comparison must count: fetch it again.
 A rate limit stops `fetch` at once, with the time it resets.
 
 Write `.joggernaut/baseline.md`: workflow, job and runner label measured, run

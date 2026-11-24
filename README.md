@@ -84,7 +84,7 @@ On the slowest path, observed in these runs         a run          a day
 > 1  pnpm cache never saved on main: cold PRs   -4m 50s on 90 runs  -1h 56m  ci-cache
        install 5m 20s on 90 cold runs, 0m 30s on 34 warm; same job, same runner
 On the slowest path, ceilings (not observed)
-  2  tests use 2 of 4 cores                     up to -2m 05s   up to -1h 15m  ci-slow-tests
+  2  tests use 2 of 4 cores                     up to -2m 05s   up to -1h 09m  ci-slow-tests
        with ideal scaling, twice the workers halves the 4m 10s test step
 Off the slowest path (runner-minutes, not wait)
   3  old PR runs keep going after a new push    up to 9 min on each of 54 runs        ci-workflow
@@ -338,8 +338,8 @@ before editing a tracked file or starting a fix.
  read-only       by wait saved a   cache, workflow,     diff + baseline   5+ runs a side,
  150 PR runs,    day on the runs   slow tests, flaky,   (provisional)     tests compared
  grouped by the  that ran them;    guard                                  by name
- jobs they ran   off the slowest
-                 path, by minutes
+ longest job     off the slowest
+ each one ran    path, by minutes
 ```
 
 Each folder under `skills/` is a `SKILL.md` in the
