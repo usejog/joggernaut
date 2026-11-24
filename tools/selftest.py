@@ -2518,6 +2518,23 @@ with tempfile.TemporaryDirectory() as t:
     got = json.loads(_split(t, rows, "--json").stdout or "{}")
     if got.get("job_sets") != 1 or got.get("workflows") != ["Checks"]:
         bad.append("split: a renamed workflow made two sets or two workflows: %r %r" % (got.get("job_sets"), got.get("workflows")))
+    # Runs saved with no file still count under --workflow ci.yml by their display name, and
+    # a missing file doesn't make another set of jobs.
+    rows = []
+    for k, ok in enumerate((True, False, False)):
+        x = _run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 60 * (k + 1))], 9000 * k, name="ci.yml")
+        x.update(conclusion="success" if ok else "failure")
+        if k:
+            del x["path"]
+        rows.append(x)
+    got = json.loads(_split(t, rows, "--json", "--workflow", "ci.yml").stdout or "{}")
+    if (got.get("passed_runs"), got.get("ended_runs")) != (1, 3):
+        bad.append("split: --workflow by file dropped runs saved with no file: %r" % ((got.get("passed_runs"), got.get("ended_runs")),))
+    rows = [_run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 60 + 540 * k)], 9000 * k) for k in range(2)]
+    del rows[0]["path"]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    if got.get("job_sets") != 1:
+        bad.append("split: a run with no file made another set of jobs: %r" % got.get("job_sets"))
     # #14: a repository whose pull-request workflow runs on pull_request_target alone.
     rows = []
     for i in range(6):
@@ -2548,7 +2565,7 @@ with tempfile.TemporaryDirectory() as t:
     got = json.loads(_split(t, rows, "--json").stdout or "{}")
     text = _split(t, rows).stdout
     head = got.get("headline") or {}
-    if (head.get("commonest_set") or {}).get("median") != 602 or head["commonest_set"].get("jobs") != [".github/workflows/ci.yml / build"] \
+    if (head.get("commonest_set") or {}).get("median") != 602 or head["commonest_set"].get("jobs") != ["build"] \
             or head.get("job_sets") != 2 or (head.get("commonest_set") or {}).get("runs") != 3 \
             or (head.get("commonest_set") or {}).get("tied_with") != 1 or len(got.get("cohorts") or []) != 1 \
             or "ran 2 different sets of jobs" not in text or "tied with 1 other set" not in text:
@@ -2568,8 +2585,11 @@ with tempfile.TemporaryDirectory() as t:
     tj["steps"] = [dict(x, started_at=_at(26001), completed_at=_at(26600)) for x in tj["steps"]]
     got = json.loads(_split(t, rows, "--json").stdout or "{}")
     text = _split(t, rows).stdout
+    no_start = copy.deepcopy(rows)
+    del no_start[-1]["run_started_at"]
     if (got.get("headline") or {}).get("job_sets") != 1 or (got.get("headline") or {}).get("reruns") != 1 \
-            or "1 of the headline's runs passed on a rerun" not in text:
+            or "1 of the headline's runs passed on a rerun" not in text \
+            or "passed on a rerun" in _split(t, no_start).stdout:
         bad.append("split #23: a rerun's carried-over jobs made another set, or the rerun wasn't named: %r\n%s"
                    % (got.get("headline"), text))
     # #35: a step stamped 10 s past its 60 s job shows clipped in the step table; a one-second

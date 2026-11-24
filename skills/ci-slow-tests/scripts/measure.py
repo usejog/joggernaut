@@ -882,8 +882,10 @@ def cmd_split(a):
     # --workflow names a file (ci.yml) when one of the runs' files has that name, else a
     # display name: never both, so a file and another file's display name don't pool.
     files = {os.path.basename(r.get("path") or "") for r in every}
+    # A run with no file is taken by its display name either way, as before.
     runs = [r for r in every if not a.workflow or (os.path.basename(r.get("path") or "") == a.workflow
-                                                     if a.workflow in files else r.get("name") == a.workflow)]
+                                                     if a.workflow in files and r.get("path")
+                                                     else r.get("name") == a.workflow)]
     if not runs:
         die("no runs to read")
     # PR wait over successful runs, as compare measures it.
@@ -904,6 +906,11 @@ def cmd_split(a):
     # median over all of them describes neither. Group them by the longest job each ran; the
     # headline is the group that holds the most of the total wait, unless --cohort names one.
     groups = cohorts([r for r in runs if r.get("conclusion") == "success"])
+    # A run's set of jobs, as compare keys it: names with counts; with several workflow files
+    # in the file, each name with its file.
+    several = len({r["path"] for r in runs if r.get("path")}) > 1
+    set_of = lambda r: tuple(sorted(("%s / %s" % (wf_key(r), j.get("name")) if several else j.get("name") or "")
+                                    for j in latest_jobs(r) if executed(j)))
     total_wait = sum(walls) or 1.0
     table = []
     for key, rs in groups.items():
@@ -916,18 +923,21 @@ def cmd_split(a):
             by_set = {}
             for r, x in walls_of:
                 if x is not None:
-                    js = tuple(sorted("%s / %s" % (wf_key(r), j.get("name")) for j in latest_jobs(r) if executed(j)))
+                    js = set_of(r)
                     by_set.setdefault(js, []).append(x)
             top = min(by_set.items(), key=lambda kv: (-len(kv[1]), kv[0]))
             ties = sum(1 for v in by_set.values() if len(v) == len(top[1])) - 1
             table.append({"longest_job": key, "runs": len(w), "median": median(w), "tail": list(tail(w)),
                           "share_of_wait": sum(w) / total_wait, "job_sets": len(by_set),
-                          "reruns": sum(1 for r, x in walls_of if x is not None and (r.get("run_attempt") or 1) > 1),
+                          # Reruns timed from their last attempt's start (run_started_at): their
+                          # wait covers only the jobs rerun.
+                          "reruns": sum(1 for r, x in walls_of if x is not None and (r.get("run_attempt") or 1) > 1
+                                        and r.get("run_started_at")),
                           "commonest_set": {"jobs": list(top[0]), "runs": len(top[1]), "median": median(top[1]),
                                             "tied_with": ties}})
     table.sort(key=lambda c: (-c["share_of_wait"], c["longest_job"]))
     out["cohorts"] = table
-    out["job_sets"] = len({tuple(sorted("%s / %s" % (wf_key(r), j.get("name")) for j in latest_jobs(r) if executed(j)))
+    out["job_sets"] = len({set_of(r)
                            for r in runs if r.get("conclusion") == "success" and run_wall(r) is not None})
     if a.cohort:
         pick = [c for c in table if c["longest_job"] == a.cohort]
@@ -1216,7 +1226,8 @@ def cmd_split(a):
                  ", tied with %d other set%s" % (cs["tied_with"], "s" * (cs["tied_with"] > 1)) if cs["tied_with"] else "",
                  fmt(cs["median"])))
     reruns = head["reruns"] if head else sum(1 for r in runs if r.get("conclusion") == "success"
-                                             and run_wall(r) is not None and (r.get("run_attempt") or 1) > 1)
+                                             and run_wall(r) is not None and (r.get("run_attempt") or 1) > 1
+                                             and r.get("run_started_at"))
     if reruns:
         print("  %d of the %s runs passed on a rerun: a run's wait starts at its last attempt, so theirs"
               " covers only the jobs rerun" % (reruns, "headline's" if head else "blended"))
