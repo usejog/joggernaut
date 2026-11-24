@@ -75,8 +75,9 @@ in `references/measuring.md`.
    can't tell. It streams each check's output and time, and warns when the
    working tree isn't what is pushed. Before installing, look at what hooks
    run now (`git config --show-origin --get-all core.hooksPath`, and the
-   executable files in `.git/hooks`): if a hook tool already sets the hooks
-   path (lefthook, husky, pre-commit), add the checks there instead, with
+   executable files in `.git/hooks`). If `core.hooksPath` is already set, by
+   a hook tool (lefthook, husky, pre-commit) or by hand, keep it: put the
+   template in that folder, or add its checks to the tool's config, with
    the same rules. Otherwise install it with `git config core.hooksPath .githooks`,
    a one-line setup step in the README or the repository's setup script
    (see "Hooks and worktrees" below). Time it, and report two
@@ -102,12 +103,13 @@ in `references/measuring.md`.
      it for a conflict, a change it needs, or once right before a merge when
      branch protection requires it;
    - merge only when a person asks, or when the target branch's rules
-     already let agents merge, and then only through the command they name,
-     after the required checks and review passed on that commit.
+     already let agents merge and name the command, and then only through
+     it, once the required checks and review passed on the current head.
 5. **For Claude Code users, offer a Stop hook** in `.claude/settings.json`
-   that runs the pre-push check when the agent finishes
-   (`.githooks/pre-push --all >&2 || exit 2`: `--all` checks the working
-   tree and ignores the hook's JSON input) and, on a failure,
+   that runs the pre-push checks when the agent finishes (with the
+   template, `<hooks folder>/pre-push --all >&2 || exit 2`: `--all` checks
+   the working tree and ignores the hook's JSON input; with a hook tool, its
+   own command for the same checks) and, on a failure,
    exits 2 with the failed check's output on stderr: Claude Code's hook docs
    say that keeps Claude working and shows it the message. Offer; don't add
    unasked.
@@ -133,21 +135,22 @@ in `references/measuring.md`.
 
 **What it can skip.** A check's result depends only on the files it reads
 and the tools installed. If the pushed commits change none of those files,
-the check gives the answer it gave on the base, so running it again finds
-nothing new about this push. The base is what the remote branch held, which
-went through this hook when it was pushed, or, for a new branch, where it
-left the default branch, which CI gates. CI still runs every check. Write a
+the check gives the answer it gives on the base, so running it finds
+nothing this push changed. The base is what the remote branch holds, or,
+for a new branch, where it left the default branch. A base that was
+already broken stays CI's to report, and CI still runs every check. Write a
 check's pathspecs as everything minus what it can't read (the template
 leaves out prose: `. ':(exclude)*.md'`), not a list of what it reads: a
-generated type, a `.vue` file or a submodule pointer then still runs it. The
-hook prints each skip by name.
+generated type, a `.vue` file or a submodule pointer then still runs it. A
+linter that reads Markdown (code blocks in docs) reads prose too: drop its
+exclusions. The hook prints each skip by name.
 
 **When it runs everything.** A new branch pushed to a URL or with no
 remote-tracking default branch, a remote branch at a commit this clone
 hasn't fetched (someone else pushed; comparing with an older commit could
 hide that the push undoes their fix), a merge-base that isn't single, a line
-of input it can't read, or a partial clone whose git can't look objects up
-without fetching them. One such branch runs every check, whatever the other
+of input it can't read, or a partial clone whose git is too old to look
+objects up without fetching them (`--no-lazy-fetch`). One such branch runs every check, whatever the other
 branches in the same push show. Tags and other non-branch refs aren't
 checked (`CHECK_REFS`).
 
@@ -155,7 +158,8 @@ checked (`CHECK_REFS`).
 tools and caches are, but the push sends commits. Commit everything first,
 and push the branch you have checked out. The hook warns, by name, for each
 pushed branch that isn't HEAD, for uncommitted changes and for untracked
-files, and doesn't stop the push for them; read its warnings.
+files, and doesn't stop the push for them; read its warnings. The other way
+round, a broken working tree can stop a good push of another branch.
 
 **Hooks and worktrees.** `core.hooksPath` replaces `.git/hooks`: git looks
 for hooks only in that folder (git-config docs), so a hook in `.git/hooks`
@@ -200,7 +204,8 @@ can contain spaces), and never let one ref's line reset a flag another set.
 - The speed-up is incremental checking. Give every tsconfig the hook checks
   `"incremental": true` and its own `"tsBuildInfoFile"` in an ignored cache
   folder, such as `node_modules/.cache/tsc/<name>.tsbuildinfo`: TypeScript
-  then saves the project graph and rechecks only what changed, and since
+  then saves the project graph and rechecks what changed and what depends
+  on it, and since
   TypeScript 4.0 that works with `noEmit` (TypeScript docs). Without
   `tsBuildInfoFile` the file goes beside the config or its `outDir`, which
   may be tracked. Set it in each config, not a shared base: a relative path

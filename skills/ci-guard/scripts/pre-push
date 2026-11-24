@@ -31,6 +31,7 @@ limit() { "$@"; }
 # none, any change runs it. A check is skipped only when no pushed change
 # touches its PATHSPECs, so name what it can't read (here, prose) rather than
 # what it can: a generated type, a .vue file or a submodule then still runs it.
+# If the linter reads Markdown (code blocks in docs), drop its exclusions.
 checks() {
   check format    'pnpm -s format:check'
   check lint      'pnpm -s lint'      . ':(exclude)*.md' ':(exclude)*.mdx' ':(exclude)*.txt'
@@ -56,7 +57,9 @@ trap 'exit 130' HUP INT TERM
 # stop hook's JSON) checks the working tree.
 if [ $# -ge 2 ] && [ "$1" != --all ]; then
   mode=push remote=$1 url=$2
-  cat >"$tmp/refs"   # all of stdin, once, kept for the chained hook
+  # All of stdin, once, kept for the chained hook. A failed write stops the
+  # push rather than passing it on a partial copy.
+  cat >"$tmp/refs" || { say "couldn't save git's input in $tmp"; exit 1; }
 else
   mode=all remote='' url=''
 fi
@@ -76,25 +79,30 @@ if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then
   exit
 fi
 
-# Look objects up without fetching them (a partial clone would fetch).
+# Look objects up without fetching them. A partial clone fetches missing
+# objects on demand; a git too old for --no-lazy-fetch can't be stopped, so
+# in a partial clone it compares nothing and runs every check.
+fetches=''
 if git --no-lazy-fetch version >/dev/null 2>&1; then
   g() { git --no-lazy-fetch "$@" </dev/null; }
 else
   g() { git "$@" </dev/null; }
+  if [ -n "$(git config --get extensions.partialClone; git config --get-regexp '^remote\..*\.promisor$')" ]; then
+    fetches=1
+  fi
 fi
 
 unknown=''     # a reason; once set it stays set, so one unknown ref runs all
-if [ "$mode" = all ]; then
-  unknown='asked to check the working tree'
-elif [ -n "$(git config --get extensions.partialClone)" ] && ! git --no-lazy-fetch version >/dev/null 2>&1; then
-  unknown='a partial clone, and this git fetches missing objects to compare them'
-fi
+[ "$mode" = push ] || unknown='asked to check the working tree'
 head=$(g rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=''
-unchecked=''
 
 if [ "$mode" = push ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
+    case $line in
+      *' '*' '*' '*) ;;
+      *) unknown="unreadable input from git: $line"; continue ;;
+    esac
     # The three rightmost fields: the local source can hold spaces (HEAD@{1 day ago}).
     rsha=${line##* } rest=${line% *}
     rref=${rest##* } rest=${rest% *}
@@ -113,8 +121,12 @@ if [ "$mode" = push ]; then
       unknown="$rref: $lsha is not a commit"
       continue
     fi
-    [ "$tip" = "$head" ] || unchecked="$unchecked $rref@$tip"
-    if zero "$rsha"; then
+    [ "$tip" = "$head" ] ||
+      say "WARNING: the checks read the working tree at HEAD ${head:-(none)}; $rref gets $tip, which they don't check"
+    if [ -n "$fetches" ]; then
+      unknown="a partial clone, and this git would fetch to compare $rref"
+      continue
+    elif zero "$rsha"; then
       # A new branch: compare with where it left the default branch.
       bases=$(g merge-base --all "refs/remotes/$remote/$DEFAULT_BRANCH" "$tip" 2>/dev/null)
       case $bases in
@@ -129,13 +141,11 @@ if [ "$mode" = push ]; then
       unknown="the remote's $rref is at $rsha, which this clone doesn't have (fetch first)"
       continue
     fi
-    printf '%s %s\n' "$base" "$tip" >>"$tmp/ranges"
+    printf '%s %s\n' "$base" "$tip" >>"$tmp/ranges" ||
+      { say "couldn't save the ranges in $tmp"; exit 1; }
   done <"$tmp/refs"
 
   [ -z "$unknown" ] || say "running every check: $unknown"
-  for u in $unchecked; do
-    say "WARNING: the checks read the working tree at HEAD ${head:-(none)}; ${u%@*} gets ${u##*@}, which they don't check"
-  done
   if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
     say "WARNING: uncommitted changes: the checks read them, but they aren't pushed"
   fi
@@ -151,7 +161,8 @@ check() {
   if [ -z "$unknown" ]; then
     need=''
     while read -r base tip; do
-      g diff-tree -r --quiet --no-renames "$base" "$tip" -- "$@"
+      # --ignore-submodules=none: a gitlink counts even with ignore = all in .gitmodules
+      g diff-tree -r --quiet --no-renames --ignore-submodules=none "$base" "$tip" -- "$@"
       case $? in
         0) ;;
         1) need=1; break ;;

@@ -11,11 +11,12 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "skills/ci-guard/scripts/pre-push")
-# Stub checks: each records its name, and typecheck fails while FAIL_TYPECHECK exists.
-CHECKS = """checks() {
-  check format    'echo format >>"$LOG"'
-  check typecheck 'echo typecheck >>"$LOG"; test ! -e FAIL_TYPECHECK' . ':(exclude)*.md'
-}"""
+# The template's own checks run against a stub pnpm: each records its name
+# ("-s format:check" -> format) and fails while FAIL_<name> exists.
+PNPM = '#!/bin/sh\nn=${2%%:*}\necho "$n" >>"$LOG"\ntest ! -e "FAIL_$n"\n'
+# A git too old for --no-lazy-fetch (as on Ubuntu 24.04's git 2.43).
+OLD_GIT = '#!/bin/sh\n[ "$1" != --no-lazy-fetch ] || exit 129\nexec %s "$@"\n'
+ALL = ["format", "lint", "typecheck"]
 LIMIT = 'limit() { echo limiter >>"$LOG"; "$@"; }'
 
 
@@ -31,8 +32,6 @@ def shells():
 
 def hook_text(shell, limiter=False):
     text = open(HOOK).read()
-    text, n = re.subn(r"(?ms)^checks\(\) \{\n.*?^\}", lambda m: CHECKS, text, count=1)
-    assert n == 1, "the template has no checks() block"
     if limiter:
         text, n = re.subn(r'(?m)^limit\(\) \{ "\$@"; \}$', lambda m: LIMIT, text, count=1)
         assert n == 1, "the template has no default limit()"
@@ -63,6 +62,11 @@ def _cases(bad, sh, t):
                GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid",
                LOG=os.path.join(t, "log"), TMPDIR=t)
+    bin_ = os.path.join(t, "bin")
+    os.makedirs(bin_)
+    open(os.path.join(bin_, "pnpm"), "w").write(PNPM)
+    os.chmod(os.path.join(bin_, "pnpm"), 0o755)
+    env["PATH"] = bin_ + os.pathsep + env["PATH"]
     for k in list(env):
         if k.startswith("GIT_") and k not in ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL") \
                 and not k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_")):
@@ -119,21 +123,22 @@ def _cases(bad, sh, t):
     git("checkout", "-qb", "docs"); write("README.md", "y\n"); git("commit", "-qam", "docs")
     docs = git("rev-parse", "HEAD")
     expect("README-only new branch", hook([line("refs/heads/docs", docs, Z)]),
-           0, ["format"], ["skip typecheck"])
+           0, ["format"], ["skip lint", "skip typecheck"])
     expect("README-only, remote at main", hook([line("refs/heads/docs", docs, main)]),
-           0, ["format"], ["skip typecheck"])
+           0, ["format"], ["skip lint", "skip typecheck"])
 
     # A .ts change: both run.
     git("checkout", "-qb", "code", "main"); write("src/a.ts", "export const a = 2\n")
     git("commit", "-qam", "code")
     code = git("rev-parse", "HEAD")
-    expect(".ts change", hook([line("refs/heads/code", code, Z)]), 0, ["format", "typecheck"],
-           ["format: queued", "format: ok in "], err_lacks=["WARNING", "waiting for a slot"])
-    # A failing check fails the push, and the other checks still run.
-    write("FAIL_TYPECHECK", "")
+    expect(".ts change", hook([line("refs/heads/code", code, Z)]), 0, ALL,
+           ["format: queued", "format: running: pnpm -s format:check", "format: ok in "],
+           err_lacks=["WARNING"])
+    # A failing check fails the push, and the checks after it still run.
+    write("FAIL_format", "")
     expect("failing check", hook([line("refs/heads/code", code, Z)]),
-           1, ["format", "typecheck"], ["typecheck: FAILED", "FAILED: typecheck"])
-    os.remove(os.path.join(work, "FAIL_TYPECHECK"))
+           1, ALL, ["format: FAILED", "FAILED: format.", "lint: ok"])
+    os.remove(os.path.join(work, "FAIL_format"))
 
     # Names git would quote, or split on a newline: still changes typecheck reads.
     for i, name in enumerate(("src/é.ts", "src/a\nb.ts", "src/q\"uote.ts")):
@@ -141,7 +146,7 @@ def _cases(bad, sh, t):
         git("add", "-A"); git("commit", "-qm", "odd")
         odd = git("rev-parse", "HEAD")
         git("checkout", "-q", "code")
-        expect("odd path %r" % name, hook([line("refs/heads/odd", odd, Z)]), 0, ["format", "typecheck"])
+        expect("odd path %r" % name, hook([line("refs/heads/odd", odd, Z)]), 0, ALL)
 
     # A submodule pointer that moves: a change typecheck must not skip.
     git("checkout", "-qb", "sub", "main")
@@ -149,27 +154,41 @@ def _cases(bad, sh, t):
     git("commit", "-qm", "gitlink")
     sub = git("rev-parse", "HEAD")
     git("checkout", "-q", "code")
-    expect("gitlink change", hook([line("refs/heads/sub", sub, Z)]), 0, ["format", "typecheck"])
+    expect("gitlink change", hook([line("refs/heads/sub", sub, Z)]), 0, ALL)
+    # The same, with .gitmodules saying ignore = all: still a change.
+    git("checkout", "-qb", "subign", "main")
+    write(".gitmodules", '[submodule "vendor/api"]\n\tpath = vendor/api\n\turl = ./x\n\tignore = all\n')
+    git("add", ".gitmodules"); git("commit", "-qm", "gitmodules.md-free")
+    before_move = git("rev-parse", "HEAD")
+    git("update-index", "--add", "--cacheinfo", "160000,%s,vendor/api" % main)
+    git("commit", "-qm", "gitlink")
+    subign = git("rev-parse", "HEAD")
+    git("checkout", "-q", "code")
+    # git reads submodule settings from the working tree's .gitmodules.
+    write(".gitmodules", '[submodule "vendor/api"]\n\tpath = vendor/api\n\turl = ./x\n\tignore = all\n')
+    expect("gitlink with ignore = all", hook([line("refs/heads/subign", subign, before_move)]), 0, ALL)
+    os.remove(os.path.join(work, ".gitmodules"))
 
     # The remote has a commit this clone never fetched (someone fixed a type error there),
     # and this push replaces it with a README-only change: the range is unknown, so all run.
     unseen = "1" * len(main)
     expect("remote tip not fetched", hook([line("refs/heads/docs", docs, unseen)]),
-           0, ["format", "typecheck"], ["running every check", "doesn't have"])
+           0, ALL, ["running every check", "doesn't have"])
     # Several refs: an unknown one on either line runs everything; a later line can't clear it.
     for lines in ([line("refs/heads/x", docs, unseen), line("refs/heads/docs", docs, main)],
                   [line("refs/heads/docs", docs, main), line("refs/heads/x", docs, unseen)]):
-        expect("multi-ref, one unknown", hook(lines), 0, ["format", "typecheck"], ["running every check"])
+        expect("multi-ref, one unknown", hook(lines), 0, ALL, ["running every check"])
     # A new branch pushed to a URL: no remote-tracking branch to compare with.
     expect("new branch to a URL", hook([line("refs/heads/docs", docs, Z)], args=(remote, remote)),
-           0, ["format", "typecheck"], ["running every check"])
+           0, ALL, ["running every check"])
     # Several known refs: any one that needs a check runs it, once.
     expect("multi-ref union", hook([line("refs/heads/docs", docs, Z), line("refs/heads/code", code, Z)]),
-           0, ["format", "typecheck"])
+           0, ALL)
     # A local source with spaces in it (git keeps it as typed) still parses.
     expect("source with spaces", hook([line("refs/heads/code", code, Z, src="HEAD@{1 day ago}")]),
-           0, ["format", "typecheck"], err_lacks=["unreadable"])
-    expect("unreadable line", hook(["garbage"]), 0, ["format", "typecheck"], ["unreadable input"])
+           0, ALL, err_lacks=["unreadable"])
+    expect("unreadable line", hook(["garbage"]), 0, ALL, ["unreadable input"])
+    expect("a bare object name", hook([main]), 0, ALL, ["unreadable input"])
 
     # Deletes only (either hash length), nothing to push, and tags: nothing runs.
     for z in ("0" * 40, "0" * 64):
@@ -188,18 +207,18 @@ def _cases(bad, sh, t):
     write("src/new.ts", "export const n = 1\n")
     write("src/a.ts", "export const a = 3\n")
     expect("untracked and dirty", hook([line("refs/heads/code", code, Z)]),
-           0, ["format", "typecheck"], ["untracked files", "src/new.ts", "uncommitted changes"])
+           0, ALL, ["untracked files", "src/new.ts", "uncommitted changes"])
     os.remove(os.path.join(work, "src/new.ts")); git("checkout", "-q", "--", "src/a.ts")
 
     # A job limiter: each check is queued, goes through it, and says when it runs.
     expect("limiter", hook([line("refs/heads/code", code, Z)], limiter=True),
-           0, ["limiter", "format", "limiter", "typecheck"],
+           0, ["limiter", "format", "limiter", "lint", "limiter", "typecheck"],
            ["typecheck: queued", "typecheck: running: "])
 
     # --all, no arguments, or a stop hook's JSON on stdin: every check, on the working tree.
     for args in (("--all",), ()):
         expect("working-tree mode %r" % (args,), hook([], args=args, raw='{"hook_event_name":"Stop"}'),
-               0, ["format", "typecheck"])
+               0, ALL)
 
     # A legacy .git/hooks/pre-push gets git's exact input, including none at all,
     # and its failure blocks the push; it never runs in working-tree mode.
@@ -214,16 +233,18 @@ def _cases(bad, sh, t):
         got = open(p).read()
         os.remove(p)
         return got
-    for data in ("", line("refs/heads/code", code, Z) + "\n"):
+    for data in ("", line("refs/heads/code", code, Z) + "\n",
+                 line("refs/heads/code", code, Z) + "\n" + line("refs/heads/docs", docs, Z) + "\n"):
         hook([], raw=data)
         got = legacy_got()
-        if got != data:
-            bad.append("pre-push (%s): the legacy hook got %r for %r" % (sh, got, data))
+        args = open(env["LOG"] + ".args").read() if os.path.exists(env["LOG"] + ".args") else ""
+        if got != data or args != "origin %s\n" % remote:
+            bad.append("pre-push (%s): the legacy hook got %r and args %r for %r" % (sh, got, args, data))
     hook([], args=("--all",))
     if legacy_got() is not None:
         bad.append("pre-push (%s): the legacy hook ran in working-tree mode" % sh)
     env["LEGACY_EXIT"] = "1"
-    expect("legacy hook fails", hook([line("refs/heads/code", code, Z)]), 1, ["format", "typecheck"])
+    expect("legacy hook fails", hook([line("refs/heads/code", code, Z)]), 1, ALL)
     env["LEGACY_EXIT"] = "0"
 
     # Real pushes through a relative core.hooksPath, from a linked worktree, two branches
@@ -242,7 +263,7 @@ def _cases(bad, sh, t):
                        capture_output=True, text=True)
     sent = legacy_got() or ""
     ran = log()
-    if r.returncode != 0 or ran != ["format", "typecheck"] or sent.count("\n") != 2 \
+    if r.returncode != 0 or ran != ALL or sent.count("\n") != 2 \
             or "refs/heads/two" not in sent or "refs/heads/docs" not in sent:
         bad.append("pre-push (%s): real two-branch push from a worktree: exit %d, ran %s, "
                    "legacy got %r\n%s" % (sh, r.returncode, ran, sent, r.stderr))
@@ -255,6 +276,23 @@ def _cases(bad, sh, t):
         bad.append("pre-push (%s): real README-only push: exit %d, ran %s\n%s"
                    % (sh, r.returncode, ran, r.stderr))
 
+    # A partial clone on a git without --no-lazy-fetch: nothing is compared (it
+    # could fetch), so branches run every check; a delete alone still runs none.
+    old = os.path.join(t, "oldgit")
+    os.makedirs(old)
+    open(os.path.join(old, "git"), "w").write(OLD_GIT % shutil.which("git", path=env["PATH"]))
+    os.chmod(os.path.join(old, "git"), 0o755)
+    git("config", "remote.origin.promisor", "true")
+    saved = env["PATH"]
+    env["PATH"] = old + os.pathsep + saved
+    expect("old git, partial clone", hook([line("refs/heads/docs", docs, Z)], cwd=wt), 0, ALL,
+           ["running every check", "partial clone"])
+    expect("old git, partial clone, delete only",
+           hook([line("refs/heads/gone", Z, main, src="(delete)")], cwd=wt), 0, [])
+    env["PATH"] = saved
+    git("config", "--unset", "remote.origin.promisor")
+    expect("old git, full clone", hook([line("refs/heads/docs", docs, Z)]), 0, ["format"])
+
     # A SHA-256 repository: 64-digit names parse, and a .ts change runs typecheck.
     s256 = os.path.join(t, "s256")
     if subprocess.run(["git", "init", "-q", "--object-format=sha256", s256], env=env,
@@ -266,7 +304,7 @@ def _cases(bad, sh, t):
         git("add", "-A", cwd=s256); git("commit", "-qm", "ts", cwd=s256)
         tip = git("rev-parse", "HEAD", cwd=s256)
         expect("SHA-256 repository", hook([line("refs/heads/main", tip, "0" * 64)], cwd=s256),
-               0, ["format", "typecheck"], err_lacks=["running every check"])
+               0, ALL, err_lacks=["running every check"])
 
 
 if __name__ == "__main__":
