@@ -170,21 +170,26 @@ in `references/measuring.md`.
      `parallel:` group; each step in it runs in the background, with an
      implicit wait at the group's end, and a failed step fails the job
      there, GitHub docs). The job keeps its name, its check, its setup and
-     its runner, and adds no runner-minutes; it saves up to the shorter
-     group's time, less where the steps compete for the runner's cores,
+     its runner, and adds no runner-minutes unless contention makes the job
+     longer; it saves up to the shorter group's time, less where the steps compete for the runner's cores,
      memory or disk (check worker counts against the cores). On a
      self-hosted or third-party runner, check with one run that it supports
      the syntax. Second choice, when the runner has no room: a new job with
      the same `needs`, which adds a runner, setup and minutes, and saves
      min(moved, kept − d) a run, where d is how much longer the new job waits,
      sets up and cleans up than the old; it is a slowdown when d exceeds the
-     kept time, so work it out on each run. Its minutes change by both jobs'
+     kept time, so work it out on each run. On a pool with no free runner
+     the kept job can queue behind the new one: compare both new finishes
+     with the old one, not the formula. Its minutes change by both jobs'
      new billed durations against the old job's. If the moved steps need something the kept
      ones build, the new job depends on it and this arithmetic doesn't hold.
      The old job can pass its required check while the new job fails, and
      every job that `needs` the old job (a publish, a deploy, on push or
      release too) would no longer wait for the moved steps: add the new job
-     to each of those `needs`. Then find the required checks (`rules/branches/BRANCH`, branch protection,
+     to each of those `needs`, and to every condition that reads the old
+     job's result (`needs.verify.result == 'success'`, `if: always()` with a
+     check), then show that a failed, skipped or cancelled new job still
+     stops each of them. Then find the required checks (`rules/branches/BRANCH`, branch protection,
      and the `merge_group` checks), make the new job's result reach one
      through a gate that already exists and fails unless every job it needs
      ended `success`, and check on the pull request that a failure, a skip

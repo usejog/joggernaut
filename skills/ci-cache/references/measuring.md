@@ -159,7 +159,13 @@ with counts, so matrix legs count):
   `--job`.
 
 The same jobs can still run different tests (per-pull-request test
-selection); only `MEASURE tests` shows that. `--job NAME --end` times that
+selection inside a job); only `MEASURE tests` shows that, and only for the
+reports compared. Where selection can vary inside a job, compare the reports
+of every timed run against the baseline's, or say the test workload is
+unverified. `compare` also counts each side's runs cancelled with no
+failure (a newer push, a concurrency group): they are in neither the
+timings nor the failure rate, so if a larger share was cancelled after, say
+so beside the verdict: slow runs being cancelled can look like a speedup. `--job NAME --end` times that
 job from the run's start to its end, on the run's clock (its queue and the
 jobs before it count), not the job's own duration, so the same job-set rule
 applies to it.

@@ -1463,6 +1463,23 @@ with tempfile.TemporaryDirectory() as t:
     if r.returncode != 0:
         bad.append("compare --job without --end times the job's own duration, whatever ran before it\n" + r.stderr)
 
+# --job --end: a job that varies only after the timed one doesn't move its end, so it is timed.
+with tempfile.TemporaryDirectory() as t:
+    def tail_job(x, extra):
+        if extra:
+            end = max(mm.ts(j["completed_at"]) for j in x["jobs"]) - 1793000000
+            x["jobs"].append(_job("report", end, end + 1, end + 30))
+        return x
+    b = t + "/b.jsonl"
+    a_ = t + "/a.jsonl"
+    open(b, "w").write("".join(json.dumps(tail_job(_work(i, True), i % 2)) + "\n" for i in range(6)))
+    open(a_, "w").write("".join(json.dumps(tail_job(_work(100 + i, True, integ=60), i % 3)) + "\n" for i in range(6)))
+    r = run([M, "compare", "--before", b, "--after", a_, "--label", "ubuntu-latest", "--job", "integration",
+             "--end", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("before_median") != 190 or got.get("after_median") != 160:
+        bad.append("compare --end: a job after the timed one shouldn't block it\n" + r.stdout + r.stderr)
+
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
 if mm.run_minutes(two) != 2 or abs(mm.run_minutes(two, True) - 2.0) > 1e-9:
@@ -1480,6 +1497,11 @@ if mm.steps_overlap(_job_steps([("a", 0, 50), ("b", 50, 60), ("c", 60, 61)], 120
 got = mm.job_split(_job_steps([("Set up job", 0, 2), ("a", 2, 60), ("b", 2, 60)], 60))
 if got["running"] != 58 or got["setup"] != 2 or got["other"] != 0:
     bad.append("job_split: parallel steps must count elapsed time, not their sum: %r" % got)
+
+# Running wins over setup where they overlap: a cache restore beside the tests is test time.
+got = mm.job_split(_job_steps([("Set up job", 0, 2), ("Restore cache", 2, 40), ("Test", 2, 60)], 60))
+if got["running"] != 58 or got["setup"] != 2:
+    bad.append("job_split: running should win where it overlaps setup: %r" % got)
 
 # Gates: a long job whose one step has a setup word, or a step with no times, is never a gate.
 for steps, label in (([("Set up job", 2), ("Install and run e2e tests", 600)], "a setup word"),):
@@ -1599,12 +1621,118 @@ t_ = (got or {"tests": []})["tests"]
 if (len(t_) != 1 or t_[0]["failed_runs"] != 2 or t_[0]["alone_on_pull_requests"] != 2
         or not any("coverage.xml" in x for x in got["xml_not_junit"])):
     bad.append("flaky: artifact folders, retries or a non-JUnit XML misread: %r\n%s" % (got, r.stderr))
+# The same broken release branch read with no bases recorded (saved answers of closed pull
+# requests): each unplaced pull request is lined up alone, so none stands alone.
+rows, reps = [], {}
+for i, (pr, base, st) in enumerate([(1, "main", "p"), (10, "release", "p"), (2, "main", "p"), (10, "release", "f"),
+                                    (3, "main", "p"), (11, "release", "f"), (4, "main", "p"), (12, "release", "f"),
+                                    (5, "main", "p"), (13, "release", "p")]):
+    rows.append(_fr(i, pr, st == "p", base))
+    rows[-1]["pull_request_bases"] = []
+    reps[rows[-1]["id"]] = {"r.xml": _rep(st)}
+got, r = _flaky_rows(rows, reps)
+t_ = [x for x in (got or {"tests": []})["tests"] if x["test"].endswith("T")]
+if not t_ or t_[0]["recurring"] or t_[0]["alone_on_pull_requests"] != 0 or got.get("runs_without_base") != 10:
+    bad.append("flaky: runs with no base recorded were lined up across bases: %r\n%s" % (t_, r.stderr))
 # Two workflow files with one display name keep their own lines.
 rows = [_fr(0, 1, True, path="a.yml"), _fr(1, 2, False, path="b.yml"), _fr(2, 3, True, path="a.yml")]
 reps = {x["id"]: {"r.xml": _rep("p" if x["conclusion"] == "success" else "f")} for x in rows}
 got, r = _flaky_rows(rows, reps)
 if not got or got["tests"][0]["alone_on_pull_requests"] != 0:
     bad.append("flaky: another workflow file's passes stood around a failure: %r" % got)
+
+
+# ---- second review round (Codex Astra on 3bb89c11)
+
+# --job --end reads the jobs before it on the run's clock: a faster runner for them isn't a speedup.
+with tempfile.TemporaryDirectory() as t:
+    def pair(i, fast):
+        t0 = i * 4000
+        bj = _job("build", t0, t0 + 2, t0 + (20 if fast else 200))
+        if fast:
+            bj["labels"] = ["big-runner"]
+        end = mm.ts(bj["completed_at"]) - 1793000000
+        return _run(i, [bj, _job("required", end, end + 1, end + 2)], t0)
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(pair(i, False)) + "\n" for i in range(5)))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(pair(100 + i, True)) + "\n" for i in range(5)))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--job", "required", "--end",
+             "--label", "ubuntu-latest"])
+    if r.returncode == 0:
+        bad.append("compare --end: jobs before the timed one moved to another runner, and it passed\n" + r.stdout)
+    # Cancelled runs are counted on each side.
+    rows = [_work(200 + i, True) for i in range(5)] + [dict(_work(300 + i, True), conclusion="cancelled") for i in range(3)]
+    open(t + "/c.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in rows))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/c.jsonl", "--job", "build", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("cancelled_after") != [3, 8] or got.get("cancelled_before") != [0, 5]:
+        bad.append("compare: cancelled runs should be counted a side: %r %r" % (got.get("cancelled_before"), got.get("cancelled_after")))
+
+# Steps: a stamp past the job's end is clipped; a zero-length step overlaps nothing; a step of the
+# repository's named "Post results" is work, so its job is no gate.
+got = mm.job_split(_job_steps([("Test", 0, 70)], 60))
+if got["running"] != 60:
+    bad.append("job_split: a step's time must be clipped to its job: %r" % got)
+if mm.steps_overlap(_job_steps([("a", 0, 60), ("b", 20, 20)], 60)):
+    bad.append("steps_overlap: a zero-length step overlaps nothing")
+ch = [_steps_job("work", 0, 1, [("Test", 100)]), _steps_job("report", 102, 103, [("Set up job", 1), ("Post results", 120)])]
+if mm.tail_gates(_run(0, ch, 0), ch)[0]:
+    bad.append("tail_gates: a 120 s step named Post results was taken for runner cleanup")
+ch = [_steps_job("work", 0, 1, [("Test", 100)]),
+      _steps_job("gate", 102, 103, [("Set up job", 1), ("Run actions/checkout@v4", 2), ("Check", 1),
+                                     ("Post Run actions/checkout@v4", 3), ("Complete job", 0)])]
+if [j["name"] for j in mm.tail_gates(_run(0, ch, 0), ch)[0]] != ["gate"]:
+    bad.append("tail_gates: an action's own post step should be the runner's")
+
+# Offline: an empty page whose count says jobs are missing is named; a rerun that failed to start
+# keeps its first attempt's jobs.
+with tempfile.TemporaryDirectory() as t:
+    recs = [json.loads(l) for l in open(E + "/ci-diagnose/repo/ci-history/runs.jsonl") if l.strip()][:30]
+    recs = copy.deepcopy(recs)
+    recs[0]["jobs"] = []
+    recs[1]["conclusion"], recs[1]["run_attempt"] = "startup_failure", 2
+    _save_dir(t + "/d", recs)
+    open(t + "/d/jobs-%d.json" % recs[0]["id"], "w").write(json.dumps({"total_count": 7, "jobs": []}))
+    r = run([M, "split", "--runs-dir", t + "/d", "--json"])
+    if "0 of its 7 jobs saved" not in r.stderr or str(recs[1]["id"]) in r.stderr:
+        bad.append("split --runs-dir: an empty page counting 7 jobs, or a failed restart, misread\n" + r.stderr)
+
+# flaky: a failed run whose report doesn't show the test is unknown, not a pass; branches pushed
+# aren't pull requests; --short refuses names it can't tell apart; a run with no jobs page saved
+# still lines up.
+rows = [_fr(0, 1, True), _fr(1, 2, False), _fr(2, 3, False), _fr(3, 4, True)]
+reps = {rows[0]["id"]: {"r.xml": _rep("p")}, rows[1]["id"]: {"r.xml": _rep("f")},
+        rows[2]["id"]: {"failed.txt": "U\n"}, rows[3]["id"]: {"r.xml": _rep("p")}}
+got, r = _flaky_rows(rows, reps)
+t_ = [x for x in (got or {"tests": []})["tests"] if x["test"].endswith("T")]
+if not t_ or t_[0]["alone_on_pull_requests"] != 0:
+    bad.append("flaky: a failed run whose report doesn't show the test was taken as evidence: %r" % t_)
+rows, reps = [], {}
+for i, (b_, st) in enumerate([(b, x) for b in (1, 2, 3) for x in "pfp"]):
+    x = _fr(i, b_, st == "p", event="push")
+    rows.append(x)
+    reps[x["id"]] = {"r.xml": _rep(st)}
+got, r = _flaky_rows(rows, reps)
+t_ = (got or {"tests": [{}]})["tests"][0]
+if t_.get("recurring") or t_.get("alone_on_pull_requests") != 0 or t_.get("alone_on_other_branches") != 3:
+    bad.append("flaky: pushed branches were counted as pull requests: %r" % t_)
+two_classes = ('<testsuite name="s"><testcase classname="a" name="T"><failure/></testcase>'
+               '<testcase classname="b" name="T"/></testsuite>')
+rows = [_fr(0, 1, False)]
+got, r = _flaky_rows(rows, {rows[0]["id"]: {"r.xml": two_classes}}, "--short")
+if got is not None or "can't tell apart" not in r.stderr:
+    bad.append("flaky --short: names it can't tell apart should stop it\n" + r.stderr)
+with tempfile.TemporaryDirectory() as t:
+    recs = [_fr(0, 1, True), _fr(1, 2, False), _fr(2, 3, False), _fr(3, 4, True)]
+    _save_dir(t + "/d", recs)
+    os.remove(t + "/d/jobs-%d.json" % recs[2]["id"])   # its jobs page not saved: still a failed run in line
+    os.makedirs(t + "/rep")
+    for x, st in ((recs[0], "p"), (recs[1], "f"), (recs[3], "p")):
+        os.makedirs(t + "/rep/%d" % x["id"])
+        open(t + "/rep/%d/r.xml" % x["id"], "w").write(_rep(st))
+    r = run([M, "flaky", "--runs-dir", t + "/d", "--reports", t + "/rep", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {"tests": [{}]}
+    if got["tests"][0].get("alone_on_pull_requests") != 0:
+        bad.append("flaky --runs-dir: a run with no jobs page dropped out of the line: %r\n%s" % (got, r.stderr))
 
 
 # every check.py fails on its untouched sample (the planted cause is there)
