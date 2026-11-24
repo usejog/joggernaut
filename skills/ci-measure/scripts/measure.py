@@ -561,7 +561,7 @@ def record(r, jobs, bases):
     """One run as fetch saves it, from GitHub's run and jobs answers: the same fields
     whether the answers came from fetch or from a folder of saved answers."""
     return {
-        "id": r["id"], "name": r.get("name"), "path": r.get("path"),
+        "id": r["id"], "name": r.get("name"), "path": r.get("path"), "workflow_id": r.get("workflow_id"),
         "event": r.get("event"), "head_branch": r.get("head_branch"),
         "head_sha": r.get("head_sha"), "run_attempt": r.get("run_attempt", 1),
         "head_message": ((r.get("head_commit") or {}).get("message") or "").split("\n")[0][:200],
@@ -879,6 +879,12 @@ def pr_pushes(runs):
 
 def cmd_split(a):
     every = read_runs(a.input)
+    # A run saved with no file but with its workflow's id takes the file another run of that
+    # id names.
+    id_path = {r["workflow_id"]: r["path"] for r in every if r.get("path") and r.get("workflow_id") is not None}
+    for r in every:
+        if not r.get("path") and r.get("workflow_id") in id_path:
+            r["path"] = id_path[r["workflow_id"]]
     # --workflow names a file (ci.yml) when one of the runs' files has that name, else a
     # display name: never both, so a file and another file's display name don't pool.
     files = {os.path.basename(r.get("path") or "") for r in every}
@@ -1175,6 +1181,9 @@ def cmd_split(a):
     counts = ("%d of %d runs that passed or failed passed (%.0f%%), %d of them on attempt 2 or later;"
               " %d cancelled, left out" % (passed, len(ended), 100 * (out["pass_rate"] or 0),
                                            out["passed_after_rerun"], out["cancelled_runs"]))
+    if unplaced_runs:
+        print("%d runs named %s have no workflow file saved, so they can't be told apart from another file's:"
+              " left out (fetch again to save it)" % (len(unplaced_runs), a.workflow))
     if not ended:
         print("no run here passed or failed (%d cancelled)" % out["cancelled_runs"])
     elif out["pass_rate"] < 0.5:
@@ -1183,9 +1192,6 @@ def cmd_split(a):
                                              "That is %.1f runs for each one that passed." % (len(ended) / float(passed))))
     else:
         print("runs: " + counts)
-    if unplaced_runs:
-        print("%d runs named %s have no workflow file saved, so they can't be told apart from another file's:"
-              " left out (fetch again to save it)" % (len(unplaced_runs), a.workflow))
     print("runs read: %d%s, over %.1f days%s" % (
         len(runs), " (workflow %s)" % a.workflow if a.workflow else "", out["span_days"],
         " (no pull-request runs with a head commit)" if out["pr_commits"] == 0
@@ -1227,7 +1233,7 @@ def cmd_split(a):
               % (head["job_sets"], ", ".join(cs["jobs"]), cs["runs"],
                  ", tied with %d other set%s" % (cs["tied_with"], "s" * (cs["tied_with"] > 1)) if cs["tied_with"] else "",
                  fmt(cs["median"])))
-    pool = path_runs if head else [r for r in runs if r.get("conclusion") == "success" and run_wall(r) is not None]
+    pool = [r for r in (path_runs if head else runs) if r.get("conclusion") == "success" and run_wall(r) is not None]
     reran = [r for r in pool if (r.get("run_attempt") or 1) > 1]
     late = sum(1 for r in reran if r.get("run_started_at"))
     if reran:

@@ -2529,6 +2529,15 @@ with tempfile.TemporaryDirectory() as t:
         rows.append(x)
     got = json.loads(_split(t, rows, "--json", "--workflow", "ci.yml").stdout or "{}")
     text = _split(t, rows, "--workflow", "ci.yml").stdout
+    if not text.startswith("2 runs named ci.yml"):
+        bad.append("split: the runs left out should be said first\n" + text)
+    # ... and with the workflow's id saved, they take its file: 1 of 3 passed, as before.
+    for x in rows:
+        x["workflow_id"] = 42
+    got_id = json.loads(_split(t, rows, "--json", "--workflow", "ci.yml").stdout or "{}")
+    if (got_id.get("passed_runs"), got_id.get("ended_runs"), got_id.get("runs_left_out_no_file")) != (1, 3, 0):
+        bad.append("split: runs with no file but the workflow's id weren't placed: %r"
+                   % ((got_id.get("passed_runs"), got_id.get("ended_runs"), got_id.get("runs_left_out_no_file")),))
     if (got.get("passed_runs"), got.get("ended_runs"), got.get("runs_left_out_no_file")) != (1, 1, 2) \
             or "2 runs named ci.yml have no workflow file saved" not in text:
         bad.append("split: --workflow by file should leave out runs with no file, and say so first: %r\n%s"
