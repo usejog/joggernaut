@@ -884,7 +884,7 @@ def cmd_split(a):
     # GitHub's run listing can give a file with its ref (".github/workflows/build.yml@main").
     for r in every:
         if r.get("path"):
-            r["path"] = re.sub(r"@[^/]*$", "", r["path"])
+            r["path"] = re.sub(r"(\.ya?ml)@.*$", r"\1", r["path"])
     # A run saved with no file but with its workflow's id takes the file another run of that
     # id names.
     id_path = {r["workflow_id"]: r["path"] for r in every if r.get("path") and r.get("workflow_id") is not None}
@@ -972,7 +972,9 @@ def cmd_split(a):
     pushes, guessed = pr_pushes(runs)
     cross, unplaced = [], 0
     # A run with no file beside runs with one could be another workflow, so look per commit.
-    if len(names) > 1 or (any(placed_wf(r) for r in runs) and not all(placed_wf(r) for r in runs)):
+    # Checks are (workflow, event) pairs, as each commit's are counted below.
+    checks_ = {(wf_key(r), r.get("event")) for r in runs if r.get("event") in PR_EVENTS}
+    if len(checks_) > 1 or (any(placed_wf(r) for r in runs) and not all(placed_wf(r) for r in runs)):
         for rs in (rs for by_head in pushes.values() for rs in by_head.values()):
             rs = sorted(rs, key=lambda x: ts(x["created_at"]))
             t0 = ts(rs[0]["created_at"])
@@ -1015,9 +1017,13 @@ def cmd_split(a):
     # Pull-request runs: a pull_request or pull_request_target run's head_sha is the pull
     # request's head commit (GitHub's GITHUB_SHA for pull_request_target is the base's, but
     # the run records the head).
-    # Pushes a day are distinct head commits: a run keyed by number and one by branch (its pull
-    # request closed by the fetch) of the same commit are one push.
-    commits = {(rs[0].get("head_repo"), sha) for by_head in pushes.values() for sha, rs in by_head.items()}
+    # Pushes a day: distinct (pull request, head commit) pairs, as each ran CI. A run keyed by its
+    # branch (its pull request closed by the fetch) is the same push as a numbered run of that
+    # branch and commit, so it isn't counted again; for counting only.
+    numbered = {(rs[0].get("head_repo"), rs[0].get("head_branch"), sha) for pr, by_head in pushes.items()
+                if all(isinstance(x, int) for x in pr) for sha, rs in by_head.items()}
+    commits = {(pr, sha) for pr, by_head in pushes.items() for sha, rs in by_head.items()
+               if all(isinstance(x, int) for x in pr) or (rs[0].get("head_repo"), rs[0].get("head_branch"), sha) not in numbered}
     out["pr_commits"] = len(commits)
     out["pr_runs_keyed_by_branch"] = guessed
     out["runs_per_day"] = round(len(commits) / span_days, 1) if span_days >= 1 and commits else None
@@ -1150,7 +1156,10 @@ def cmd_split(a):
     out["wasted_share"] = lost / float(total_min)
 
     # Runs per pull request (pushes that each paid for CI).
-    counts = [len(by_head) for by_head in pushes.values()]
+    # A group keyed by branch counts only its commits no numbered run already counts.
+    counts = [n for n in (len([sha for sha, rs in by_head.items() if all(isinstance(x, int) for x in pr)
+                               or (rs[0].get("head_repo"), rs[0].get("head_branch"), sha) not in numbered])
+                          for pr, by_head in pushes.items()) if n]
     out["pushes_per_pr_median"] = median(counts)
     out["pushes_per_pr_max"] = max(counts) if counts else None
 

@@ -2593,6 +2593,38 @@ with tempfile.TemporaryDirectory() as t:
     if got.get("wait_all_workflows_commits") != 0 or got.get("pr_commits") != 1:
         bad.append("split: one file on two events, or one commit by number and branch: %r %r"
                    % (got.get("wait_all_workflows_commits"), got.get("pr_commits")))
+    # File names with @ keep it (ci@unit_a.yml); a ref after the extension goes (build.yml@release/1.x).
+    at_rows = []
+    for k, (path, ok) in enumerate((("ci@unit_a.yml", True), ("ci@unit_b.yml", False), ("lint.yml", True))):
+        x = _run(k, [_job("test", 10 * k, 10 * k + 1, 10 * k + 10)], 10 * k, name=path)
+        x.update(path=".github/workflows/" + path, conclusion="success" if ok else "failure",
+                 head_sha="%040d" % 77, pull_requests=[77])
+        at_rows.append(x)
+    got = json.loads(_split(t, at_rows, "--json").stdout or "{}")
+    ref_rows = [dict(at_rows[1], path=".github/workflows/build.yml@release/1.x", name="Build"),
+                dict(at_rows[0], path=".github/workflows/other.yml", name="build.yml")]
+    got_ref = json.loads(_split(t, ref_rows, "--json", "--workflow", "build.yml").stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 0 or (got_ref.get("passed_runs"), got_ref.get("ended_runs")) != (0, 1):
+        bad.append("split: @ in file names or refs: %r %r" % (got.get("wait_all_workflows_commits"),
+                                                           (got_ref.get("passed_runs"), got_ref.get("ended_runs"))))
+    # One file on two events, all passing, is a cross-workflow commit with or without an unrelated run.
+    two_ok = [dict(two_ev[0]), dict(two_ev[1], conclusion="success")]
+    two_ok[1]["jobs"] = [dict(j, conclusion="success") for j in two_ok[1]["jobs"]]
+    nightly = dict(two_ev[2], id=999, event="schedule", path=".github/workflows/nightly.yml", head_sha="%040d" % 5)
+    a_ = json.loads(_split(t, two_ok, "--json").stdout or "{}").get("wait_all_workflows_commits")
+    b_ = json.loads(_split(t, two_ok + [nightly], "--json").stdout or "{}").get("wait_all_workflows_commits")
+    if (a_, b_) != (1, 1):
+        bad.append("split: an unrelated run changed a two-event commit's wait: %r %r" % (a_, b_))
+    # Pushes per PR: a run keyed by branch on a commit a numbered run counts isn't another PR.
+    pp = []
+    for k, (sha, prs, ev) in enumerate(((1, [42], "pull_request"), (2, [42], "pull_request"), (2, [], "pull_request_target"))):
+        x = _run(k, [_job("test", 100 * k, 100 * k + 1, 100 * k + 10)], 100 * k)
+        x.update(head_sha="%040d" % sha, pull_requests=prs, event=ev, head_branch="b42", head_repo="o/r")
+        pp.append(x)
+    got = json.loads(_split(t, pp, "--json").stdout or "{}")
+    if got.get("pushes_per_pr_median") != 2 or got.get("pr_commits") != 2:
+        bad.append("split: a branch-keyed run of a numbered commit counted again: %r %r"
+                   % (got.get("pushes_per_pr_median"), got.get("pr_commits")))
     # #14: a repository whose pull-request workflow runs on pull_request_target alone.
     rows = []
     for i in range(6):
