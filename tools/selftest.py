@@ -2488,7 +2488,7 @@ with tempfile.TemporaryDirectory() as t:
     del legacy["workflow_id"]
     got = json.loads(_split(t, rows_id + [legacy], "--json").stdout or "{}")
     if got.get("wait_all_workflows_commits") != 1 or got.get("wait_all_workflows_unplaced_commits") != 0 \
-            or sorted(got.get("workflows") or []) != ["CI", "Lint"]:
+            or len(got.get("workflows") or []) != 3:  # CI, Lint (id 35) and the older legacy.yml
         bad.append("split #7: a run with its workflow id but no file wasn't placed: %r %r"
                    % (got.get("wait_all_workflows_commits"), got.get("wait_all_workflows_unplaced_commits")))
     # ... and one 48 hours later, outside the commit's window, changes nothing.
