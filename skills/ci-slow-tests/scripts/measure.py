@@ -1494,11 +1494,13 @@ def cmd_compare(a):
     cache = load_cache_state(a)
     # The selection the label and routing checks read: every run of the workflow, event and
     # base, any outcome, and with --ran the runs where that job got a runner in some attempt.
-    ran_any = lambda r: any(j.get("name") == a.ran and on_a_runner(j) for j in r.get("jobs", []))
-    # Every completed run, neutral and skipped ones too, as the label check read before.
+    # Runs where the --ran job asked for a runner, in any attempt (a request the queue cancelled
+    # still shows where the push was sent); the routing count's workload, where it got one.
+    ran_any2 = lambda r, got=False: any(j.get("name") == a.ran and (on_a_runner(j) if got else executed(j))
+                                        for j in r.get("jobs", []))
     # Not by cache state (every run, finished or not): a runner seen only on the other state shows where the
     # pushes went (as the label check always read).
-    selected = lambda rs: [r for r in rs if in_workflow(r) and (not a.ran or ran_any(r))]
+    selected = lambda rs, got=False: [r for r in rs if in_workflow(r) and (not a.ran or ran_any2(r, got))]
     # The runs the per-job and whole-run runner checks read, as before: every green run of
     # the cohort, timed or not (a canary that fails on one pool keeps its runs from being
     # timed, so which pushes went there decides which are timed), reruns included, by their
@@ -1876,11 +1878,11 @@ def cmd_compare(a):
         # the selection that ran the job (or, without --job, any job) in any attempt, those
         # whose first attempt didn't run it on that runner. A shift either way, each direction
         # tested one-sided at 5% as the reach counts are, changes which pushes are timed.
-        def off_runner(rs):
+        def off_runner(rs, in_state):
             n = x = 0
-            for r in selected(rs):
-                if a.cache and cache.get(str(r["id"])) != a.cache:
-                    continue  # routing within the selected cache state: the timed runs' state
+            for r in selected(rs, True):
+                if in_state and a.cache and cache.get(str(r["id"])) != a.cache:
+                    continue  # within the selected cache state: the timed runs' state
                 # Runs where it got a runner, in any attempt (a job cancelled in the queue never
                 # did); off the runner when the first attempt didn't run it there (it ran
                 # elsewhere, or only on a retry). With --job, that job alone, --end or not.
@@ -1892,10 +1894,14 @@ def cmd_compare(a):
                          if (j.get("run_attempt") or 1) == 1 and on_a_runner(j) and (not a.job or j.get("name") == a.job)]
                 x += not (there and (any(there) if a.job else all(there)))
             return [x, n]
-        res["off_runner_before"], res["off_runner_after"] = off_runner(rb), off_runner(ra)
-        ob, oa = tuple(res["off_runner_before"]), tuple(res["off_runner_after"])
+        # Counted within the selected cache state, and over every state (a move to the runner can
+        # also change which state a push lands in); a shift in either qualifies.
         hit = lambda c: (c[1] - c[0], c[1])
-        if speed and (fails_rose(ob, oa) or fails_rose(hit(ob), hit(oa))):
+        moved = lambda b, a_: fails_rose(b, a_) or fails_rose(hit(b), hit(a_))
+        counts = [(tuple(off_runner(rb, s_)), tuple(off_runner(ra, s_))) for s_ in ((True, False) if a.cache else (True,))]
+        ob, oa = next(((b, a_) for b, a_ in counts if moved(b, a_)), counts[0])
+        res["off_runner_before"], res["off_runner_after"] = list(ob), list(oa)
+        if speed and any(moved(b, a_) for b, a_ in counts):
             res["verdict_code"] += "_routing_changed"
             res["verdict"] += ("; but which runs ran on %s changed (%d of %d didn't first run %s there after, against"
                                " %d of %d before): the timed runs may not be like the runs before" % (

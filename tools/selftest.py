@@ -2995,6 +2995,35 @@ with tempfile.TemporaryDirectory() as t:
     if "_routing_changed" not in (v.get("verdict_code") or ""):
         bad.append("compare --cache: routing among the selected cache state was pooled away: %r %r"
                    % (v.get("verdict"), (v.get("off_runner_before"), v.get("off_runner_after"))))
+    # Routing that also moved pushes from misses to hits: counted over every state too.
+    hits3 = {}
+    def moved_state(base_id, after):
+        rows = []
+        for i in range(32):
+            fast = i < 24
+            hits3[str(base_id + i)] = "hit" if (after or not fast) else "miss"
+            rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100, labels=("L" if (after or not fast) else "M",))]))
+        return rows
+    b_, a_ = moved_state(90000, False), moved_state(91000, True)
+    open(t + "/cache3.json", "w").write(json.dumps(hits3))
+    v, r = _cmp(t, b_, a_, "--job", "test", "--label", "L", "--cache", "hit", "--cache-state", t + "/cache3.json")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare --cache: a move onto the runner that changed cache state wasn't counted: %r" % v.get("verdict"))
+    # --ran test: requests the queue cancelled still show the runner the pushes were sent to.
+    def ran_q(base_id, q_pool):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            if fast == (q_pool == "M"):
+                c = _cr(base_id + i, [_J("test", 0, 1, labels=(q_pool,), conclusion="cancelled")], conclusion="cancelled")
+                c["jobs"][0]["runner_name"] = None
+                rows.append(c)
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100, labels=("L",))]))
+        return rows
+    v, r = _cmp(t, ran_q(92000, "M"), ran_q(93000, "N"), "--ran", "test", "--job", "test")
+    if "error" not in v:
+        bad.append("compare --ran: queued requests' runners were dropped: %r" % (v.get("reading") or v.get("verdict")))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))
