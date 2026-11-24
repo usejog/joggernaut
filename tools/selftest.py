@@ -818,12 +818,19 @@ for before, after, what in (
 # and temp names don't count.
 for before, after, want in (
         ("Traceback (most recent call last):\n  x\nRuntimeError: cleanup", "Traceback (most recent call last):\n  x\nRuntimeError: collection", 1),
-        ('<error type="E" message="Pool at 0x7f3a2b1c9d50 in /tmp/tmpa8fkq2zx"/>', '<error type="E" message="Pool at 0x7fe41d0c8a90 in /tmp/tmpq9wneb1c"/>', 0)):
+        ('<error type="E" message="Pool at 0x7f3a2b1c9d50 in /tmp/tmpa8fkq2zx"/>', '<error type="E" message="Pool at 0x7fe41d0c8a90 in /tmp/tmpq9wneb1c"/>', 0),
+        ('<error type="E" message="at 0x7f3a2b1c9d50"/>', '<error type="E" message="at 0X7F3A2B1C9D50"/>', 0)):
     wrap = lambda e: ('<testsuite name="s">%s<testcase classname="k" name="x"/></testsuite>'
                       % (e if e.startswith("<") else '<error type="RuntimeError">%s</error>' % e))
     r = two_reports(wrap(before), wrap(after))
     if (r.returncode != 0) != bool(want):
         bad.append("tests: suite error %r to %r should %s\n%s" % (before[-20:], after[-20:], "fail" if want else "pass", r.stdout))
+# #6: a suite error's message is keyed, never printed: it can hold a secret.
+r = two_reports('<testsuite name="s"><testcase classname="k" name="x"/></testsuite>',
+                '<testsuite name="s"><error type="E" message="GET https://u:hunter2@example.invalid failed"/>'
+                '<testcase classname="k" name="x"/></testsuite>')
+if r.returncode == 0 or "hunter2" in r.stdout + r.stderr:
+    bad.append("tests: a new suite error should fail without printing its message\n" + r.stdout)
 # #6: the same suite error, its message differing only in numbers (a time, a pid), is no change.
 r = two_reports('<testsuite name="s"><error type="RuntimeError" message="worker 12 died after 3.2s"/>'
                 '<testcase classname="k" name="x"/></testsuite>',
@@ -2515,6 +2522,15 @@ for body, want, what in ((WRITTEN, True, "each lint written out"), (LOOP_OK, Tru
                          ("mkdir lint-logs\n" + WRITTEN, True, "a fold whose first command needs a fresh checkout"),
                          ('status=0\nfor t in $LINTS; do pnpm run "lint:$t" || status=1; done\nexit $status', True,
                           "a loop over the step's env"),
+                         ('status=0\nfor t in $LINTS; do pnpm run "lint:$t" || status=1; done\nexit $status', True,
+                          "a loop over the job's env"),
+                         ("\n".join("pnpm run lint:%s 2>&1 | tee -a lint.log" % x for x in ["ts", "css", "md", "yaml", "json", "spell", "licenses"]),
+                          False, "tee under defaults: shell: bash {0}"),
+                         ('for t in ts css md yaml json spell licenses; do npm "lint:$t"; done', False,
+                          "npm without run (npm runs no script that way)"),
+                         ('mkdir "$HOME/lint-logs"\n' + WRITTEN, True, "a fold that makes a folder in its home"),
+                         ("pnpm --filter . run lint:ts\n" + "\n".join("pnpm run lint:%s" % x for x in ["css", "md", "yaml", "json", "spell", "licenses"]),
+                          True, "a fold with pnpm --filter"),
                          (LOOP_DROPS, False, "a loop whose bare wait drops exit codes"),
                          (WRITTEN.replace("pnpm run lint:licenses", ""), False, "a fold without licenses"),
                          ("\n".join("echo lint:%s" % x for x in ["ts", "css", "md", "yaml", "json", "spell", "licenses"]),
@@ -2532,6 +2548,17 @@ for body, want, what in ((WRITTEN, True, "each lint written out"), (LOOP_OK, Tru
         if what == "a loop over the step's env":
             text = open(work + "/.github/workflows/ci.yml").read().replace(
                 "      - name: Lint\n", "      - name: Lint\n        env:\n          LINTS: ts css md yaml json spell licenses\n", 1)
+            open(work + "/.github/workflows/ci.yml", "w").write(text)
+        if what == "a loop over the job's env":
+            text = open(work + "/.github/workflows/ci.yml").read().replace(
+                "  lint:\n    runs-on: ubuntu-latest\n", "  lint:\n    runs-on: ubuntu-latest\n    env:\n      LINTS: ts css md yaml json spell licenses\n", 1)
+            open(work + "/.github/workflows/ci.yml", "w").write(text)
+        if what == "tee under defaults: shell: bash {0}":
+            # bash {0} has no -e, so only the last line's status counts; a step elsewhere that
+            # names shell: bash doesn't change that.
+            text = open(work + "/.github/workflows/ci.yml").read().replace(
+                "jobs:\n", "defaults:\n  run:\n    shell: bash {0}\njobs:\n", 1).replace(
+                "      - run: pnpm test\n", "      - run: pnpm test\n        shell: bash\n", 1)
             open(work + "/.github/workflows/ci.yml", "w").write(text)
         if what == "each lint written out":
             # The same fold with `shell: bash` after the run block: still one step, still passes.

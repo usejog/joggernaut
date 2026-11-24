@@ -25,86 +25,130 @@ if len(jobs) >= 8:
     fail.append("still %d jobs; the tiny lint jobs weren't folded" % len(jobs))
 
 
-# A `defaults: run: shell:` stands for every step that names none.
-default_shell = None
-for f in sorted(os.listdir(os.path.join(d, ".github/workflows"))):
-    m_ = re.search(r"^\s*defaults:\s*\n\s+run:\s*\n(?:\s+\S.*\n)*?\s+shell:\s*(\S+)",
-                   strip_comments(open(os.path.join(d, ".github/workflows", f)).read()) + "\n", re.M)
-    default_shell = default_shell or (m_.group(1) if m_ else None)
+def yaml_load(text):
+    """The YAML a workflow uses: mappings, lists (indented or not), block scalars (| >),
+    inline {a: b} and [a, b], quoted and plain scalars. Enough to read jobs, steps, env,
+    defaults, shell and working-directory as GitHub does."""
+    lines = [l.rstrip("\n") for l in text.split("\n")]
+    ind = lambda l: len(l) - len(l.lstrip(" "))
+    blank = lambda l: not l.strip() or l.lstrip().startswith("#")
 
+    def scalar(v):
+        v = v.strip()
+        if v[:1] in ("'", '"') and v[-1:] == v[:1]:
+            return v[1:-1]
+        v = re.sub(r"\s+#.*$", "", v)
+        if v.startswith("{") and v.endswith("}"):
+            return {k.strip(): scalar(x) for k, _, x in (p.partition(":") for p in v[1:-1].split(",") if ":" in p)}
+        if v.startswith("[") and v.endswith("]"):
+            return [scalar(x) for x in v[1:-1].split(",") if x.strip()]
+        return v
 
-def run_steps(text):
-    """Each step's `run:` value and its `shell:` (None when unset): a one-line value, or a block
-    scalar (| or >) of the lines indented past the `run` key. Sibling keys of the step sit at
-    the key's own column."""
-    lines, out = text.split("\n"), []
-    for i, line in enumerate(lines):
-        m = re.match(r"^(\s*(?:-\s+)?)run:\s*(.*)$", line)
-        if not m:
-            continue
-        col, value = len(m.group(1)), m.group(2).strip()
-        indent = lambda l: len(l) - len(l.lstrip())
-        if value[:1] in ("|", ">"):
-            block, j = [], i + 1
-            while j < len(lines) and (not lines[j].strip() or indent(lines[j]) > col):
-                block.append(lines[j])
-                j += 1
-            pad = min((indent(l) for l in block if l.strip()), default=0)
-            body = [l[pad:] for l in block]
-            script = " ".join(l.strip() for l in body if l.strip()) if value[0] == ">" else "\n".join(body)
-        else:
-            script = value[1:-1] if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"" else value
-        # The step's other keys sit at the key's column, between the step's `- ` and the next
-        # line as shallow as that dash.
-        key_col = lambda l: indent(l) + (2 if l.lstrip().startswith("- ") else 0)
-        start = i
-        while not lines[start].lstrip().startswith("- ") and start > 0 and (
-                not lines[start - 1].strip() or key_col(lines[start - 1]) >= col):
-            start -= 1
-        end = i + 1
-        while end < len(lines) and (not lines[end].strip() or indent(lines[end]) > col - 2):
-            end += 1
-        shell, cwd, env = None, None, {}
-        for j in range(start, end):
-            l = lines[j]
-            if key_col(l) != col:
-                continue
-            mm = re.match(r"^\s*(?:-\s+)?(shell|working-directory|env):\s*(.*)$", l)
-            if not mm:
-                continue
-            k, v = mm.group(1), mm.group(2).strip().strip("'\"")
-            if k == "shell":
-                shell = v
-            elif k == "working-directory":
-                cwd = v
-            elif v.startswith("{"):
-                env.update((a.strip(), b.strip().strip("'\"")) for a, b in
-                           (x.split(":", 1) for x in v.strip("{}").split(",") if ":" in x))
+    def skip(i):
+        while i < len(lines) and blank(lines[i]):
+            i += 1
+        return i
+
+    def block(i, col, style):
+        """A block scalar's lines, deeper than col, from line i."""
+        body = []
+        while i < len(lines) and (not lines[i].strip() or ind(lines[i]) > col):
+            body.append(lines[i])
+            i += 1
+        while body and not body[-1].strip():
+            body.pop()
+        pad = min((ind(l) for l in body if l.strip()), default=0)
+        body = [l[pad:] for l in body]
+        return (" ".join(l.strip() for l in body if l.strip()) if style == ">" else "\n".join(body)), i
+
+    def node(i, col):
+        """The value starting at line i, indented col: a list or a mapping."""
+        i = skip(i)
+        if i < len(lines) and lines[i][col:].startswith("- "):
+            out = []
+            while True:
+                i = skip(i)
+                if i >= len(lines) or ind(lines[i]) != col or not lines[i][col:].startswith("- "):
+                    return out, i
+                rest = lines[i][col + 2:]
+                if re.match(r"^[\w.-]+:(\s|$)", rest.lstrip()):
+                    lines[i] = " " * (col + 2) + rest.lstrip()
+                    item, i = mapping(i, col + 2)
+                else:
+                    item, i = scalar(rest), i + 1
+                out.append(item)
+        return mapping(i, col)
+
+    def mapping(i, col):
+        out = {}
+        while True:
+            i = skip(i)
+            if i >= len(lines) or ind(lines[i]) != col or lines[i][col:].startswith("- "):
+                return out, i
+            m = re.match(r"^([^:#][^:]*?):(?:\s+(.*))?$", lines[i][col:])
+            if not m:
+                return out, i
+            k, v = m.group(1).strip().strip("'\""), (m.group(2) or "").strip()
+            i += 1
+            if v[:1] in ("|", ">"):
+                out[k], i = block(i, col, v[0])
+            elif v and not v.startswith("#"):
+                out[k] = scalar(v)
             else:
-                for l2 in lines[j + 1:end]:
-                    if not l2.strip() or key_col(l2) <= col:
-                        break
-                    a, _, b = l2.strip().partition(":")
-                    env[a.strip()] = b.strip().strip("'\"")
-        out.append((script, shell or default_shell, cwd, env))
+                j = skip(i)
+                if j < len(lines) and (ind(lines[j]) > col or (ind(lines[j]) == col and lines[j][col:].startswith("- "))):
+                    out[k], i = node(j, ind(lines[j]))
+                else:
+                    out[k] = None
+    return node(skip(0), ind(lines[skip(0)]) if skip(0) < len(lines) else 0)[0]
+
+
+def run_steps():
+    """Every `run:` step of every workflow, with what GitHub gives it: its shell (the step's,
+    else the job's defaults, else the workflow's), working directory the same way, and its
+    env (workflow's, then job's, then step's)."""
+    out = []
+    for f in sorted(os.listdir(os.path.join(d, ".github/workflows"))):
+        doc = yaml_load(open(os.path.join(d, ".github/workflows", f)).read())
+        if not isinstance(doc, dict):
+            continue
+        run_of = lambda x: ((x or {}).get("defaults") or {}).get("run") or {}
+        for job in (doc.get("jobs") or {}).values():
+            if not isinstance(job, dict):
+                continue
+            for step in job.get("steps") or []:
+                if not isinstance(step, dict) or "run" not in step:
+                    continue
+                pick = lambda k: step.get(k) or run_of(job).get(k) or run_of(doc).get(k)
+                env = {}
+                for e in (doc.get("env"), job.get("env"), step.get("env")):
+                    env.update({str(k): str(v) for k, v in (e or {}).items()} if isinstance(e, dict) else {})
+                out.append((str(step["run"] or ""), pick("shell"), pick("working-directory"), env))
     return out
 
 
-# GitHub's shells: unset is `bash -e {0}`; `shell: bash` adds pipefail; `shell: sh` is `sh -e`.
-SHELLS = {None: ["bash", "-e", "-c"], "bash": ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c"],
-          "sh": ["sh", "-e", "-c"], "bash {0}": ["bash", "-c"], "sh {0}": ["sh", "-c"]}
+# GitHub's shells: unset is `bash -e {0}`; `shell: bash` adds pipefail; `sh` is `sh -e {0}`;
+# any other is a template with {0} for the script's file.
+SHELLS = {None: "bash -e {0}", "bash": "bash --noprofile --norc -eo pipefail {0}", "sh": "sh -e {0}"}
 # Stubs: a package manager records the script it was asked to run (`pnpm run lint:ts`, or
-# `pnpm lint:ts`) and fails when it is $FAIL_SCRIPT; npx and node do nothing.
-PM = ('#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; esac; done\n'
-      'case ${1:-} in run|run-script) shift; while [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; esac; done ;;'
-      ' exec|dlx|install|i|ci|add) exit 0 ;; esac\n'
+# `pnpm lint:ts`; options and their values skipped) and fails when it is $FAIL_SCRIPT; npx
+# and node do nothing.
+# npm runs a script only through `npm run` (or `run-script`); pnpm and yarn take a bare name too.
+NPM = ('#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; esac; done\n'
+       'case ${1:-} in run|run-script) shift ;; *) exit 0 ;; esac\n'
+       'while [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; esac; done\n'
+       '[ -n "${1:-}" ] || exit 0\necho "$1" >>"$LOG"\n[ "$1" != "${FAIL_SCRIPT:-}" ]\n')
+PM = ('#!/bin/sh\nskip() { while [ $# -gt 0 ]; do case $1 in --filter|-F|-C|--dir|--workspace) shift 2 ;;'
+      ' -*) shift ;; *) break ;; esac; done; echo "$@"; }\n'
+      'set -- $(skip "$@")\n'
+      'case ${1:-} in run|run-script) shift; set -- $(skip "$@") ;; exec|dlx|install|i|ci|add) exit 0 ;; esac\n'
       '[ -n "${1:-}" ] || exit 0\necho "$1" >>"$LOG"\n[ "$1" != "${FAIL_SCRIPT:-}" ]\n')
 NOOP = '#!/bin/sh\nexit 0\n'
 LINTS = ["lint:%s" % j for j in ["ts", "css", "md", "yaml", "json", "spell", "licenses"]]
-steps = run_steps(wf)
+steps = run_steps()
 with tempfile.TemporaryDirectory() as t:
     os.makedirs(t + "/bin")
-    for tool, body in (("pnpm", PM), ("npm", PM), ("yarn", PM), ("npx", NOOP), ("node", NOOP)):
+    for tool, body in (("pnpm", PM), ("npm", NPM), ("yarn", PM), ("npx", NOOP), ("node", NOOP)):
         open(t + "/bin/" + tool, "w").write(body)
         os.chmod(t + "/bin/" + tool, 0o755)
 
@@ -113,19 +157,22 @@ with tempfile.TemporaryDirectory() as t:
         blanked): its exit status, and the lint scripts it asked a package manager to run."""
         got = []
         work = tempfile.mkdtemp(dir=t)
-        shutil.copytree(d, work, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+        shutil.copytree(d, work, dirs_exist_ok=True)
+        home = tempfile.mkdtemp(dir=t)  # each probe starts from a fresh home too
         for k, (step, shell, sub, extra) in enumerate(steps):
-            if shell not in SHELLS:
-                got.append(("shell %s can't be run here" % shell, set()))
-                continue
+            template = SHELLS.get(shell, shell)
+            if "{0}" not in template:
+                template += " {0}"
+            script = "%s/step%d.sh" % (t, k)
+            open(script, "w").write(re.sub(r"\$\{\{[^}]*\}\}", "", step) + "\n")
             log = "%s/log%d" % (t, k)
-            env = dict(extra, PATH=t + "/bin:/usr/bin:/bin", HOME=t, LOG=log, FAIL_SCRIPT=fail_script)
+            env = dict(extra, PATH=t + "/bin:/usr/bin:/bin", HOME=home, LOG=log, FAIL_SCRIPT=fail_script)
             try:
-                rc = subprocess.run(SHELLS[shell] + [re.sub(r"\$\{\{[^}]*\}\}", "", step)],
+                rc = subprocess.run([x.replace("{0}", script) for x in template.split()],
                                     cwd=os.path.join(work, sub) if sub else work, env=env,
                                     capture_output=True, timeout=30).returncode
-            except subprocess.TimeoutExpired:
-                rc = "timed out"
+            except (subprocess.TimeoutExpired, OSError) as e:
+                rc = "timed out" if isinstance(e, subprocess.TimeoutExpired) else "can't run %s" % template
             ran = open(log).read().split() if os.path.exists(log) else []
             if os.path.exists(log):
                 os.remove(log)
