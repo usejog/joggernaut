@@ -2691,6 +2691,51 @@ with tempfile.TemporaryDirectory() as t:
                 "--label", "self-hosted")
     if "error" not in v or "runner group" not in r.stderr:
         bad.append("compare #12: one row without a group hid two groups: %r" % v.get("verdict"))
+    # Round 3. Whole runs: a canary failing in group 2 (same labels), on the fast pushes
+    # before and the slow after; the runner sets differ by group.
+    def canary_group(base_id, fast_canary):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            jobs = [_J("test", 0, 10 if fast else 100, labels=("self-hosted", "L"), group=1)]
+            if fast == fast_canary:
+                jobs.append(_J("canary", 0, 5, labels=("self-hosted", "L"), group=2, conclusion="failure"))
+            rows.append(_cr(base_id + i, jobs))
+        return rows
+    v, r = _cmp(t, canary_group(40000, True), canary_group(41000, False), "--label", "L")
+    if "error" not in v or "runner groups" not in r.stderr:
+        bad.append("compare: runner groups of differently named jobs were lost for whole runs: %r" % v.get("verdict"))
+    # A group change seen only on failed runs, without --label: refused, as for labels.
+    def failed_groups(base_id, fail_fast, fail_group):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            if fast == fail_fast:
+                rows.append(_cr(base_id + i, [_J("test", 0, 5, labels=("self-hosted", "L"), group=fail_group,
+                                                 conclusion="failure")], conclusion="failure"))
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100, labels=("self-hosted", "L"), group=1)]))
+        return rows
+    v, r = _cmp(t, failed_groups(42000, True, 2), failed_groups(43000, False, 3), "--job", "test")
+    if "error" not in v or "runner groups" not in r.stderr:
+        bad.append("compare: a group change on failed runs passed without --label: %r" % v.get("verdict"))
+    # --end --label L: a rerun that first failed on M and was retried on L (after) or M
+    # (before) is the routing count's, not a refusal.
+    def end_retry(base_id, retry_on):
+        rows = [_cr(base_id + i, [_J("build", 0, 5, labels=("L",)), _J("test", 5, (100 if retry_on == "M" else 50) + i,
+                                                                      labels=("L",))]) for i in range(6)]
+        rows.append(_cr(base_id + 6, [_J("build", 0, 5, labels=("L",)),
+                                      _J("test", 5, 50, labels=("M",), conclusion="failure"),
+                                      _J("test", 100, 50, labels=(retry_on,), attempt=2)], attempt=2))
+        return rows
+    v, r = _cmp(t, end_retry(44000, "M"), end_retry(45000, "L"), "--job", "test", "--end", "--label", "L")
+    if v.get("verdict_code") != "end_descriptive":
+        bad.append("compare --end: a retry on L refused: %r" % (v.get("verdict") or v))
+    # A job that moved wholly from group 0 to group 7 is refused (0 is a group id).
+    v, r = _cmp(t, [_cr(46000 + i, [_J("test", 0, 100 + i, labels=("L",), group=0)]) for i in range(6)],
+                [_cr(47000 + i, [_J("test", 0, 50 + i, labels=("L",), group=7)]) for i in range(6)], "--label", "L")
+    if "error" not in v or "runner group 0 before and 7 after" not in r.stderr:
+        bad.append("compare #12: a move from group 0 to group 7 passed: %r" % (v.get("verdict") or r.stderr))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))

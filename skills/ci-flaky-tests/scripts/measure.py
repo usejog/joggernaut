@@ -1508,7 +1508,18 @@ def cmd_compare(a):
     # Jobs that got a runner, of a run's first attempt; with --job (not --end) that job only.
     placed = lambda r, every=False: [j for j in first_jobs(r) if on_a_runner(j)
                                      and (every or not a.job or a.end or j.get("name") == a.job)]
-    labelled = lambda j: not a.label or a.end or a.label in (j.get("labels") or [])
+    # Under --label, the timed job counts only on that runner (its other placements are the
+    # routing count's); with --end, every other job counts wherever it ran.
+    labelled = lambda j: (not a.label or a.label in (j.get("labels") or [])
+                          or (a.end and j.get("name") != a.job))
+    # Known runner group ids, by job name (0 is an id; null or unsaved is unknown).
+    def group_ids(runs_, ok=lambda j: True):
+        ids = {}
+        for r in runs_:
+            for j in placed(r):
+                if ok(j) and j.get("runner_group_id") is not None:
+                    ids.setdefault(j.get("name"), set()).add(j["runner_group_id"])
+        return ids
     # A side with no timed run has nothing to compare: not enough runs, which comes before
     # any check that the two sides are comparable.
     comparable = bool(cb and ca)
@@ -1521,6 +1532,12 @@ def cmd_compare(a):
             die("runner labels differ between before and after (%s before; %s after); pass --label (and"
                 " --job) to compare the same runner"
                 % ("; ".join(sorted(map(show_runner, lb))), "; ".join(sorted(map(show_runner, la)))))
+        sb_, sa_ = group_ids(selected(rb)), group_ids(selected(ra))
+        for name in set(sb_) & set(sa_):
+            if sb_[name] != sa_[name]:
+                die("job %r ran in runner groups %s before and %s after (failed and cancelled runs included);"
+                    " a runner change isn't a code speedup" % (name, ", ".join(map(str, sorted(sb_[name]))),
+                                                               ", ".join(map(str, sorted(sa_[name])))))
 
     # Each job must run on one runner, the same on both sides: otherwise a shift in which
     # runner a job lands on can pass for a speedup. By labels, then by runner group (two
@@ -1528,14 +1545,12 @@ def cmd_compare(a):
     # 0.4 on): every known group id is compared, and a job with no saved id (an older file)
     # or a null one hides nothing the others show. A job on one side only is fine.
     def job_labels(rs):
-        labels, ids = {}, {}
+        labels = {}
         for r in routed(rs):
             for j in placed(r):
                 if labelled(j):
                     labels.setdefault(j.get("name"), set()).add(runner_key(j))
-                    if j.get("runner_group_id") is not None:
-                        ids.setdefault(j.get("name"), set()).add(j["runner_group_id"])
-        return labels, ids
+        return labels, group_ids(routed(rs), labelled)
     (jb, gb), (ja, ga) = job_labels(rb), job_labels(ra)
     groups = bool(gb and ga)
     if comparable:
@@ -1562,11 +1577,16 @@ def cmd_compare(a):
         # Timing whole runs, or a job's end on the run's clock (the jobs before it count):
         # every routed first-attempt run must have run on the same set of runners, or a shift
         # between pools (under differently named jobs) could pass for a speedup.
-        sets = {frozenset(runner_key(j) for j in placed(r, True)) for r in routed(rb, False) + routed(ra, False)}
+        # Groups count here only where every job read has one saved: an older file's rows
+        # would otherwise differ from a newer file's by the field alone.
+        whole = routed(rb, False) + routed(ra, False)
+        saved = all("runner_group_id" in j for r in whole for j in placed(r, True))
+        sets = {frozenset((runner_key(j), j.get("runner_group_id") if saved else None) for j in placed(r, True))
+                for r in whole}
         if len(sets) > 1:
-            die("the runs ran on %d different sets of runners, so a shift in the mix could pass"
-                " for a speedup; pass --job to time one job, or --label with a label only one set has"
-                % len(sets))
+            die("the runs ran on %d different sets of runners (labels and runner groups), so a shift in the"
+                " mix could pass for a speedup; pass --job to time one job, or --label with a label only one"
+                " set has" % len(sets))
     # Runs that ran different jobs (a path filter, an `if:`) did different work, and a median
     # over the mix moves with the mix. A run's work, as far as the jobs list shows it, is the
     # set of jobs it ran (names with counts, so matrix legs count). With one set on each side
@@ -1932,10 +1952,13 @@ def cmd_compare(a):
             (a.job or "a job", a.label) + tuple(res["off_runner_before"]) + tuple(res["off_runner_after"]) + (
                 ": the verdict holds only if the same pushes reach %s on both sides (counts can't show a swap)"
                 % a.label if res["off_runner_before"][0] or res["off_runner_after"][0] else "",)))
-    if not groups:
-        print("runner groups: no group saved on %s (fetched by an older measure.py, or none reported), so a"
-              " shift between groups that share these labels can't be seen; fetch again to check them"
-              % ("either side" if not gb and not ga else "the before side" if not gb else "the after side"))
+    unsaved = sum(1 for r in routed(rb) + routed(ra) for j in placed(r) if "runner_group_id" not in j)
+    if not groups or unsaved:
+        print("runner groups: %s, so a shift between groups that share these labels can't all be seen;"
+              " fetch again with this measure.py to check them" % (
+                  "%d jobs compared have none saved (fetched by an older measure.py)" % unsaved if unsaved
+                  else "none reported on %s" % ("either side" if not gb and not ga
+                                                else "the before side" if not gb else "the after side")))
     print("cancelled runs, in neither the timings nor the failure rate: before %d of %d, after %d of %d%s"
           % (res["cancelled_before"] + res["cancelled_after"] + (
               " (a larger share after: slow runs being cancelled can pass for a speedup; say so)"
