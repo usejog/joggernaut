@@ -307,6 +307,7 @@ def runs_from_dir(path):
             die("%s isn't JSON; save each answer as gh api prints it" % f)
         flat = [x for v in values for x in (v if isinstance(v, list) else [v])]
         listed, total = set(), None
+        named = re.search(r"jobs-(\d+)\.json$", os.path.basename(f))
         for v in flat:
             if isinstance(v, dict) and "workflow_runs" in v:
                 for r in v["workflow_runs"]:
@@ -314,7 +315,13 @@ def runs_from_dir(path):
                     listed.add(r["id"])
                 total = max(total or 0, v.get("total_count") or 0)
             elif isinstance(v, dict) and "jobs" in v:
+                if not v["jobs"] and named:
+                    # An empty page names no run; the file name the docs give does. A run GitHub
+                    # lists no jobs for (a startup failure, one waiting for approval) is read whole.
+                    jobs.setdefault(int(named.group(1)), {})
                 for j in v["jobs"]:
+                    if not isinstance(j, dict) or "run_id" not in j or "id" not in j:
+                        die("%s: a job without run_id or id; save each answer as gh api prints it" % f)
                     jobs.setdefault(j["run_id"], {})[j["id"]] = j
                     job_total[j["run_id"]] = max(job_total.get(j["run_id"], 0), v.get("total_count") or 0)
             else:
@@ -328,15 +335,19 @@ def runs_from_dir(path):
     out, left_out = [], []
     for r in sorted(runs.values(), key=lambda r: (r.get("created_at") or "", r["id"]), reverse=True):
         js = sorted(jobs.get(r["id"], {}).values(), key=lambda j: (j.get("run_attempt", 1), j["id"]))
-        why = None
+        why, att = None, r.get("run_attempt") or 1
+        attempts = {j.get("run_attempt") or 1 for j in js}
         if r.get("status") != "completed":
             why = "not finished (%s)" % r.get("status")
-        elif not js and r.get("conclusion") != "startup_failure":
-            why = "no jobs page saved"  # a startup failure lists no jobs, and its empty page names no run
+        elif r["id"] not in jobs and r.get("conclusion") != "startup_failure":
+            why = "no jobs page saved (save it as jobs-%d.json)" % r["id"]
         elif len(js) < job_total.get(r["id"], 0):
             why = "%d of its %d jobs saved" % (len(js), job_total[r["id"]])
-        elif (r.get("run_attempt") or 1) > 1 and not any((j.get("run_attempt") or 1) < r["run_attempt"] for j in js):
-            why = "only attempt %d's jobs saved; save them with filter=all" % r["run_attempt"]
+        elif js and max(attempts) != att:
+            # The listing and the jobs were saved at different times (a rerun in between).
+            why = "its jobs are of attempt %d but the listing says attempt %d; save both again" % (max(attempts), att)
+        elif att > 1 and js and attempts == {att}:
+            why = "only attempt %d's jobs saved; save them with filter=all" % att
         if why:
             left_out.append("run %d (%s): %s" % (r["id"], r.get("conclusion") or r.get("status"), why))
             continue
@@ -586,25 +597,26 @@ def bucket(step_name, pattern=None):
     return "setup" if any(w in n for w in SETUP_WORDS) else "running"
 
 
-def is_setup(step_name, pattern):
-    return bucket(step_name, pattern) == "setup"
-
-
 def job_split(job, pattern=None):
     total = secs(job.get("started_at"), job.get("completed_at")) or 0.0
     waiting = secs(job.get("created_at"), job.get("started_at")) or 0.0
-    setup = running = cleanup = 0.0
+    # Elapsed time, not summed step time: steps can run side by side (native parallel
+    # steps), so each stretch of the job's clock goes to one bucket, running before setup
+    # before cleanup, and the parts never add up to more than the job took.
+    spans = []
     for s in job.get("steps", []):
-        d = secs(s.get("started_at"), s.get("completed_at"))
-        if d is None:
-            continue
-        b = bucket(s.get("name"), pattern)
-        if b == "cleanup":
-            cleanup += d
-        elif b == "setup":
-            setup += d
-        else:
-            running += d
+        a, b = ts(s.get("started_at")), ts(s.get("completed_at"))
+        if a is not None and b is not None and b > a:
+            spans.append((a, b, bucket(s.get("name"), pattern)))
+    got = {"running": 0.0, "setup": 0.0, "cleanup": 0.0}
+    cuts = sorted({t for a, b, _ in spans for t in (a, b)})
+    for lo, hi in zip(cuts, cuts[1:]):
+        on = {k for a, b, k in spans if a <= lo and b >= hi}
+        for k in ("running", "setup", "cleanup"):
+            if k in on:
+                got[k] += hi - lo
+                break
+    setup, running, cleanup = got["setup"], got["running"], got["cleanup"]
     other = max(0.0, total - setup - running - cleanup)
     return {"waiting": waiting, "setup": setup, "running": running,
             "cleanup": cleanup, "other": other, "total": total}
@@ -690,8 +702,8 @@ def path_split(run, pattern=None):
     return chain, parts, ties
 
 
-# A job on the slowest path whose own steps (those not matched as setup or cleanup) ran
-# under this many seconds did no work beyond checking what it needs: a gate. A choice.
+# A job on the slowest path whose steps, other than the runner's own, ran under this many
+# seconds did no work beyond checking what it needs: a candidate gate. A choice.
 GATE_SECONDS = 5.0
 
 
@@ -702,7 +714,10 @@ def tail_gates(run, chain, pattern=None):
     with no steps listed is never taken for a gate. Returns (gates, worker, ceiling); the
     ceiling is None when no other job ran."""
     k = len(chain)
-    while k and chain[k - 1].get("steps") and job_split(chain[k - 1], pattern)["running"] < GATE_SECONDS:
+    while k:
+        own = own_seconds(chain[k - 1]) if chain[k - 1].get("steps") else None
+        if own is None or own >= GATE_SECONDS:
+            break
         k -= 1
     gates, worker = chain[k:], (chain[k - 1] if k else None)
     if not gates:
@@ -715,8 +730,25 @@ def tail_gates(run, chain, pattern=None):
     return gates, worker, max(0.0, ts(chain[-1]["completed_at"]) - max(others))
 
 
+def own_seconds(job):
+    """Seconds of a job's steps other than the runner's own (Set up job, Complete job, Post
+    steps, containers): by fixed names, never by --setup-pattern's guesses, so a job whose
+    one step is "Install and run e2e tests" isn't taken for a gate."""
+    total = 0.0
+    for st in job.get("steps") or []:
+        n = (st.get("name") or "").lower()
+        if n in RUNNER_SETUP or n in RUNNER_CLEANUP or n.startswith("post "):
+            continue
+        d = secs(st.get("started_at"), st.get("completed_at"))
+        if d is None:
+            return None  # a step with no times: its work is unknown
+        total += d
+    return total
+
+
 def step_times(job, pattern=None):
-    """(name, bucket, seconds) for each step, a repeated name numbered (#2, #3)."""
+    """((name, occurrence), bucket, seconds) for each timed step: a repeated name is told
+    apart by its occurrence, never by a made-up name another step could have."""
     seen, out = {}, []
     for st in job.get("steps") or []:
         d = secs(st.get("started_at"), st.get("completed_at"))
@@ -724,8 +756,20 @@ def step_times(job, pattern=None):
             continue
         n = st.get("name") or ""
         seen[n] = seen.get(n, 0) + 1
-        out.append((n if seen[n] == 1 else "%s #%d" % (n, seen[n]), bucket(n, pattern), d))
+        out.append(((n, seen[n]), bucket(n, pattern), d))
     return out
+
+
+def steps_overlap(job):
+    """True when two of a job's steps ran at once by more than a second (whole-second stamps)."""
+    spans = sorted((ts(s.get("started_at")), ts(s.get("completed_at"))) for s in job.get("steps") or []
+                   if s.get("started_at") and s.get("completed_at"))
+    end = None
+    for a, b in spans:
+        if end is not None and a + 1 < end:
+            return True
+        end = b if end is None else max(end, b)
+    return False
 
 
 def cohorts(ok_runs):
@@ -762,13 +806,17 @@ def executions(r):
     """Each job execution of a run once. A rerun of failed jobs lists the jobs it reused
     under the new attempt too, with their old start and end: the same execution, listed
     again, so a later copy with the same name, start and end is dropped."""
-    seen, out = set(), []
-    for j in sorted(r.get("jobs", []), key=lambda j: j.get("run_attempt", 1)):
+    first, out = {}, []
+    for j in r.get("jobs", []):
         k = (j.get("name"), j.get("started_at"), j.get("completed_at"))
-        if j.get("started_at") and k in seen:
-            continue
-        seen.add(k)
-        out.append(j)
+        att = j.get("run_attempt", 1)
+        if j.get("started_at") and k in first and first[k] < att:
+            continue  # the same execution an earlier attempt lists
+        first[k] = min(first.get(k, att), att)
+    for j in r.get("jobs", []):
+        k = (j.get("name"), j.get("started_at"), j.get("completed_at"))
+        if not j.get("started_at") or first[k] == j.get("run_attempt", 1):
+            out.append(j)
     return out
 
 
@@ -898,11 +946,9 @@ def cmd_split(a):
             if worker is not None:
                 wn = worker.get("name") or ""
                 workers[wn] = workers.get(wn, 0) + 1
-                st = step_times(worker, a.setup_pattern)
-                for name, b, d in st:
+                for name, b, d in step_times(worker, a.setup_pattern):
                     worker_steps.setdefault(wn, {}).setdefault((name, b), []).append(d)
-                # Steps that add up to more than the job's time ran side by side.
-                if sum(d for _, _, d in st) > (secs(worker.get("started_at"), worker.get("completed_at")) or 0) + 1:
+                if steps_overlap(worker):
                     overlapped[wn] = overlapped.get(wn, 0) + 1
         spans = {}
         fresh = {id(j) for j in this_attempt(r)}
@@ -911,9 +957,9 @@ def cmd_split(a):
                 continue  # a skipped job took no time; counting it as 0 would halve a median
             key = "%s / %s" % (r.get("name"), j.get("name"))
             js = job_split(j, a.setup_pattern)
-            if id(j) not in fresh:
-                # Reused from an earlier attempt: GitHub queued it anew but kept its old start,
-                # so its wait reads 0. Its setup and running are real times from that attempt.
+            if id(j) not in fresh or not j.get("created_at"):
+                # Reused from an earlier attempt (GitHub queued it anew but kept its old start, so
+                # its wait reads 0), or no creation time: no wait observed. Setup and running stand.
                 js["waiting"] = None
             per_job.setdefault(key, []).append(js)
             c = caller_of(j.get("name"))
@@ -943,8 +989,9 @@ def cmd_split(a):
     out["gate_ceiling_runs"] = len(every)
     out["last_working_jobs"] = sorted(workers.items(), key=lambda kv: (-kv[1], kv[0]))
     out["last_working_job_steps_overlap"] = overlapped
-    out["last_working_job_steps"] = {wn: [{"step": n, "bucket": b, "runs": len(v), "median": median(v)}
-                                          for (n, b), v in st.items()] for wn, st in worker_steps.items()}
+    out["last_working_job_steps"] = {wn: [{"step": n if k == 1 else "%s (#%d)" % (n, k), "bucket": b,
+                                           "runs": len(v), "median": median(v)}
+                                          for ((n, k), b), v in st.items()] for wn, st in worker_steps.items()}
 
     jobs_table = []
     for key, sps in per_job.items():
@@ -1035,7 +1082,7 @@ def cmd_split(a):
     if a.json:
         print(json.dumps(out, indent=2))
         return
-    counts = ("%d of %d runs that passed or failed passed (%.0f%%), %d of them only after a rerun;"
+    counts = ("%d of %d runs that passed or failed passed (%.0f%%), %d of them on attempt 2 or later;"
               " %d cancelled, left out" % (passed, len(ended), 100 * (out["pass_rate"] or 0),
                                            out["passed_after_rerun"], out["cancelled_runs"]))
     if not ended:
@@ -1109,11 +1156,12 @@ def cmd_split(a):
         for x in out["on_slowest_path"][:5]))
     print("job that finishes last: " + ", ".join("%s (%d runs)" % kv for kv in out["slowest_path_jobs"][:3]))
     for g in out["gate_tails"][:3]:
-        print("  candidate gates at the end of the path (each ran under %gs of steps other than setup and"
-              " cleanup; confirm in the workflow): %s, in %d runs" % (GATE_SECONDS, " -> ".join(g["jobs"]), g["runs"]))
+        print("  candidate gates at the end of the path (each ran under %gs of steps besides the runner's own"
+              " set-up and clean-up; confirm in the workflow): %s, in %d runs" % (GATE_SECONDS, " -> ".join(g["jobs"]), g["runs"]))
     if out["gate_tails"]:
-        print("  without its candidate gates, and nothing else moved, a run would end sooner by a median %s"
-              " (over %d runs, 0 where there were none); a ceiling: a gate kept adds its own time back"
+        print("  without its candidate gates, every other job ending when it did, a run would end sooner by a"
+              " median %s (over %d runs, 0 where there were none): a gate kept adds its own time back, and"
+              " removing one that other jobs need lets them start sooner, which this doesn't count"
               % (fmt(out["gate_ceiling_median"]), out["gate_ceiling_runs"]))
         print("last job that did work (before the candidates): "
               + ", ".join("%s (%d runs)" % kv for kv in out["last_working_jobs"][:3]))
@@ -1122,7 +1170,7 @@ def cmd_split(a):
         print("steps of %s, the last job that did work on the path (median a run, in order)%s:" % (
             wn, "; in %d runs its steps overlapped (they ran side by side), so they don't add up"
             % overlapped[wn] if overlapped.get(wn) else ""))
-        for st in out["last_working_job_steps"][wn][:15]:
+        for st in out["last_working_job_steps"].get(wn, [])[:15]:
             print("  %-8s %-9s %s%s" % (fmt(st["median"]), st["bucket"], st["step"][:60],
                                        "" if st["runs"] == workers[wn] else "  (in %d runs)" % st["runs"]))
     if out["called_workflows"]:
@@ -1136,12 +1184,12 @@ def cmd_split(a):
         print("  %-48s n=%-4d wait %-8s setup %-8s run %-8s total %s" % (
             row["job"][:48], row["runs"], fmt(row["waiting"]), fmt(row["setup"]),
             fmt(row["running"]), fmt(row["total"])))
-    print("runner-minutes: %.0f exact; %d with every job rounded up to the minute, as GitHub bills its hosted"
+    print("runner-minutes: %.1f unrounded; %d with every job rounded up to the minute, as GitHub bills its hosted"
           " runners (jobs that passed %d, failed or timed out %d, cancelled %d, other %d)"
           % (exact, sum(mins.values()), mins["success"], mins["failure"], mins["cancelled"], mins["other"]))
     print("  in runs that failed, timed out or were cancelled: %.0f%%" % (100 * out["wasted_share"]))
-    print("  by runner label, exact / rounded up (price each label at its provider's rate and rounding): "
-          + ", ".join("%s %.0f / %d" % (k, exact_by_label[k], v) for k, v in sorted(by_label.items(), key=lambda kv: -kv[1])))
+    print("  by runner label, unrounded / rounded up (price each label at its provider's rate and rounding): "
+          + ", ".join("%s %.1f / %d" % (k, exact_by_label[k], v) for k, v in sorted(by_label.items(), key=lambda kv: -kv[1])))
     print("pushes per PR: median %g, max %s" % (out["pushes_per_pr_median"], out["pushes_per_pr_max"])
           if out["pushes_per_pr_max"] else "pushes per PR: no pull-request runs in this file")
     if out["catch_up_known"]:
@@ -1273,9 +1321,9 @@ def failed_somewhere(r, a):
                if not a.job or j.get("name") == a.job)
 
 
-def durations(runs, a, side, excluded, group_of=None, timed=None):
-    """The timed runs' seconds. With group_of (run id to its group) and timed, only runs in
-    the group timed are kept; the others are left out, named."""
+def durations(runs, a, side, excluded, keep=None):
+    """The timed runs' seconds. With keep (--ran), only runs it keeps are timed; the others
+    are left out, named."""
     vals = []
     cache = load_cache_state(a)
     for r in runs:
@@ -1287,8 +1335,8 @@ def durations(runs, a, side, excluded, group_of=None, timed=None):
             why = "conclusion %s" % r.get("conclusion")
         if not why and failed_somewhere(r, a):
             why = "a failed or rerun attempt"
-        if not why and timed is not None and group_of.get(r["id"]) != timed:
-            why = "didn't run job %s (--ran)" % timed
+        if not why and keep is not None and not keep(r):
+            why = "didn't run job %s (--ran)" % a.ran
         d = None
         if not why:
             if a.job:
@@ -1381,6 +1429,13 @@ def cmd_compare(a):
     if a.min_runs < MIN_RUNS:
         die("--min-runs can't go below %d: with fewer runs a side, a 95%% interval can"
             " hardly or never rule out no change" % MIN_RUNS)
+    if a.ran:
+        # --ran chooses the timed runs; the runner checks below read only those (the failure
+        # check still reads every run).
+        ran_job = lambda r: any(j.get("name") == a.ran for j in latest_jobs(r) if executed(j))
+        timed_only = lambda rs: [r for r in rs if ran_job(r)]
+    else:
+        ran_job, timed_only = None, (lambda rs: rs)
     if not a.label:
         def labels(rs):
             out = set()
@@ -1389,7 +1444,7 @@ def cmd_compare(a):
                     if (not a.job or j.get("name") == a.job) and j.get("labels"):
                         out.add(tuple(sorted(j["labels"])))
             return out
-        if labels(rb) != labels(ra):
+        if labels(timed_only(rb)) != labels(timed_only(ra)):
             die("runner labels differ between before and after; pass --label (and --job) "
                 "to compare the same runner")
 
@@ -1411,7 +1466,7 @@ def cmd_compare(a):
                     continue  # no labels: skipped, never on a runner
                 seen.setdefault(j.get("name"), set()).add(tuple(sorted(j["labels"])))
         return seen
-    jb, ja = job_labels(rb), job_labels(ra)
+    jb, ja = job_labels(timed_only(rb)), job_labels(timed_only(ra))
     for side, seen in (("before", jb), ("after", ja)):
         for name, sets in seen.items():
             if len(sets) > 1:
@@ -1429,7 +1484,7 @@ def cmd_compare(a):
             return {frozenset(tuple(sorted(j.get("labels") or [])) for j in latest_jobs(r) if executed(j))
                     for r in rs if workflow_matches(r, a.workflow) and r.get("conclusion") == "success"
                     and not outside_cohort(r, a, cohort_cache)}
-        sets = runner_sets(rb) | runner_sets(ra)
+        sets = runner_sets(timed_only(rb)) | runner_sets(timed_only(ra))
         if len(sets) > 1:
             die("the timed runs ran on %d different sets of runners, so a shift in the mix could pass"
                 " for a speedup; pass --job to time one job, or --label with a label only one set has"
@@ -1444,12 +1499,9 @@ def cmd_compare(a):
         return [r for r in rs if workflow_matches(r, a.workflow) and r.get("conclusion") == "success"
                 and not outside_cohort(r, a, cohort_cache) and not failed_somewhere(r, a)]
     job_set = lambda r: tuple(sorted(j.get("name") or "" for j in latest_jobs(r) if executed(j)))
-    ran_job = lambda r: any(j.get("name") == a.ran for j in latest_jobs(r) if executed(j))
-    cb, ca = candidates(rb), candidates(ra)
-    if a.ran:
-        if not any(ran_job(r) for r in cb + ca):
-            die("no successful timed run ran a job named %r" % a.ran)
-        cb, ca = [r for r in cb if ran_job(r)], [r for r in ca if ran_job(r)]
+    cb, ca = timed_only(candidates(rb)), timed_only(candidates(ra))
+    if a.ran and not cb + ca:
+        die("no successful timed run ran a job named %r" % a.ran)
 
     def mix(rs):
         m = {}
@@ -1459,23 +1511,23 @@ def cmd_compare(a):
     mb_, ma_ = mix(cb), mix(ca)
     sets = {"before": [{"jobs": list(k), "runs": n} for k, n in mb_],
             "after": [{"jobs": list(k), "runs": n} for k, n in ma_]}
-    mixed = not a.job and not a.ran and (len(mb_) > 1 or len(ma_) > 1)
+    # --job --end times a job on the run's clock, so the jobs before it count too: the same rule.
+    # --ran must leave one set a side too: runs that ran `build` can still differ in what else ran.
+    mixed = (not a.job or a.end) and (len(mb_) > 1 or len(ma_) > 1)
     if mixed:
-        def show(m):
-            return "; ".join("%d runs ran %s" % (n, ", ".join(k) or "no job") for k, n in m[:4]) + (
-                "; and %d more sets" % (len(m) - 4) if len(m) > 4 else "")
-        die("the timed runs ran different sets of jobs (a path filter or an `if:`), so a median over"
-            " the whole runs moves with the mix. Before: %s. After: %s. Name the workload with --ran JOB"
-            " (runs that ran that job; choose it before reading the after side) or time one job with --job"
-            % (show(mb_), show(ma_)))
-    graph_changed = not a.job and len(mb_) == 1 and len(ma_) == 1 and mb_[0][0] != ma_[0][0]
-    group_of, timed = None, None
+        # Only the before side's sets are shown, so the workload is chosen without the after times.
+        show = "; ".join("%d runs ran %s" % (n, ", ".join(k) or "no job") for k, n in mb_[:4]) + (
+            "; and %d more sets" % (len(mb_) - 4) if len(mb_) > 4 else "")
+        die("the timed runs%s ran different sets of jobs (a path filter or an `if:`), so a median %s"
+            " moves with the mix (before: %d sets, after: %d). Before: %s. Name a workload with --ran JOB that"
+            " leaves one set a side (runs that ran that job, chosen from the before side), or time one job's"
+            " own duration with --job"
+            % (" that ran %s" % a.ran if a.ran else "", "of a job's end on the run's clock" if a.end
+               else "over the whole runs", len(mb_), len(ma_), show))
+    graph_changed = (not a.job or a.end) and len(mb_) == 1 and len(ma_) == 1 and mb_[0][0] != ma_[0][0]
     excluded = []
-    if a.ran:
-        group_of = {r["id"]: (a.ran if ran_job(r) else "none") for r in rb + ra}
-        timed = a.ran
-    before = durations(rb, a, "before", excluded, group_of, timed)
-    after = durations(ra, a, "after", excluded, group_of, timed)
+    before = durations(rb, a, "before", excluded, ran_job)
+    after = durations(ra, a, "after", excluded, ran_job)
 
     # The failure check and the cost read every run of the workflow and event: the
     # runner, job and cache filters choose only which runs are timed, so none of them can
@@ -1555,9 +1607,7 @@ def cmd_compare(a):
                               % ((runs,) + fa + fb))
         elif hi < 0 and moved < 0:
             res["verdict_code"], res["verdict"] = "faster", "median faster (%s)" % runs
-            if graph_changed:
-                res["verdict"] += ("; the jobs changed between the sides, so compare the tests by name"
-                                   " before calling it faster")
+
         elif lo > 0 and moved > 0:
             res["verdict_code"], res["verdict"] = "slower", "median slower (%s)" % runs
         elif hi < 0 or lo > 0:
@@ -1567,6 +1617,13 @@ def cmd_compare(a):
         else:
             res["verdict_code"] = "no_change_yet"
             res["verdict"] = "no measurable change yet with %s; more runs can tighten this" % sides
+    if graph_changed and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
+        # One set a side, different sets: the change altered the jobs, or the mix of pull
+        # requests did. Never a plain verdict: only the workflow's diff can say which.
+        res["verdict_code"] += "_jobs_changed"
+        res["verdict"] += ("; but the sides ran different jobs: a speed verdict holds only if the workflow's"
+                           " diff explains every difference and every removed job's work still runs"
+                           " (compare the tests by name); otherwise the mix of work changed")
     hidden = res["verdict_code"] == "not_enough_runs"
     if hidden:
         # No timings until there are enough runs, so a longer window is chosen without
@@ -1581,12 +1638,8 @@ def cmd_compare(a):
         return
     print("measure: " + what + (" | cache: %s" % a.cache if a.cache else ""))
     if graph_changed:
-        print("the change altered which jobs run: before, every timed run ran %s; after, %s. Compare the"
-              " tests by name (measure.py tests) to show no work was lost"
+        print("the sides ran different jobs: before, every timed run ran %s; after, %s"
               % (", ".join(mb_[0][0]), ", ".join(ma_[0][0])))
-    if a.ran and (len(mb_) > 1 or len(ma_) > 1):
-        print("runs that ran %s still ran %d sets of jobs before and %d after (--json lists them)"
-              % (a.ran, len(mb_), len(ma_)))
     if hidden:
         print("before: %d runs\nafter:  %d runs\ntimings: not shown until there are %d a side, so a longer"
               " window is chosen without seeing them" % (len(before), len(after), a.min_runs))
@@ -1605,7 +1658,7 @@ def cmd_compare(a):
         if need is not None and fa[0] < need else "")))
     if mb and ma and not hidden:
         print("runner-minutes per run (every job and attempt, cancelled runs included): median %g before,"
-              " %g after rounded up per job, as GitHub bills its hosted runners; %.1f before, %.1f after exact"
+              " %g after rounded up per job, as GitHub bills its hosted runners; %.1f before, %.1f after unrounded"
               % (median(mb), median(ma), res["runner_minutes_exact_median_before"],
                  res["runner_minutes_exact_median_after"]))
         if res["runner_minutes_a_day_before"] and res["runner_minutes_a_day_after"]:
@@ -1856,52 +1909,93 @@ CROSS_PRS = 3
 
 
 def failed_tests(folder, short=False):
-    """One run's test evidence, from every file under its folder (one subfolder per artifact
-    or attempt is fine): JUnit XML, and any failed.txt, one failing test name a line, for a
-    suite that keeps no report. Returns (failed names, names JUnit shows passed)."""
-    failed, passed, xml = set(), set(), False
+    """One run's test evidence, from every file under its folder: JUnit XML, and any
+    failed.txt, one failing test name a line, for a suite that keeps no report. Returns
+    (failed names, names a JUnit report shows passed, XML files that aren't JUnit), or None
+    when the folder holds no evidence at all. A test that passed only on a retry inside the
+    job (Surefire's flakyFailure and the like) failed. A test's name leaves out folders named
+    by number or attempt (artifact ids, attempts), so the same test matches across runs."""
+    failed, passed, skipped, found = set(), set(), [], False
     for root, _, files in os.walk(folder):
-        xml = xml or any(f.endswith(".xml") for f in files)
-        if "failed.txt" in files:
-            with open(os.path.join(root, "failed.txt")) as fh:
-                failed.update(l.strip() for l in fh if l.strip())
-    if xml:
-        res, _, _ = junit_results(folder)
-        for t, outs in res.items():
-            name = json.loads(t)[-1] if short else show_test(t)
-            if any(o in ("failed", "errored") for o in outs):
-                failed.add(name)
-            elif "passed" in outs:
-                passed.add(name)
-    return failed, passed - failed
+        for f in sorted(files):
+            path = os.path.join(root, f)
+            if f == "failed.txt":
+                found = True
+                with open(path) as fh:
+                    failed.update(l.strip() for l in fh if l.strip())
+                continue
+            if not f.endswith(".xml"):
+                continue
+            try:
+                root_ = ET.parse(path).getroot()
+            except ET.ParseError:
+                root_ = None
+            # Not JUnit (coverage.xml, say), or JUnit with no cases: no evidence; named, not read.
+            if (root_ is None or local(root_.tag) not in ("testsuite", "testsuites")
+                    or not any(local(e.tag) == "testcase" for e in root_.iter())):
+                skipped.append(os.path.relpath(path, folder))
+                continue
+            found = True
+            parts = [x for x in os.path.relpath(path, folder).split(os.sep)[:-1]
+                     if not re.match(r"^(?:\d+|attempt[-_ ]?\d+)$", x, re.I)]
+            where = SHARD.sub(lambda m: m.group(1) + "#", "/".join(parts + [f[:-4]]))
+            res, errs, _ = junit_results(path)
+            name = lambda fields: fields[-1] if short else show_test(json.dumps([where] + fields[1:]))
+            for t, outs in res.items():
+                fields = json.loads(t)
+                if any(o in ("failed", "errored") for o in outs):
+                    failed.add(name(fields))
+                elif "passed" in outs:
+                    passed.add(name(fields))
+            for k in errs:
+                fields = json.loads(k)
+                if fields[-1] == "(retried)":
+                    failed.add(name(fields[:-1]))
+    if not found:
+        return None
+    return failed, passed - failed, skipped
 
 
 def cmd_flaky(a):
-    runs = [r for r in read_runs(a.input) if r.get("conclusion") in ("success", "cancelled") + FAILED]
+    runs = [r for r in read_runs(a.input) if r.get("created_at")
+            and r.get("conclusion") in ("success", "cancelled") + FAILED]
     by_id = {r["id"]: r for r in runs}
-    pr_of = lambda r: tuple(r.get("pull_requests") or []) or (r.get("head_repo"), r.get("head_branch"))
-    reports, stray = {}, []
+    # Who a failure belongs to: the pull request, or for a push, the branch pushed.
+    pr_of = lambda r: (("pr",) + tuple(r.get("pull_requests") or []) if r.get("pull_requests")
+                       else ("branch", r.get("head_repo"), r.get("head_branch")))
+    # Runs are lined up per workflow file and per base (the branch a pull request targets, or
+    # the branch pushed): a base that broke breaks its own line only.
+    line_of = lambda r: (r.get("path") or r.get("name") or "",
+                         tuple(r.get("pull_request_bases") or []) if (r.get("event") or "").startswith("pull_request")
+                         else ("push", r.get("head_branch")))
     if not os.path.isdir(a.reports):
         die("%s isn't a folder" % a.reports)
+    reports, empty, not_junit = {}, [], []
     for d in sorted(os.listdir(a.reports)):
         folder = os.path.join(a.reports, d)
         if not os.path.isdir(folder):
             continue
-        if not d.isdigit() or int(d) not in by_id:
-            stray.append(d)
+        if not d.isdigit():
+            die("%s: report folders are named by run id" % folder)
+        if int(d) not in by_id:
+            die("%s holds reports of run %s, which isn't among the finished runs read from %s; read that run"
+                " too, or move its folder out, so its evidence isn't lost" % (folder, d, a.input))
+        got = failed_tests(folder, a.short)
+        if got is None:
+            empty.append(d)
             continue
-        reports[int(d)] = failed_tests(folder, a.short)
+        reports[int(d)] = got[:2]
+        not_junit += [os.path.join(d, x) for x in got[2]]
     if not reports:
-        die("no report folders named by run id in %s match a run in %s" % (a.reports, a.input))
+        die("no report in %s for any run in %s" % (a.reports, a.input))
     tests = {}
     for rid, (failed, _) in reports.items():
         for t in failed:
-            tests.setdefault((by_id[rid].get("name") or "", t), []).append(rid)
-    order = {}
+            tests.setdefault((line_of(by_id[rid])[0], t), []).append(rid)
+    lines = {}
     for r in runs:
-        if r.get("conclusion") != "cancelled":
-            order.setdefault(r.get("name") or "", []).append(r)
-    for rs in order.values():
+        lines.setdefault(line_of(r), []).append(r)
+    for rs in lines.values():
         rs.sort(key=lambda r: (ts(r["created_at"]), r["id"]))
     rows = []
     for (wf, t), fails in tests.items():
@@ -1912,45 +2006,58 @@ def cmd_flaky(a):
                 return "fail"
             if r["id"] in reports:
                 return "pass" if t in reports[r["id"]][1] else "none"
+            # A failed run whose reports weren't read might have failed the test; a run that
+            # passed or was cancelled with none read is no evidence either way.
             return "unread" if r.get("conclusion") in FAILED else "none"
-        # Stretches between passes of this test; one stands alone when every failure and
-        # unread failed run in it is one pull request's, with a pass on both sides.
-        alone, stretch, seen_pass = set(), [], False
-        for r in order[wf] + [None]:
-            st = state(r) if r is not None else "end"
-            if st in ("fail", "unread"):
-                stretch.append(r)
-            elif st in ("pass", "end"):
-                owners = {pr_of(x) for x in stretch}
-                if seen_pass and st == "pass" and len(owners) == 1 and any(x["id"] in fail_set for x in stretch):
-                    alone.add(next(iter(owners)))
-                stretch, seen_pass = [], True
-        prs = {pr_of(by_id[i]) for i in fails}
-        rows.append({"workflow": wf, "test": t, "failed_runs": len(fails), "pull_requests": len(prs),
+        # Between two passes of the test, a stretch whose failures and unread failed runs are
+        # all one owner's stands alone.
+        alone = {}
+        for key, seq in lines.items():
+            if key[0] != wf:
+                continue
+            stretch, seen_pass = [], False
+            for r in seq:
+                st = state(r)
+                if st in ("fail", "unread"):
+                    stretch.append(r)
+                elif st == "pass":
+                    owners = {pr_of(x) for x in stretch}
+                    hit = [x["id"] for x in stretch if x["id"] in fail_set]
+                    if seen_pass and len(owners) == 1 and hit:
+                        alone.setdefault(next(iter(owners)), []).extend(hit)
+                    stretch, seen_pass = [], True
+        owners = sorted({pr_of(by_id[i]) for i in fails}, key=str)
+        rows.append({"workflow": wf, "test": t, "failed_runs": len(fails), "pull_requests": len(owners),
                      "alone_on_pull_requests": len(alone),
                      "failed_in_runs_that_passed": sum(1 for i in fails if by_id[i].get("conclusion") == "success"),
-                     "recurring": len(alone) >= CROSS_PRS})
+                     "recurring": len(alone) >= CROSS_PRS,
+                     "failed_run_ids": sorted(fails),
+                     "alone": [{"owner": list(k), "runs": sorted(v)} for k, v in sorted(alone.items(), key=str)]})
     rows.sort(key=lambda x: (-x["alone_on_pull_requests"], -x["failed_runs"], x["workflow"], x["test"]))
     unread = sum(1 for r in runs if r.get("conclusion") in FAILED and r["id"] not in reports)
     if a.json:
-        print(json.dumps({"tests": rows, "failed_runs_without_reports": unread, "stray_folders": stray}, indent=2))
+        print(json.dumps({"tests": rows, "failed_runs_without_reports": unread, "empty_report_folders": empty,
+                          "xml_not_junit": not_junit}, indent=2))
         return
     print("reports read for %d runs; %d failed runs have none (unknown: never counted as a pass)"
           % (len(reports), unread))
-    if stray:
-        print("  folders matching no run in %s, not read: %s" % (a.input, ", ".join(stray[:10])))
-    print("tests that failed, by the pull requests where a failure stood alone (a report showing the test"
-          " passed before and after it, no other pull request failing between), most first:")
+    if empty:
+        print("  folders with no report in them, counted as unread: %s" % ", ".join(empty[:10]))
+    if not_junit:
+        print("  XML files that aren't JUnit, not read: %s" % ", ".join(not_junit[:10]))
+    print("tests that failed, by the pull requests (or pushed branches) where a failure stood alone (a"
+          " report showing the test passed before and after it, on the same workflow and base, no one else's"
+          " run failing it between), most first:")
     for x in rows[:a.top]:
         print("  %s%s :: %s  failed in %d runs on %d pull requests; alone on %d; %d of the runs passed in"
               " the end (a retry or a rerun)" % ("RECURRING (flake candidate)  " if x["recurring"] else "",
                                                   x["workflow"], x["test"], x["failed_runs"], x["pull_requests"],
                                                   x["alone_on_pull_requests"], x["failed_in_runs_that_passed"]))
     if len(rows) > a.top:
-        print("  and %d more (--json lists every test)" % (len(rows) - a.top))
+        print("  and %d more (--json lists every test, with its runs)" % (len(rows) - a.top))
     if any(x["recurring"] for x in rows):
         print("a recurring test is a candidate, not a confirmed flake: check that those pull requests didn't"
-              " change what it tests, then reproduce it")
+              " change what it tests (--json lists them), then reproduce it")
 
 
 # ---------------------------------------------------------------- cachelog
@@ -2112,8 +2219,8 @@ def main(argv=None):
     s.add_argument("--json", action="store_true")
 
     c = sub.add_parser("compare", help="before against after, with a verdict")
-    c.add_argument("--before", required=True, help="a JSONL file fetch wrote, or a folder of saved gh api answers")
-    c.add_argument("--after", required=True, help="a JSONL file fetch wrote, or a folder of saved gh api answers")
+    c.add_argument("--before", required=True, help="a JSONL file fetch wrote (not a folder of saved answers)")
+    c.add_argument("--after", required=True, help="a JSONL file fetch wrote (not a folder of saved answers)")
     c.add_argument("--workflow")
     c.add_argument("--job", help="compare one job's duration instead of the run's")
     c.add_argument("--end", action="store_true", help="with --job: time from the run's start to the job's"

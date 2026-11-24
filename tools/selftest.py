@@ -1388,8 +1388,8 @@ with tempfile.TemporaryDirectory() as t:
     a_ = side("a.jsonl", [_work(100 + i, False) for i in range(5)])
     r = run([M, "compare", "--before", b, "--after", a_, "--label", "ubuntu-latest", "--json"])
     got = json.loads(r.stdout) if r.returncode == 0 else {}
-    if not got.get("jobs_changed") or "jobs changed" not in got.get("verdict", ""):
-        bad.append("compare: a side that stopped running a job must say the jobs changed\n" + r.stdout + r.stderr)
+    if not got.get("jobs_changed") or got.get("verdict_code") != "faster_jobs_changed" or "different jobs" not in got.get("verdict", ""):
+        bad.append("compare: sides that ran different jobs must never give a plain verdict\n" + r.stdout + r.stderr)
     b = side("b2.jsonl", [_work(i, True) for i in range(5)] + [_work(10 + i, False) for i in range(3)])
     a_ = side("a2.jsonl", [_work(100 + i, True, integ=60) for i in range(5)] + [_work(110 + i, False) for i in range(5)])
     r = run([M, "compare", "--before", b, "--after", a_, "--label", "ubuntu-latest"])
@@ -1440,6 +1440,171 @@ for seq, alone, label in (
     got, r = _flaky(seq)
     if got.get("alone_on_pull_requests") != alone or got.get("recurring") != (alone >= 3):
         bad.append("flaky: %s should stand alone on %d pull requests: %r\n%s" % (label, alone, got, r.stderr))
+
+
+# ---- v0.3 review regressions (Opus and Codex Astra on 20e9b66c)
+
+# compare: --ran must leave one job set a side, and --job --end reads the jobs before it.
+with tempfile.TemporaryDirectory() as t:
+    def side(name, rows):
+        open(t + "/" + name, "w").write("".join(json.dumps(x) + "\n" for x in rows))
+        return t + "/" + name
+    def gate_after(x):
+        end = max(mm.ts(j["completed_at"]) for j in x["jobs"]) - 1793000000
+        x["jobs"].append(_job("required", end, end + 1, end + 11))
+        return x
+    b = side("b.jsonl", [gate_after(_work(i, i < 9)) for i in range(10)])
+    a_ = side("a.jsonl", [gate_after(_work(100 + i, i < 1)) for i in range(10)])
+    for extra in (["--ran", "build"], ["--job", "required", "--end"]):
+        r = run([M, "compare", "--before", b, "--after", a_, "--label", "ubuntu-latest"] + extra)
+        if r.returncode == 0 or "different sets of jobs" not in r.stderr:
+            bad.append("compare %s: a change in the work mix passed for a speedup\n%s%s" % (extra, r.stdout, r.stderr))
+    r = run([M, "compare", "--before", b, "--after", a_, "--label", "ubuntu-latest", "--job", "required", "--json"])
+    if r.returncode != 0:
+        bad.append("compare --job without --end times the job's own duration, whatever ran before it\n" + r.stderr)
+
+# Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
+two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
+if mm.run_minutes(two) != 2 or abs(mm.run_minutes(two, True) - 2.0) > 1e-9:
+    bad.append("run_minutes: same-name legs in one attempt are two executions: %r" % mm.run_minutes(two))
+
+
+# Steps side by side: detected by intervals, and the job's parts are elapsed time.
+def _job_steps(spans, end):
+    return {"created_at": _at(0), "started_at": _at(0), "completed_at": _at(end), "name": "j",
+            "steps": [{"name": n, "started_at": _at(a), "completed_at": _at(b)} for n, a, b in spans]}
+if not mm.steps_overlap(_job_steps([("a", 0, 50), ("b", 20, 60)], 120)):
+    bad.append("steps_overlap: 0-50 and 20-60 overlap")
+if mm.steps_overlap(_job_steps([("a", 0, 50), ("b", 50, 60), ("c", 60, 61)], 120)):
+    bad.append("steps_overlap: steps one after another don't overlap")
+got = mm.job_split(_job_steps([("Set up job", 0, 2), ("a", 2, 60), ("b", 2, 60)], 60))
+if got["running"] != 58 or got["setup"] != 2 or got["other"] != 0:
+    bad.append("job_split: parallel steps must count elapsed time, not their sum: %r" % got)
+
+# Gates: a long job whose one step has a setup word, or a step with no times, is never a gate.
+for steps, label in (([("Set up job", 2), ("Install and run e2e tests", 600)], "a setup word"),):
+    ch = [_steps_job("work", 0, 1, [("Set up job", 1), ("Test", 100)]), _steps_job("e2e", 102, 103, steps)]
+    if mm.tail_gates(_run(0, ch, 0), ch)[0]:
+        bad.append("tail_gates: a job with %s was taken for a gate" % label)
+ch = [_steps_job("work", 0, 1, [("Test", 100)]), _steps_job("e2e", 102, 103, [("Run", 120)])]
+ch[1]["steps"][0]["completed_at"] = None
+if mm.tail_gates(_run(0, ch, 0), ch)[0]:
+    bad.append("tail_gates: a job with an untimed step was taken for a gate")
+with tempfile.TemporaryDirectory() as t:
+    x = _run(0, [_job("build", 0, 1, 100)], 0)
+    x["jobs"][0]["steps"] = []
+    open(t + "/s.jsonl", "w").write(json.dumps(x) + "\n")
+    r = run([M, "split", "--in", t + "/s.jsonl"])
+    if r.returncode != 0:
+        bad.append("split: a last job with no steps listed crashed the text\n" + r.stderr[-800:])
+
+# Offline reading: a listing and jobs saved at different attempts are named; a run GitHub lists
+# no jobs for (startup failure on a rerun, a fork run waiting for approval) is read whole from
+# its empty, named page; a short jobs page is named; a job without run_id is refused.
+with tempfile.TemporaryDirectory() as t:
+    src = [json.loads(l) for l in open(E + "/ci-diagnose/repo/ci-history/runs.jsonl") if l.strip()][:30]
+    recs = copy.deepcopy(src)
+    recs[0]["run_attempt"] = 2                                     # listing says 2, jobs are attempt 1
+    recs[1]["conclusion"], recs[1]["run_attempt"], recs[1]["jobs"] = "startup_failure", 2, []
+    recs[2]["conclusion"], recs[2]["jobs"] = "action_required", []
+    _save_dir(t + "/d", recs)
+    r = run([M, "split", "--runs-dir", t + "/d", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if ("listing says attempt 2" not in r.stderr or got.get("runs") != 29 or str(recs[1]["id"]) in r.stderr
+            or str(recs[2]["id"]) in r.stderr):
+        bad.append("split --runs-dir: attempts and empty job pages misread (%r runs)\n%s" % (got.get("runs"), r.stderr))
+    short = copy.deepcopy(src[:3])
+    _save_dir(t + "/s", short)
+    p_ = t + "/s/jobs-%d.json" % short[0]["id"]
+    pages = mm.json_values(open(p_).read())
+    flat = [x for v in pages for x in (v if isinstance(v, list) else [v])]
+    open(p_, "w").write(json.dumps(flat[:1]))                       # the second page lost
+    r = run([M, "split", "--runs-dir", t + "/s", "--json"])
+    if "jobs saved" not in r.stderr:
+        bad.append("split --runs-dir: a run with a jobs page missing should be named\n" + r.stderr)
+    open(t + "/s/bad.json", "w").write(json.dumps({"total_count": 1, "jobs": [{"id": 1}]}))
+    r = run([M, "split", "--runs-dir", t + "/s"])
+    if r.returncode == 0 or "without run_id" not in r.stderr:
+        bad.append("split --runs-dir: a job without run_id should be refused by name\n" + r.stderr)
+# flaky also starts no process with a folder of saved answers
+with tempfile.TemporaryDirectory() as t:
+    recs = [json.loads(l) for l in open(E + "/ci-diagnose/repo/ci-history/runs.jsonl") if l.strip()][:5]
+    _save_dir(t + "/d", recs)
+    os.makedirs(t + "/rep/%d" % recs[0]["id"])
+    open(t + "/rep/%d/failed.txt" % recs[0]["id"], "w").write("T\n")
+    r = subprocess.run([sys.executable, "-c", NO_PROCESS, M, "flaky", "--runs-dir", t + "/d", "--reports", t + "/rep"],
+                       capture_output=True, text=True)
+    if r.returncode != 0 or "PROCESS" in r.stderr or ":: T" not in r.stdout:
+        bad.append("flaky --runs-dir: should read failed.txt and start no process\n" + r.stdout + r.stderr[-1500:])
+
+
+# flaky, the evidence: per workflow file and base; empty folders aren't evidence; a report of a
+# run not read stops it; artifact folders by id don't change a test's name; a retry that passed
+# is a failure; an XML that isn't JUnit is named and skipped.
+def _flaky_rows(rows, reports, *extra):
+    with tempfile.TemporaryDirectory() as t:
+        open(t + "/runs.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in rows))
+        os.makedirs(t + "/rep")
+        for rid, files in reports.items():
+            for rel, text in files.items():
+                os.makedirs(os.path.dirname(t + "/rep/%d/%s" % (rid, rel)), exist_ok=True)
+                open(t + "/rep/%d/%s" % (rid, rel), "w").write(text)
+        r = run([M, "flaky", "--in", t + "/runs.jsonl", "--reports", t + "/rep", "--json"] + list(extra))
+        return (json.loads(r.stdout) if r.returncode == 0 else None), r
+
+
+def _rep(status, retried=False):
+    inner = "<failure/>" if status == "f" else ("<flakyFailure/>" if retried else "")
+    return ('<testsuite name="s"><testcase classname="c" name="T">%s</testcase></testsuite>' % inner)
+
+
+def _fr(i, pr, ok, base="main", path=".github/workflows/ci.yml", event="pull_request"):
+    x = _run(i, [_job("test", i * 100, i * 100 + 2, i * 100 + 50)], i * 100)
+    x.update(pull_requests=[pr] if event == "pull_request" else [], conclusion="success" if ok else "failure",
+             pull_request_bases=[base], path=path, event=event, head_branch="b%d" % pr)
+    return x
+
+
+# A release branch broken for three of its pull requests, main's passing between them.
+rows, reps = [], {}
+for i, (pr, base, st) in enumerate([(1, "main", "p"), (10, "release", "p"), (2, "main", "p"), (10, "release", "f"),
+                                    (3, "main", "p"), (11, "release", "f"), (4, "main", "p"), (12, "release", "f"),
+                                    (5, "main", "p"), (13, "release", "p")]):
+    rows.append(_fr(i, pr, st == "p", base))
+    reps[rows[-1]["id"]] = {"r.xml": _rep(st)}
+got, r = _flaky_rows(rows, reps)
+t_ = [x for x in (got or {"tests": []})["tests"] if x["test"].endswith("T")]
+if not t_ or t_[0]["recurring"] or t_[0]["alone_on_pull_requests"] != 0:
+    bad.append("flaky: a broken release branch was taken for a recurring flake: %r\n%s" % (t_, r.stderr))
+# An empty folder for an unread failed run isn't evidence: it stays unread.
+rows = [_fr(0, 1, True), _fr(1, 2, False), _fr(2, 3, False), _fr(3, 4, True)]
+reps = {rows[0]["id"]: {"r.xml": _rep("p")}, rows[1]["id"]: {"r.xml": _rep("f")}, rows[3]["id"]: {"r.xml": _rep("p")}}
+base_got, _ = _flaky_rows(rows, reps)
+os_got, r = _flaky_rows(rows, dict(list(reps.items()) + [(rows[2]["id"], {"sub/.keep": ""})]))
+if not base_got or not os_got or base_got["tests"][0]["alone_on_pull_requests"] != 0 \
+        or os_got["tests"][0]["alone_on_pull_requests"] != 0:
+    bad.append("flaky: an empty report folder turned an unread failed run into evidence\n" + r.stderr)
+# A report of a run not read stops it.
+got, r = _flaky_rows(rows[:2], dict(list(reps.items())[:2] + [(999999, {"r.xml": _rep("f")})]))
+if got is not None or "isn't among the finished runs" not in r.stderr:
+    bad.append("flaky: a report of a run not read should stop it\n" + r.stderr)
+# Artifact folders by id, a retry that passed, and an XML that isn't JUnit.
+rows = [_fr(i, i + 1, True) for i in range(5)]
+reps = {rows[0]["id"]: {"410/junit.xml": _rep("p")}, rows[1]["id"]: {"411/junit.xml": _rep("p", retried=True),
+                                                                      "411/coverage.xml": "<coverage/>"},
+        rows[2]["id"]: {"412/junit.xml": _rep("p")}, rows[3]["id"]: {"413/attempt-2/junit.xml": _rep("p", True)},
+        rows[4]["id"]: {"414/junit.xml": _rep("p")}}
+got, r = _flaky_rows(rows, reps)
+t_ = (got or {"tests": []})["tests"]
+if (len(t_) != 1 or t_[0]["failed_runs"] != 2 or t_[0]["alone_on_pull_requests"] != 2
+        or not any("coverage.xml" in x for x in got["xml_not_junit"])):
+    bad.append("flaky: artifact folders, retries or a non-JUnit XML misread: %r\n%s" % (got, r.stderr))
+# Two workflow files with one display name keep their own lines.
+rows = [_fr(0, 1, True, path="a.yml"), _fr(1, 2, False, path="b.yml"), _fr(2, 3, True, path="a.yml")]
+reps = {x["id"]: {"r.xml": _rep("p" if x["conclusion"] == "success" else "f")} for x in rows}
+got, r = _flaky_rows(rows, reps)
+if not got or got["tests"][0]["alone_on_pull_requests"] != 0:
+    bad.append("flaky: another workflow file's passes stood around a failure: %r" % got)
 
 
 # every check.py fails on its untouched sample (the planted cause is there)

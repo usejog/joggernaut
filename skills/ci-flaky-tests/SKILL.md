@@ -74,7 +74,12 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    `failed.txt` of failing test names taken from the check annotations or
    the log where there is no report. `gh run download` keeps one artifact
    per name, so for a run with reruns download each artifact by id into its
-   own subfolder, or a passing attempt's report replaces the failed one's.
+   own subfolder named by that number (`.joggernaut/reports/RUN_ID/ARTIFACT_ID/`),
+   or a passing attempt's report replaces the failed one's; folders named by
+   a number or `attempt-N` don't become part of a test's name. A test that
+   passed only on a retry inside the job (Surefire's `flakyFailure`) counts
+   as failing there. An XML file that isn't JUnit (coverage) is named and
+   skipped; an empty folder is no evidence.
    Read failed runs, and the runs around their failures, so a pass on both
    sides of each failure can show. Then:
 
@@ -82,9 +87,11 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    python3 scripts/measure.py flaky --in .joggernaut/before.jsonl --reports .joggernaut/reports
    ```
 
-   A failure stands alone when a report shows the test passing before it
-   and after it, with no other pull request's run between them failing it
-   (or failed with no report read): one pull request's own change fails the
+   Runs are lined up per workflow file and per base (the branch a pull
+   request targets, or the branch pushed). A failure stands alone when a
+   report shows the test passing before it and after it on that line, with
+   no other pull request's run between them failing it (or failed with no
+   report read): one pull request's own change fails the
    test on that pull request only, and a broken base fails it on every run
    until fixed. A test that stood alone on 3 or more pull requests (a
    choice: two can share a change) is **recurring**, a candidate. A green

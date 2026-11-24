@@ -124,11 +124,14 @@ different work, so a total wait compares the selections, not the CI:
    overlaps another. An empty commit leaves the pull request's diff alone,
    so the selection stays the same, unless the selector compares only the
    latest push. Keep every run, failed and cancelled included.
-2. **Before side**: recent runs of the same jobs on the base branch.
+2. **Before side**: other pull requests' runs into the same base from
+   before the change, with the same event (step 1's baseline), so `compare`
+   reads both sides the same way.
 3. **Compare jobs whose work doesn't depend on the selection** (a full
-   typecheck, say), each by `compare --job NAME` and by its end on the
-   run's clock, `compare --job NAME --end`: the change can make one job
-   finish sooner and another later. Check with `MEASURE tests` that each job
+   typecheck, say), each by `compare --job NAME`, and, where the jobs before
+   it don't depend on the selection either, by its end on the run's clock,
+   `compare --job NAME --end` (it refuses when the runs ran different sets
+   of jobs): the change can make one job finish sooner and another later. Check with `MEASURE tests` that each job
    ran the same tests on both sides. Report the total wait beside them as a
    description only.
 
@@ -190,11 +193,14 @@ under a merge-commit policy, ask before adding them.
    ```
 
    If the timed runs ran different sets of jobs within a side (a path
-   filter, an `if:`), it refuses a whole-run verdict and lists the sets: pass
-   `--ran JOB` (runs that ran that job, named in the baseline before you read
-   the after side) or `--job`. If each side ran one set but the sets differ,
-   the change altered the jobs, and it says so: step 3 (the tests by name)
-   is what shows nothing was lost.
+   filter, an `if:`), it refuses a whole-run verdict and lists the before
+   side's sets: pass `--ran JOB` (runs that ran that job, named in the
+   baseline before you read the after side, leaving one set a side) or
+   `--job`. If each side ran one set but the sets differ, the verdict ends
+   in `_jobs_changed` and is never a plain one: it holds only if the
+   workflow's diff explains every difference and every removed job's work
+   still runs (step 3, the tests by name); otherwise the mix of work
+   changed, not the CI.
 
    It prints the medians, the slowest runs (below 20 runs a side, the
    smaller side's slowest run and the larger side's typical slowest of that

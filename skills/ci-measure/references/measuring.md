@@ -145,20 +145,24 @@ work, as far as the jobs list shows it, as the set of jobs it ran (names
 with counts, so matrix legs count):
 
 - one set on both sides: whole runs compare as before;
-- one set on each side, different between them: the change altered the
-  jobs (folded, split or renamed them). The whole runs compare, and the
-  output says the jobs changed: the tests compared by name (below) are what
-  show no work was lost;
+- one set on each side, different between them: the verdict ends in
+  `_jobs_changed` (`faster_jobs_changed`, say) and is never a plain one. It
+  holds only if the workflow's diff explains every difference (jobs
+  folded, split or renamed) and every removed job's work still runs (the
+  tests compared by name, below); otherwise the mix of pull requests
+  changed, not the CI;
 - several sets within a side (a path filter, an `if:`): `compare` refuses a
   whole-run verdict, since the median would move with the mix, and lists
-  each side's sets. Name the workload with `--ran JOB` (only runs that ran
-  that job; write it into the baseline before reading the after side), or
-  time one job with `--job`.
+  the before side's sets. Name the workload with `--ran JOB` (only runs that
+  ran that job; write it into the baseline before reading the after side),
+  which must leave one set a side, or time one job's own duration with
+  `--job`.
 
 The same jobs can still run different tests (per-pull-request test
 selection); only `MEASURE tests` shows that. `--job NAME --end` times that
 job from the run's start to its end, on the run's clock (its queue and the
-jobs before it count), not the job's own duration.
+jobs before it count), not the job's own duration, so the same job-set rule
+applies to it.
 
 `compare` needs at least 5 successful comparable runs a side. Those are the
 runs it times; `--label`, `--job` and `--cache` choose them. The failure rate

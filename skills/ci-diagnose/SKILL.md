@@ -114,7 +114,7 @@ in `references/measuring.md`.
    `python3 scripts/measure.py split --in .joggernaut/before.jsonl`. It
    reports:
    - first, how many runs passed, of the runs that passed or failed (and how
-     many passed only on a rerun; cancelled runs left out). When under half
+     many of those passed on attempt 2 or later; cancelled runs left out). When under half
      passed it says "MOST RUNS FAIL": the PR wait below describes only the
      runs that passed, so the report opens with why runs fail (step 6);
    - the PR wait, at the median and the slowest 5% of successful runs (the
@@ -160,10 +160,11 @@ in `references/measuring.md`.
      approval, and a long "before its first job" or "between its jobs" is
      time no job in the list explains (an approval, a concurrency group);
      say which, from the workflow, before naming a cause. At the path's
-     end, `split` marks candidate gates (trailing jobs whose own steps ran
-     under 5 s, a name only: confirm each in the workflow), how much sooner
-     a run would end without them (a median over every run, 0 where there
-     were none), and the last job that did work before them, with its steps
+     end, `split` marks candidate gates (trailing jobs whose steps, besides
+     the runner's own set-up and clean-up, ran under 5 s; confirm each in the
+     workflow), how much sooner a run would end without them with every other
+     job ending when it did (a median over every run, 0 where there were
+     none; a gate other jobs need can save more), and the last job that did work before them, with its steps
      in order and their median seconds (causes 26 and 27). With a called
      workflow, that is the job to look at, not the caller's gate;
    - every job's median split over the runs that ran it, called workflows'
