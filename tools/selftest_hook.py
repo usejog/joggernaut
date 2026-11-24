@@ -12,8 +12,10 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "skills/ci-guard/scripts/pre-push")
 # The template's own checks run against a stub pnpm: each records its name
-# ("-s format:check" -> format) and fails while FAIL_<name> exists.
-PNPM = '#!/bin/sh\nn=${2%%:*}\necho "$n" >>"$LOG"\ntest ! -e "FAIL_$n"\n'
+# ("-s format:check" -> format) and fails while FAIL_<name> exists; run
+# anywhere but the root of the working tree, it records "<name>-not-at-the-root".
+PNPM = ('#!/bin/sh\nn=${2%%:*}\n[ -e .git ] || n="$n-not-at-the-root"\n'
+        'echo "$n" >>"$LOG"\ntest ! -e "FAIL_$n"\n')
 # A git too old for --no-lazy-fetch (as on Ubuntu 24.04's git 2.43).
 OLD_GIT = '#!/bin/sh\n[ "$1" != --no-lazy-fetch ] || exit 129\nexec %s "$@"\n'
 ALL = ["format", "lint", "typecheck"]
@@ -91,12 +93,12 @@ def _cases(bad, sh, t):
         os.remove(env["LOG"])
         return ran
 
-    def hook(lines, args=("origin", remote), cwd=work, limiter=False, raw=None):
+    def hook(lines, args=("origin", remote), cwd=work, limiter=False, raw=None, wrap=()):
         p = os.path.join(t, "hook")
         open(p, "w").write(hook_text(sh, limiter))
         os.chmod(p, 0o755)
         data = raw if raw is not None else "".join(l + "\n" for l in lines)
-        r = subprocess.run([sh, p] + list(args), cwd=cwd, env=env, capture_output=True,
+        r = subprocess.run(list(wrap) + [sh, p] + list(args), cwd=cwd, env=env, capture_output=True,
                            text=True, input=data)
         return r.returncode, r.stderr, log()
 
@@ -123,9 +125,9 @@ def _cases(bad, sh, t):
     git("checkout", "-qb", "docs"); write("README.md", "y\n"); git("commit", "-qam", "docs")
     docs = git("rev-parse", "HEAD")
     expect("README-only new branch", hook([line("refs/heads/docs", docs, Z)]),
-           0, ["format"], ["skip lint", "skip typecheck"])
+           0, ["format", "lint"], ["skip typecheck"])
     expect("README-only, remote at main", hook([line("refs/heads/docs", docs, main)]),
-           0, ["format"], ["skip lint", "skip typecheck"])
+           0, ["format", "lint"], ["skip typecheck"])
 
     # A .ts change: both run.
     git("checkout", "-qb", "code", "main"); write("src/a.ts", "export const a = 2\n")
@@ -168,6 +170,14 @@ def _cases(bad, sh, t):
     write(".gitmodules", '[submodule "vendor/api"]\n\tpath = vendor/api\n\turl = ./x\n\tignore = all\n')
     expect("gitlink with ignore = all", hook([line("refs/heads/subign", subign, before_move)]), 0, ALL)
     os.remove(os.path.join(work, ".gitmodules"))
+    git("checkout", "-q", "subign")
+    git("update-index", "--cacheinfo", "160000,%s,vendor/api" % docs)
+    git("commit", "-qm", "move gitlink")
+    moved = git("rev-parse", "HEAD")
+    git("checkout", "-q", "code")
+    write(".gitmodules", '[submodule "vendor/api"]\n\tpath = vendor/api\n\turl = ./x\n\tignore = all\n')
+    expect("gitlink moved, ignore = all", hook([line("refs/heads/subign", moved, subign)]), 0, ALL)
+    os.remove(os.path.join(work, ".gitmodules"))
 
     # The remote has a commit this clone never fetched (someone fixed a type error there),
     # and this push replaces it with a README-only change: the range is unknown, so all run.
@@ -201,7 +211,7 @@ def _cases(bad, sh, t):
 
     # Pushing a commit that isn't HEAD (HEAD is code): warned, by ref.
     expect("pushed commit isn't HEAD", hook([line("refs/heads/docs", docs, Z)]),
-           0, ["format"], ["WARNING: the checks read the working tree at HEAD %s; refs/heads/docs gets %s"
+           0, ["format", "lint"], ["WARNING: the checks read the working tree at HEAD %s; refs/heads/docs gets %s"
                            % (code, docs)])
     # Untracked and uncommitted files: warned.
     write("src/new.ts", "export const n = 1\n")
@@ -219,6 +229,12 @@ def _cases(bad, sh, t):
     for args in (("--all",), ()):
         expect("working-tree mode %r" % (args,), hook([], args=args, raw='{"hook_event_name":"Stop"}'),
                0, ALL)
+    # ... from a subfolder too: the checks still run at the root.
+    expect("--all from a subfolder", hook([], args=("--all",), cwd=os.path.join(work, "src")), 0, ALL)
+    # A failed write of git's input stops the push (here a file-size limit of 0).
+    expect("input not saved", hook([line("refs/heads/code", code, Z)],
+                                   wrap=(sh, "-c", 'trap "" XFSZ; ulimit -f 0; exec "$@"', "x")),
+           1, [], ["couldn't save git's input"])
 
     # A legacy .git/hooks/pre-push gets git's exact input, including none at all,
     # and its failure blocks the push; it never runs in working-tree mode.
@@ -272,7 +288,7 @@ def _cases(bad, sh, t):
     r = subprocess.run(["git", "push", "-q", "origin", "two"], cwd=wt, env=env,
                        capture_output=True, text=True)
     ran = log()
-    if r.returncode != 0 or ran != ["format"] or "skip typecheck" not in r.stderr:
+    if r.returncode != 0 or ran != ["format", "lint"] or "skip typecheck" not in r.stderr:
         bad.append("pre-push (%s): real README-only push: exit %d, ran %s\n%s"
                    % (sh, r.returncode, ran, r.stderr))
 
@@ -282,16 +298,21 @@ def _cases(bad, sh, t):
     os.makedirs(old)
     open(os.path.join(old, "git"), "w").write(OLD_GIT % shutil.which("git", path=env["PATH"]))
     os.chmod(os.path.join(old, "git"), 0o755)
-    git("config", "remote.origin.promisor", "true")
     saved = env["PATH"]
     env["PATH"] = old + os.pathsep + saved
-    expect("old git, partial clone", hook([line("refs/heads/docs", docs, Z)], cwd=wt), 0, ALL,
-           ["running every check", "partial clone"])
-    expect("old git, partial clone, delete only",
-           hook([line("refs/heads/gone", Z, main, src="(delete)")], cwd=wt), 0, [])
-    env["PATH"] = saved
+    for key, value in (("remote.origin.promisor", "true"), ("remote.origin.partialclonefilter", "blob:none")):
+        git("config", key, value)
+        # An unfetched remote tip is never looked up (that lookup could fetch).
+        expect("old git, partial clone (%s)" % key, hook([line("refs/heads/docs", docs, unseen)], cwd=wt),
+               0, ALL, ["running every check", "partial clone"], err_lacks=["doesn't have"])
+        expect("old git, partial clone, delete only",
+               hook([line("refs/heads/gone", Z, main, src="(delete)")], cwd=wt), 0, [])
+        git("config", "--unset", key)
+    git("config", "remote.origin.promisor", "false")
+    expect("old git, promisor = false", hook([line("refs/heads/docs", docs, Z)]), 0, ["format", "lint"])
     git("config", "--unset", "remote.origin.promisor")
-    expect("old git, full clone", hook([line("refs/heads/docs", docs, Z)]), 0, ["format"])
+    expect("old git, full clone", hook([line("refs/heads/docs", docs, Z)]), 0, ["format", "lint"])
+    env["PATH"] = saved
 
     # A SHA-256 repository: 64-digit names parse, and a .ts change runs typecheck.
     s256 = os.path.join(t, "s256")

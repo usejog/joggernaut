@@ -76,9 +76,10 @@ in `references/measuring.md`.
    working tree isn't what is pushed. Before installing, look at what hooks
    run now (`git config --show-origin --get-all core.hooksPath`, and the
    executable files in `.git/hooks`). If `core.hooksPath` is already set, by
-   a hook tool (lefthook, husky, pre-commit) or by hand, keep it: put the
-   template in that folder, or add its checks to the tool's config, with
-   the same rules. Otherwise install it with `git config core.hooksPath .githooks`,
+   a hook tool (lefthook, husky, pre-commit) or by hand, keep it: add the
+   checks to the tool's config or to the pre-push already in that folder,
+   with the same rules, so both can still stop a push; put the template
+   there only if that folder has no pre-push. Otherwise install it with `git config core.hooksPath .githooks`,
    a one-line setup step in the README or the repository's setup script
    (see "Hooks and worktrees" below). Time it, and report two
    numbers from step 1 apart: runner-minutes it can save (the minutes of
@@ -102,14 +103,18 @@ in `references/measuring.md`.
    - never bring a branch up to date with main just to be current; update
      it for a conflict, a change it needs, or once right before a merge when
      branch protection requires it;
-   - merge only when a person asks, or when the target branch's rules
-     already let agents merge and name the command, and then only through
-     it, once the required checks and review passed on the current head.
+   - merge only when the person you work for asks, or when the agent
+     instructions on the target branch already let agents merge and name
+     the command, and then only through it, once the required checks and a
+     review by someone other than the agent have passed.
 5. **For Claude Code users, offer a Stop hook** in `.claude/settings.json`
    that runs the pre-push checks when the agent finishes (with the
-   template, `<hooks folder>/pre-push --all >&2 || exit 2`: `--all` checks
-   the working tree and ignores the hook's JSON input; with a hook tool, its
-   own command for the same checks) and, on a failure,
+   template, `"$(git rev-parse --show-toplevel)/.githooks/pre-push" --all >&2 || exit 2`,
+   since the hook's folder is wherever Claude last changed to; `--all`
+   checks the working tree from its root and ignores the hook's JSON input;
+   with a hook tool, its own command for the same checks). Let the agent
+   stop when the input's `stop_hook_active` is true, so a failure it can't
+   fix doesn't hold it forever. On a failure, it
    exits 2 with the failed check's output on stderr: Claude Code's hook docs
    say that keeps Claude working and shows it the message. Offer; don't add
    unasked.
@@ -141,9 +146,13 @@ for a new branch, where it left the default branch. A base that was
 already broken stays CI's to report, and CI still runs every check. Write a
 check's pathspecs as everything minus what it can't read (the template
 leaves out prose: `. ':(exclude)*.md'`), not a list of what it reads: a
-generated type, a `.vue` file or a submodule pointer then still runs it. A
-linter that reads Markdown (code blocks in docs) reads prose too: drop its
-exclusions. The hook prints each skip by name.
+generated type, a `.vue` file or a submodule pointer then still runs it.
+Formatters and linters can read prose too (Markdown code blocks), so the
+template gives them no exclusions, and the saving is the type check's on
+prose-only pushes. Checks that read commits rather than files (commit
+messages, changesets) need none either. The hook prints each skip by name.
+Commands run under `sh` (dash on Ubuntu) from the root of the working tree,
+so a bash-only command line from a CI workflow goes in a script.
 
 **When it runs everything.** A new branch pushed to a URL or with no
 remote-tracking default branch, a remote branch at a commit this clone
@@ -208,9 +217,10 @@ can contain spaces), and never let one ref's line reset a flag another set.
   on it, and since
   TypeScript 4.0 that works with `noEmit` (TypeScript docs). Without
   `tsBuildInfoFile` the file goes beside the config or its `outDir`, which
-  may be tracked. Set it in each config, not a shared base: a relative path
-  in an extended config resolves from the config that declares it
-  (TypeScript docs), so every project would share one file. TypeScript 7's
+  may be tracked. A relative path in an extended config resolves from the
+  config that declares it (TypeScript docs), so in a shared base every
+  project would share one file: set it in each config, or in the base as
+  `${configDir}/...`, which resolves per project (TypeScript 5.5). TypeScript 7's
   native `tsc` (and `tsgo`, its preview) supports incremental builds too
   (typescript-go README), and `tsc -b` keeps build info for each project.
   Time the hook cold and warm, before and after.

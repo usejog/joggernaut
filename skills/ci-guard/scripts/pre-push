@@ -31,10 +31,12 @@ limit() { "$@"; }
 # none, any change runs it. A check is skipped only when no pushed change
 # touches its PATHSPECs, so name what it can't read (here, prose) rather than
 # what it can: a generated type, a .vue file or a submodule then still runs it.
-# If the linter reads Markdown (code blocks in docs), drop its exclusions.
+# Formatters and linters can read prose too (Markdown code blocks), so they
+# get no exclusions here. Commands run under sh (dash on Ubuntu), from the
+# root of the working tree.
 checks() {
   check format    'pnpm -s format:check'
-  check lint      'pnpm -s lint'      . ':(exclude)*.md' ':(exclude)*.mdx' ':(exclude)*.txt'
+  check lint      'pnpm -s lint'
   check typecheck 'pnpm -s typecheck' . ':(exclude)*.md' ':(exclude)*.mdx' ':(exclude)*.txt'
 }
 # ---- End of settings -----------------------------------------------------
@@ -78,6 +80,8 @@ if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then
   chain
   exit
 fi
+# Git runs the hook from the root of the working tree; --all may start anywhere.
+cd "$(git rev-parse --show-toplevel)" || exit 1
 
 # Look objects up without fetching them. A partial clone fetches missing
 # objects on demand; a git too old for --no-lazy-fetch can't be stopped, so
@@ -87,9 +91,13 @@ if git --no-lazy-fetch version >/dev/null 2>&1; then
   g() { git --no-lazy-fetch "$@" </dev/null; }
 else
   g() { git "$@" </dev/null; }
-  if [ -n "$(git config --get extensions.partialClone; git config --get-regexp '^remote\..*\.promisor$')" ]; then
-    fetches=1
-  fi
+  [ -z "$(git config --get extensions.partialClone)" ] || fetches=1
+  for k in $(git config --name-only --get-regexp '^remote\..*\.(promisor|partialclonefilter)$'); do
+    case $k in
+      *.partialclonefilter) fetches=1 ;;
+      *) [ "$(git config --type=bool --get "$k")" != true ] || fetches=1 ;;
+    esac
+  done
 fi
 
 unknown=''     # a reason; once set it stays set, so one unknown ref runs all
@@ -146,7 +154,9 @@ if [ "$mode" = push ]; then
   done <"$tmp/refs"
 
   [ -z "$unknown" ] || say "running every check: $unknown"
-  if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+  if [ -n "$fetches" ]; then
+    : # git status could fetch here too
+  elif [ -n "$(g status --porcelain --untracked-files=no 2>/dev/null)" ]; then
     say "WARNING: uncommitted changes: the checks read them, but they aren't pushed"
   fi
   u=$(git ls-files -z --others --exclude-standard 2>/dev/null | tr '\0' '\n' | head -n 5 | tr '\n' ' ')
