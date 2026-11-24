@@ -84,9 +84,9 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    each attempt's under `RUN_ID/attempt-N/ARTIFACT_NAME/`, or a passing
    attempt's report replaces the failed one's: an artifact belongs to the
    attempt whose jobs (`run_attempt` in the jobs listing) ran when it was
-   created. A rerun shows a test passing only when every attempt, 1 to the
-   run's attempt, has a report showing it passed; otherwise a rerun's pass
-   separates nothing. Where one artifact holds two projects' reports whose
+   created. A rerun's pass separates nothing (a lost or merged report can't
+   be told apart from a pass); `flaky` names the reruns that have a report
+   for every attempt, for a person to read. Where one artifact holds two projects' reports whose
    cases share suite, class and name, save each project's under a folder of
    its own (`linux/api/`, `linux/web/`): the folders are part of a test's name,
    the report's file name isn't. Folders named by a number or
@@ -107,11 +107,12 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    recorded (a closed pull request read from saved answers, or a fork's) is
    lined up with its own pull request's runs only, so it never stands
    alone: read the runs with `fetch`, which records the base. GitHub lists a
-   run's pull request only while it is open; for a closed one `fetch` saves
-   the pull request that was open from that branch when the run was created
-   (`pull_requests_found`), and `flaky` keys runs by it when every such run of
-   the branch found exactly one, or by the branch otherwise (pull requests
-   that reused a branch then count as one, and `flaky` says how many runs). A failure stands alone when a
+   run's pull request only while it is open, so a closed one's runs are
+   keyed by their branch, and pull requests that reused a branch count as
+   one. `fetch` saves the pull requests that were open from that branch when
+   each run was created (`pull_requests_found`), and `flaky` names the
+   branches whose runs found several: a test there may recur on more pull
+   requests than shown, so read those runs. A failure stands alone when a
    report shows the test passing before it and after it on that line, with
    no other pull request's run between them failing it (or failed with no
    report read): one pull request's own change fails the

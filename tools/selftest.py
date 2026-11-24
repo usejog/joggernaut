@@ -2487,8 +2487,8 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("flaky --runs-dir: a run with no jobs page dropped out of the line: %r\n%s" % (got, r.stderr))
 
 
-# #37: closed pull requests that reused one branch count as two once fetch found each one;
-# if any run of the branch found none or several, the branch keys them all.
+# #37: closed pull requests that reused one branch still count as one (a run can't be tied
+# to its own pull request for certain), and flaky says which branches and pull requests.
 def _closed(i, branch, found, st):
     x = _fr(i, 0, st == "p")
     x.update(pull_requests=[], head_branch=branch, pull_requests_found=found)
@@ -2498,39 +2498,25 @@ seq = [(100, "b-0", [100], "p"), (1, "reused", [5], "f"), (101, "b-1", [101], "p
 rows = [_closed(i, b, f, st) for i, (_, b, f, st) in enumerate(seq)]
 reps = {x["id"]: {"r.xml": _rep(st)} for x, (_, _, _, st) in zip(rows, seq)}
 got, r = _flaky_rows(rows, reps)
-if not got or got["tests"][0]["alone_on_pull_requests"] != 3:
-    bad.append("flaky #37: two closed pull requests on one branch counted as one: %r" % (got or r.stderr))
-rows[1]["pull_requests_found"] = [5, 9]
-got, r = _flaky_rows(rows, reps)
-if not got or got["tests"][0]["alone_on_pull_requests"] != 2 or got.get("runs_keyed_by_branch_unsure") != 2:
-    bad.append("flaky #37: a branch with an unsure run must key every run of it by branch: %r" % (got or r.stderr))
+if not got or got["tests"][0]["alone_on_pull_requests"] != 2 \
+        or got.get("branches_with_several_pull_requests") != [{"branch": "o/r:reused", "pull_requests": [5, 9]}]:
+    bad.append("flaky #37: a reused branch should count once and be named: %r" % (got or r.stderr))
 
-# #38: a rerun whose every attempt's report shows the test passing separates two failures.
+# #38: a rerun's pass still separates nothing, but a rerun with every attempt's report is named.
 def _rr(i, pr, st, attempt=1):
     x = _fr(i, pr, st == "p")
     x["run_attempt"] = attempt
     return x
 rows = [_rr(0, 1, "p"), _rr(1, 2, "f"), _rr(2, 3, "p", attempt=2), _rr(3, 4, "f"), _rr(4, 5, "p")]
-both = {"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _rep("p")}
-for folders, want in ((both, 2), ({"attempt-2/a/r.xml": _rep("p")}, 0),
-                      (dict(both, **{"attempt-3/a/r.xml": _rep("p")}), 0),
-                      (dict(both, **{"attempt-3/coverage.xml": "<coverage/>"}), 0),
-                      ({"a/attempt-1/r.xml": _rep("p"), "a/attempt-2/r.xml": _rep("p")}, 0)):
+for folders, listed in (({"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _rep("p")}, True),
+                        ({"attempt-2/a/r.xml": _rep("p")}, False),
+                        ({"a/attempt-1/r.xml": _rep("p"), "a/attempt-2/r.xml": _rep("p")}, False)):
     reps = {rows[0]["id"]: {"a/r.xml": _rep("p")}, rows[1]["id"]: {"a/r.xml": _rep("f")},
             rows[2]["id"]: folders, rows[3]["id"]: {"a/r.xml": _rep("f")}, rows[4]["id"]: {"a/r.xml": _rep("p")}}
     got, r = _flaky_rows(rows, reps)
-    if not got or got["tests"][0]["alone_on_pull_requests"] != want:
-        bad.append("flaky #38: a rerun with attempt folders %s: alone on %r, not %d"
-                   % (sorted(folders), (got or {"tests": [{}]})["tests"][0].get("alone_on_pull_requests"), want))
-
-# #38: legs split across attempts (linux in attempt 1, windows in attempt 2) show no test
-# passing in both, so no pass.
-reps = {rows[0]["id"]: {"a/r.xml": _rep("p")}, rows[1]["id"]: {"a/r.xml": _rep("f")},
-        rows[2]["id"]: {"attempt-1/a/r.xml": _rep("p"), "attempt-2/b/r.xml": _rep("p")},
-        rows[3]["id"]: {"a/r.xml": _rep("f")}, rows[4]["id"]: {"a/r.xml": _rep("p")}}
-got, r = _flaky_rows(rows, reps)
-if not got or [x for x in got["tests"] if x["test"].startswith("a::")][0]["alone_on_pull_requests"] != 0:
-    bad.append("flaky #38: legs split across attempts made a pass: %r" % (got or r.stderr))
+    if not got or got["tests"][0]["alone_on_pull_requests"] != 0 \
+            or (got.get("reruns_with_every_attempts_report") == [rows[2]["id"]]) != listed:
+        bad.append("flaky #38: a rerun with attempt folders %s: %r" % (sorted(folders), got or r.stderr))
 
 # #35: two projects in one artifact, kept apart by a folder each, are two tests.
 rows = [_fr(0, 1, False)]

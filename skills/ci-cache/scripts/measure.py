@@ -515,23 +515,24 @@ def pr_bases(a, r):
     """The branch each pull request of a run targeted, and the pull requests found for a run
     GitHub no longer lists. GitHub lists a run's pull request only while it is open, so for
     one from this repository ask for the pull requests from the run's head branch in any
-    state (open, merged or closed). A pull_request or pull_request_target run is created by an
-    event on an open pull request (or just after it closed), so the ones open then (with an
-    hour's grace after a close) are its candidates, saved as found: one is the run's. A fork's
-    run records none: the measuring guide leaves fork runs out on both sides."""
+    state (open, merged or closed). The ones open when a pull_request or pull_request_target
+    run was created (with an hour's grace after a close) are saved as found: evidence for a
+    person, never an owner, since an event can come on a pull request long closed (a label
+    added after a merge). A fork's run records none: the measuring guide leaves fork runs out
+    on both sides."""
     listed = r.get("pull_requests") or []
     head_repo = (r.get("head_repository") or {}).get("full_name")
     if (listed or not (r.get("event") or "").startswith("pull_request") or not r.get("head_branch")
             or head_repo != a.repo):
         return [(p.get("base") or {}).get("ref") for p in listed], []
     owner = a.repo.split("/")[0]
-    pages = gh_get("repos/%s/pulls?state=all&per_page=100&head=%s" % (
-        a.repo, quote("%s:%s" % (owner, r["head_branch"]), safe="")), paginate=True, missing=True, keep_going=True) or []
-    prs = [p for page in pages for p in (page if isinstance(page, list) else [page])]
+    prs = gh_get("repos/%s/pulls?state=all&per_page=100&head=%s" % (
+        a.repo, quote("%s:%s" % (owner, r["head_branch"]), safe="")), missing=True, keep_going=True) or []
     made = ts(r.get("created_at"))
-    # Every pull request needs its open time and a closed_at field (null while open), or
-    # which were open then can't be told.
-    whole = made is not None and all(p.get("number") and p.get("created_at") and "closed_at" in p for p in prs)
+    # Every pull request needs its open time and a closed_at field (null while open), and the
+    # page must hold them all (under 100), or which were open then can't be told.
+    whole = made is not None and len(prs) < 100 and all(
+        p.get("number") and p.get("created_at") and "closed_at" in p for p in prs)
     # Only pull_request and pull_request_target runs: a review or comment event can come on a
     # closed pull request. A `closed` event's run is created just after the close, so a pull
     # request counts as open until an hour after it closed: such a run then matches its own
@@ -2200,18 +2201,9 @@ def cmd_flaky(a):
     # Who a failure belongs to: for a pull-request event, its pull request (by number, or, once
     # it has closed and GitHub lists no number, by its head repository and branch); otherwise
     # the branch pushed.
-    # A run GitHub no longer lists takes the pull request fetch found open when it was created,
-    # only where every such run of its branch found exactly one: otherwise some runs of one
-    # pull request would be keyed by number and others by branch, two owners for one.
-    branch = lambda r: (r.get("head_repo"), r.get("head_branch"))
-    unsure = {branch(r) for r in runs if (r.get("event") or "").startswith("pull_request")
-              and not r.get("pull_requests") and len(r.get("pull_requests_found") or []) != 1}
-
     def pr_of(r):
         if (r.get("event") or "").startswith("pull_request"):
-            found = r.get("pull_requests_found") or []
-            return ("pr",) + (tuple(r.get("pull_requests") or [])
-                              or (tuple(found) if len(found) == 1 and branch(r) not in unsure else ()) or branch(r))
+            return ("pr",) + (tuple(r.get("pull_requests") or []) or (r.get("head_repo"), r.get("head_branch")))
         return ("branch", r.get("event"), r.get("head_repo"), r.get("head_branch"))
     # Runs are lined up per workflow file and per base (the branch a pull request targets, or
     # the branch pushed): a base that broke breaks its own line only.
@@ -2275,14 +2267,9 @@ def cmd_flaky(a):
                 return "fail"
             if r["id"] in reports:
                 # A pass separates, except in a rerun: there the report read may be the
-                # passing attempt's alone, unless every attempt's report is there (attempt-1 to
-                # attempt-N) and each shows it passing. A run that failed on another test, in
-                # one attempt, shows this one passing all the same.
-                n = r.get("run_attempt") or 1
-                by_att = reports[r["id"]][2]
-                # Attempt folders past the run's attempt mean the listing is stale: no pass.
-                if t in reports[r["id"]][1] and max(by_att, default=0) <= n \
-                        and (n == 1 or all(t in by_att.get(k, ()) for k in range(1, n + 1))):
+                # passing attempt's alone. A run that failed on another test, in one attempt,
+                # shows this one passing all the same.
+                if t in reports[r["id"]][1] and (r.get("run_attempt") or 1) == 1:
                     return "pass"
                 # A run with a failure whose reports don't show this test either way (another
                 # suite's report, an empty failed.txt) might have failed it: unknown.
@@ -2319,8 +2306,19 @@ def cmd_flaky(a):
                      "alone": [{"owner": list(k), "runs": sorted(v)} for k, v in sorted(alone.items(), key=str)]})
     rows.sort(key=lambda x: (-x["alone_on_pull_requests"], -x["failed_runs"], x["workflow"], x["test"]))
     unread = sum(1 for r in runs if r.get("conclusion") in FAILED and r["id"] not in reports)
-    several = sum(1 for r in runs if (r.get("event") or "").startswith("pull_request") and not r.get("pull_requests")
-                  and branch(r) in unsure)
+    # Branches whose unlisted runs fetch found open under more than one pull request over time:
+    # their pull requests count as one here (a closed pull request's run can't be tied to its
+    # own for certain), so a test may recur on more pull requests than shown.
+    reused = {}
+    for r in runs:
+        if (r.get("event") or "").startswith("pull_request") and not r.get("pull_requests"):
+            reused.setdefault("%s:%s" % (r.get("head_repo"), r.get("head_branch")), set()).update(
+                r.get("pull_requests_found") or [])
+    several = sorted((b, sorted(n)) for b, n in reused.items() if len(n) > 1)
+    # Reruns whose folder holds a report for every attempt: their passes aren't counted (a lost
+    # or merged report can't be told apart), but a person can read them.
+    complete = sorted(rid for rid, rep_ in reports.items() if (by_id[rid].get("run_attempt") or 1) > 1
+                      and set(range(1, (by_id[rid].get("run_attempt") or 1) + 1)) <= set(rep_[2]))
     # A failed.txt name no JUnit report shows (a file at the run's root beside reports in a
     # leg's folder, a name spelled otherwise): its failures can't meet a pass of the same test.
     # Per workflow: a JUnit report of another workflow says nothing about these names.
@@ -2334,16 +2332,21 @@ def cmd_flaky(a):
                           "failed_txt_names_no_report_shows": lone, "workflows_with_no_junit_pass_evidence": no_pass,
                           "runs_without_base": sum(1 for r in runs if (r.get("event") or "").startswith("pull_request")
                                                    and not r.get("pull_request_bases")),
-                          "runs_keyed_by_branch_unsure": several,
+                          "branches_with_several_pull_requests": [{"branch": b, "pull_requests": n} for b, n in several],
+                          "reruns_with_every_attempts_report": complete,
                           "xml_not_junit": not_junit}, indent=2))
         return
     print("reports read for %d runs; %d failed runs have none (unknown: never counted as a pass)"
           % (len(reports), unread))
     nobase = sum(1 for r in runs if (r.get("event") or "").startswith("pull_request") and not r.get("pull_request_bases"))
     if several:
-        print("  %d pull-request runs no longer listed with a pull request are keyed by their branch (on a branch"
-              " where some run's pull request couldn't be found as the one open when it ran), so that branch's"
-              " pull requests count as one" % several)
+        print("  %d branches' runs no longer listed with a pull request were found open under several pull requests"
+              " (%s): each branch counts as one pull request here, so a test may recur on more than shown"
+              % (len(several), "; ".join("%s: #%s" % (b, ", #".join(map(str, n))) for b, n in several[:3])))
+    if complete:
+        print("  %d reruns have a report for every attempt (attempt-1 to attempt-N): their passes aren't counted"
+              " (a lost or merged report can't be told apart); read them: %s"
+              % (len(complete), ", ".join(map(str, complete[:10]))))
     if nobase:
         print("  %d pull-request runs have no base recorded (a closed pull request read from saved answers, or"
               " a fork's): each is lined up with its own pull request's runs only, so it can't stand alone;"
