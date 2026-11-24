@@ -2485,8 +2485,8 @@ with tempfile.TemporaryDirectory() as t:
     if got.get("wait_all_workflows_commits") != 1 or got.get("wait_all_workflows_unplaced_commits") != 0:
         bad.append("split #7: a run with no file outside the commit's window left the commit out: %r %r"
                    % (got.get("wait_all_workflows_commits"), got.get("wait_all_workflows_unplaced_commits")))
-    # #14: forks. A numbered run and an unnumbered one of the same fork, branch, commit and
-    # target are one pull request; with another target, they are two (keyed, and counted).
+    # #14: a run with no pull-request number (a fork's, or a closed pull request's) is keyed by
+    # repository and branch, and counted, with the note in the output.
     def fork_runs(specs):
         out = []
         for i, (prs, base, sha) in enumerate(specs):
@@ -2495,9 +2495,8 @@ with tempfile.TemporaryDirectory() as t:
                      pull_request_bases=base)
             out.append(x)
         return out
-    for specs, want in (((([5], ["main"], 1), ([], ["main"], 1)), (1, 0)),
-                        ((([5], ["main"], 1), ([], ["release"], 1)), (2, 1)),
-                        ((([5], ["main"], 1), ([], [], 1)), (1, 0))):
+    for specs, want in (((([5], ["main"], 1), ([5], ["main"], 2)), (2, 0)),
+                        ((([], ["main"], 1), ([], [], 2)), (2, 2))):
         got = json.loads(_split(t, fork_runs(specs), "--json").stdout or "{}")
         text = _split(t, fork_runs(specs)).stdout
         if (got.get("pr_commits"), got.get("pr_runs_keyed_by_branch")) != want \
@@ -2539,6 +2538,25 @@ with tempfile.TemporaryDirectory() as t:
             or (head.get("commonest_set") or {}).get("tied_with") != 1 or len(got.get("cohorts") or []) != 1 \
             or "ran 2 different sets of jobs" not in text or "tied with 1 other set" not in text:
         bad.append("split #23: a headline group mixing two job sets wasn't flagged: %r\n%s" % (head, text))
+    # A rerun of failed jobs lists the jobs that passed before under its own attempt: the run
+    # ran one set of jobs, and its wait covers only the rerun, which split says.
+    rows = []
+    for i in range(6):
+        t0 = 5000 * i
+        rows.append(_run(i, [_job("build", t0, t0 + 1, t0 + 300), _job("test", t0 + 300, t0 + 301, t0 + 900)], t0))
+    last = rows[-1]
+    last.update(run_attempt=2, run_started_at=_at(25000 + 1000))
+    for j in last["jobs"]:
+        j["run_attempt"] = 2
+    tj = last["jobs"][1]
+    tj.update(created_at=_at(26000), started_at=_at(26001), completed_at=_at(26600))
+    tj["steps"] = [dict(x, started_at=_at(26001), completed_at=_at(26600)) for x in tj["steps"]]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    text = _split(t, rows).stdout
+    if (got.get("headline") or {}).get("job_sets") != 1 or (got.get("headline") or {}).get("reruns") != 1 \
+            or "1 of the headline's runs passed on a rerun" not in text:
+        bad.append("split #23: a rerun's carried-over jobs made another set, or the rerun wasn't named: %r\n%s"
+                   % (got.get("headline"), text))
     # #35: a step stamped 10 s past its 60 s job shows clipped in the step table; a one-second
     # step inside another sets the overlap flag, and the amount says it is one second.
     rows = []

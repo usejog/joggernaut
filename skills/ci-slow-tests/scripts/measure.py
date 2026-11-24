@@ -863,29 +863,16 @@ def pr_pushes(runs):
     """{pull request: {head commit: [runs]}} for pull_request and pull_request_target runs
     with a head commit (each records the pull request's head, not the base). A pull request is
     its number. GitHub lists a run's pull request only while it is open, and never a fork's,
-    so some runs come with none: such a run takes the number of a numbered run of the same
-    repository, branch and commit when exactly one number fits (one whose target matches, or
-    isn't recorded); otherwise it is keyed by repository and branch, and counted. Returns that
-    and the count."""
-    named = {}
-    for r in runs:
-        if r.get("event") in PR_EVENTS and r.get("head_sha") and len(r.get("pull_requests") or []) == 1:
-            named.setdefault((r.get("head_repo"), r.get("head_branch"), r["head_sha"]), set()).add(
-                (r["pull_requests"][0], tuple(r.get("pull_request_bases") or [])))
+    so a run with none is keyed by repository and branch, and counted. Returns that and the
+    count."""
     out, guessed = {}, 0
     for r in runs:
         if r.get("event") not in PR_EVENTS or not r.get("head_sha"):
             continue
         pr = tuple(r.get("pull_requests") or [])
         if not pr:
-            bases = tuple(r.get("pull_request_bases") or [])
-            fits = {n for n, b in named.get((r.get("head_repo"), r.get("head_branch"), r["head_sha"]), ())
-                    if not bases or not b or b == bases}
-            if len(fits) == 1:
-                pr = (next(iter(fits)),)
-            else:
-                pr = (r.get("head_repo"), r.get("head_branch"))
-                guessed += 1
+            pr = (r.get("head_repo"), r.get("head_branch"))
+            guessed += 1
         out.setdefault(pr, {}).setdefault(r["head_sha"], []).append(r)
     return out, guessed
 
@@ -924,16 +911,19 @@ def cmd_split(a):
             by_set = {}
             for r, x in walls_of:
                 if x is not None:
-                    js = tuple(sorted("%s / %s" % (r.get("name"), j.get("name")) for j in this_attempt(r) if executed(j)))
+                    js = tuple(sorted("%s / %s" % (r.get("name"), j.get("name")) for j in latest_jobs(r) if executed(j)))
                     by_set.setdefault(js, []).append(x)
             top = min(by_set.items(), key=lambda kv: (-len(kv[1]), kv[0]))
             ties = sum(1 for v in by_set.values() if len(v) == len(top[1])) - 1
             table.append({"longest_job": key, "runs": len(w), "median": median(w), "tail": list(tail(w)),
                           "share_of_wait": sum(w) / total_wait, "job_sets": len(by_set),
+                          "reruns": sum(1 for r, x in walls_of if x is not None and (r.get("run_attempt") or 1) > 1),
                           "commonest_set": {"jobs": list(top[0]), "runs": len(top[1]), "median": median(top[1]),
                                             "tied_with": ties}})
     table.sort(key=lambda c: (-c["share_of_wait"], c["longest_job"]))
     out["cohorts"] = table
+    out["job_sets"] = len({tuple(sorted("%s / %s" % (r.get("name"), j.get("name")) for j in latest_jobs(r) if executed(j)))
+                           for r in runs if r.get("conclusion") == "success" and run_wall(r) is not None})
     if a.cohort:
         pick = [c for c in table if c["longest_job"] == a.cohort]
         if not pick:
@@ -973,12 +963,14 @@ def cmd_split(a):
                 ends = [ts(j["completed_at"]) for x in rs for j in latest_jobs(x) if j.get("completed_at")]
                 if ends:
                     cross.append(max(ends) - start)
-    shown_name = {}
+    # Each workflow once, by its newest run's display name (a file can be renamed).
     filed = any(r.get("path") for r in runs)
-    for r in runs:
+    newest = {}
+    for r in sorted(runs, key=lambda x: x.get("created_at") or ""):
         if r.get("path") or not filed:
-            shown_name.setdefault(r.get("name") or "", set()).add(wf_key(r))
-    out["workflows"] = sorted({n + (" (%s)" % k if len(ks) > 1 else "") for n, ks in shown_name.items() for k in ks})
+            newest[wf_key(r)] = r.get("name") or ""
+    shared = {n for n in newest.values() if list(newest.values()).count(n) > 1}
+    out["workflows"] = sorted(n + (" (%s)" % k if n in shared else "") for k, n in newest.items())
     out["runs_without_workflow_file"] = sum(1 for r in runs if not r.get("path"))
     out["wait_all_workflows_median"] = median(cross) if cross else None
     out["wait_all_workflows_p95"] = pct(cross, 0.95) if cross else None
@@ -1033,9 +1025,10 @@ def cmd_split(a):
                 both = overlap_seconds(worker)
                 if both > 0:
                     overlapped[wn] = overlapped.get(wn, 0) + 1
-                    overlap_secs.setdefault(wn, []).append(both)
                     took = secs(worker.get("started_at"), worker.get("completed_at"))
+                    # Both medians over the same runs: those whose job duration is known.
                     if took is not None:
+                        overlap_secs.setdefault(wn, []).append(both)
                         worker_secs.setdefault(wn, []).append(took)
         spans = {}
         fresh = {id(j) for j in this_attempt(r)}
@@ -1178,7 +1171,7 @@ def cmd_split(a):
         print("runs: " + counts)
     print("runs read: %d%s, over %.1f days%s" % (
         len(runs), " (workflow %s)" % a.workflow if a.workflow else "", out["span_days"],
-        " (no pull-request runs)" if out["pr_commits"] == 0
+        " (no pull-request runs with a head commit)" if out["pr_commits"] == 0
         else " (under a day: no daily rate)" if out["runs_per_day"] is None
         else ", under 0.1 pushes a day" if out["runs_per_day"] == 0
         else ", about %s pushes a day" % out["runs_per_day"]))
@@ -1191,7 +1184,7 @@ def cmd_split(a):
         print("PR wait, all %d successful runs blended (run start to last job done): median %s, %s %s%s"
               % (len(walls), fmt(out["wait_median"]), label, fmt(value), few(len(walls))))
         print("  runs ran different jobs, but no group of them has %d runs, so this mixes %d groups and %d sets"
-              " of jobs (--json lists them)" % (MIN_RUNS, len(table), sum(c["job_sets"] for c in table)))
+              " of jobs (--json lists them)" % (MIN_RUNS, len(table), out["job_sets"]))
     else:
         print("PR wait, runs whose longest job was %s (%d successful runs, %.0f%% of all successful runs' wait%s):"
               " median %s, %s %s%s"
@@ -1217,6 +1210,9 @@ def cmd_split(a):
               % (head["job_sets"], ", ".join(cs["jobs"]), cs["runs"],
                  ", tied with %d other set%s" % (cs["tied_with"], "s" * (cs["tied_with"] > 1)) if cs["tied_with"] else "",
                  fmt(cs["median"])))
+    if head and head["reruns"]:
+        print("  %d of the headline's runs passed on a rerun: a run's wait starts at its last attempt, so theirs"
+              " covers only the jobs rerun" % head["reruns"])
     if len(names) > 1:
         if cross:
             label, value = out["wait_all_workflows_tail"]
@@ -1261,9 +1257,11 @@ def cmd_split(a):
     if out["last_working_jobs"]:
         wn = out["last_working_jobs"][0][0]
         print("steps of %s, the last job that did work on the path (median a run, in order)%s:" % (
-            wn, "; in %d of its %d runs its steps overlapped (ran side by side), in those runs by a median %s"
-            " of the job's %s, so they don't add up" % (overlapped[wn], workers[wn], fmt(median(overlap_secs[wn])),
-                                                       fmt(median(worker_secs[wn])) if worker_secs.get(wn) else "unknown")
+            wn, "; in %d of its %d runs its steps overlapped (ran side by side)%s, so they don't add up" % (
+                overlapped[wn], workers[wn],
+                ", by a median %s of the job's %s over the %d of them with the job's times" % (
+                    fmt(median(overlap_secs[wn])), fmt(median(worker_secs[wn])), len(worker_secs[wn]))
+                if worker_secs.get(wn) else "")
             if overlapped.get(wn) else ""))
         for st in out["last_working_job_steps"].get(wn, [])[:15]:
             print("  %-8s %-9s %s%s%s" % (fmt(st["median"]), st["bucket"], st["step"][:60],
