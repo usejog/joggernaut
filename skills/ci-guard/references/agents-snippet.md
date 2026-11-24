@@ -51,4 +51,8 @@ never add `pull_request_target` or widen a workflow's `permissions`.
   again. Update it for a merge conflict or a change on main it needs. If
   branch protection requires up-to-date branches and there is no merge
   queue, update right before the merge, and again only if main moves before
-  it merges. Merge only when a person asks you to.
+  it merges.
+- Merge only when a person asks you to merge that pull request, or when the
+  rules on its target branch, as they stand before it, let agents merge it.
+  If those rules name a merge command, merge only through it. The required
+  checks and review must have passed on the commit you merge.

@@ -65,11 +65,21 @@ in `references/measuring.md`.
    step names with `gh run view RUN_ID --json jobs`). Count how many failed
    runs died on format, lint or type checks.
 2. **Add a fast pre-push check.** Find the repository's own format, lint and
-   type-check commands (package scripts, Makefile, CI workflow). Write
-   `scripts/pre-push` (or the repository's existing hook tool: lefthook,
-   husky, pre-commit) that runs them on the changed files where the tools
-   allow it. Install it as a git hook with a one-line setup step in the
-   README or the repository's setup script. Time it, and report two
+   type-check commands (package scripts, Makefile, CI workflow). Copy
+   `scripts/pre-push` from this skill to `.githooks/pre-push` in the
+   repository and edit only its settings block: the default branch, and one
+   `check` line per command with the files it reads as git pathspecs. It
+   reads every pushed branch, compares each with what the remote has (a new
+   branch with its merge-base with the default branch), skips a check only
+   when no pushed change touches its files, and runs everything when it
+   can't tell. It streams each check's output and time, and warns when the
+   working tree isn't what is pushed. Before installing, look at what hooks
+   run now (`git config --show-origin --get-all core.hooksPath`, and the
+   executable files in `.git/hooks`): if a hook tool already sets the hooks
+   path (lefthook, husky, pre-commit), add the checks there instead, with
+   the same rules. Otherwise install it with `git config core.hooksPath .githooks`,
+   a one-line setup step in the README or the repository's setup script
+   (see "Hooks and worktrees" below). Time it, and report two
    numbers from step 1 apart: runner-minutes it can save (the minutes of
    failed rounds the hook would have caught: check that it catches those
    errors on the changed files; the hook itself uses no runner) and wait
@@ -90,9 +100,14 @@ in `references/measuring.md`.
    - if a test exposes a real bug, fix the code, not the test;
    - never bring a branch up to date with main just to be current; update
      it for a conflict, a change it needs, or once right before a merge when
-     branch protection requires it.
+     branch protection requires it;
+   - merge only when a person asks, or when the target branch's rules
+     already let agents merge, and then only through the command they name,
+     after the required checks and review passed on that commit.
 5. **For Claude Code users, offer a Stop hook** in `.claude/settings.json`
-   that runs the pre-push check when the agent finishes and, on a failure,
+   that runs the pre-push check when the agent finishes
+   (`.githooks/pre-push --all >&2 || exit 2`: `--all` checks the working
+   tree and ignores the hook's JSON input) and, on a failure,
    exits 2 with the failed check's output on stderr: Claude Code's hook docs
    say that keeps Claude working and shows it the message. Offer; don't add
    unasked.
@@ -113,6 +128,91 @@ in `references/measuring.md`.
    After each merges, measure as `references/measuring.md` says, on pull
    requests opened after it: pushes per pull request and runs failed on
    format or lint, before and after.
+
+## The hook in detail
+
+**What it can skip.** A check's result depends only on the files it reads
+and the tools installed. If the pushed commits change none of those files,
+the check gives the answer it gave on the base, so running it again finds
+nothing new about this push. The base is what the remote branch held, which
+went through this hook when it was pushed, or, for a new branch, where it
+left the default branch, which CI gates. CI still runs every check. Write a
+check's pathspecs as everything minus what it can't read (the template
+leaves out prose: `. ':(exclude)*.md'`), not a list of what it reads: a
+generated type, a `.vue` file or a submodule pointer then still runs it. The
+hook prints each skip by name.
+
+**When it runs everything.** A new branch pushed to a URL or with no
+remote-tracking default branch, a remote branch at a commit this clone
+hasn't fetched (someone else pushed; comparing with an older commit could
+hide that the push undoes their fix), a merge-base that isn't single, a line
+of input it can't read, or a partial clone whose git can't look objects up
+without fetching them. One such branch runs every check, whatever the other
+branches in the same push show. Tags and other non-branch refs aren't
+checked (`CHECK_REFS`).
+
+**What it checks.** The checks run on the working tree, where the installed
+tools and caches are, but the push sends commits. Commit everything first,
+and push the branch you have checked out. The hook warns, by name, for each
+pushed branch that isn't HEAD, for uncommitted changes and for untracked
+files, and doesn't stop the push for them; read its warnings.
+
+**Hooks and worktrees.** `core.hooksPath` replaces `.git/hooks`: git looks
+for hooks only in that folder (git-config docs), so a hook in `.git/hooks`
+stops running. The template runs `.git/hooks/pre-push` itself, with git's
+exact input, after its own checks pass (git-lfs installs one there). For
+each other executable hook there (git-lfs also installs post-checkout,
+post-commit and post-merge), commit a wrapper of the same name in
+`.githooks` that runs it, or list it for the person. A relative
+`core.hooksPath` is taken from the folder the hook runs in, the root of the
+working tree (git-config and githooks docs), and the repository's config is
+shared by every worktree (git-worktree docs), so one `git config` covers
+every worktree, and each runs the hook from its own checkout. A worktree on
+a branch that doesn't have `.githooks/pre-push` yet runs no pre-push hook at
+all, `.git/hooks` included, until it takes the commit that adds it: say so
+in the pull request.
+
+**Shared machines.** An agent's tool call has a timeout (Claude Code's
+Bash tool: 2 minutes by default, its env-vars docs), and a hook that waits
+silently behind another job looks hung and gets killed with the push. Where
+many agents share one machine, set `limit()` to run each check through the
+machine's job limiter or a lock, so checks queue instead of fighting for
+the CPU. The hook prints when each check is queued, when it starts running
+and how long it waited. A message doesn't extend a deadline: if the hook can
+outlast the agent's timeout, push with a longer timeout or in the
+background and wait for its exit status, never with `--no-verify`.
+
+**Shell.** The template is POSIX `sh` without arrays, tested under dash and
+macOS's bash 3.2. A hook written in bash must run on macOS's `/bin/bash`,
+which is 3.2: before bash 4.4, expanding an empty array as `"${a[@]}"` under
+`set -u` fails as unbound (bash's CHANGES for 4.4), so write
+`${a[@]+"${a[@]}"}`. Read the hook's whole stdin into a file before running
+anything that could read it, take each line's last three fields (the first
+can contain spaces), and never let one ref's line reset a flag another set.
+
+### TypeScript
+
+- `tsc` checks a project, not a list of files. Given files on the command
+  line it ignores `tsconfig.json`, and TypeScript 6 makes that an error,
+  TS5112 (TypeScript docs). Never pass it the changed files; run the
+  project's own command (`tsc --noEmit -p ...`, or `tsc -b` with project
+  references).
+- The speed-up is incremental checking. Give every tsconfig the hook checks
+  `"incremental": true` and its own `"tsBuildInfoFile"` in an ignored cache
+  folder, such as `node_modules/.cache/tsc/<name>.tsbuildinfo`: TypeScript
+  then saves the project graph and rechecks only what changed, and since
+  TypeScript 4.0 that works with `noEmit` (TypeScript docs). Without
+  `tsBuildInfoFile` the file goes beside the config or its `outDir`, which
+  may be tracked. Set it in each config, not a shared base: a relative path
+  in an extended config resolves from the config that declares it
+  (TypeScript docs), so every project would share one file. TypeScript 7's
+  native `tsc` (and `tsgo`, its preview) supports incremental builds too
+  (typescript-go README), and `tsc -b` keeps build info for each project.
+  Time the hook cold and warm, before and after.
+- Leave out of a TypeScript check only what it can't read, usually prose
+  (`.md`, `.mdx`, `.txt`). Code, `.json` (`package.json`, `tsconfig*.json`,
+  JSON imports), lockfiles, schemas a code generator reads and submodules
+  all stay in.
 
 ## What it measures
 
