@@ -1526,15 +1526,25 @@ def cmd_compare(a):
         # Where the compared pushes were routed, failed and cancelled runs included (a pool
         # only failed runs used still shows the pushes were routed differently).
         named = lambda j: (not a.job or j.get("name") == a.job) and j.get("labels")
-        labels = lambda rs: {key(j) for r in selected(rs) for j in latest_jobs(r) if named(j)}
+        first_in = {}
+
+        def labels(rs):
+            out = set()
+            for r in selected(rs):
+                for j in latest_jobs(r):
+                    if named(j):
+                        out.add(key(j))
+                        first_in.setdefault(key(j), r)
+            return out
         if groups:
             labels = (lambda base: lambda rs: base(rs) | {gkey(j) for r in selected(rs) for j in latest_jobs(r)
-                                                         if (not a.job or j.get("name") == a.job) and on_a_runner(j)})(labels)
+                                                         if (not a.job or j.get("name") == a.job) and on_a_runner(j)
+                                                         and first_in.setdefault(gkey(j), r)})(labels)
         lb, la = labels(rb), labels(ra)
         if lb != la:
-            die("runner labels differ between before and after (%s before; %s after); pass --label (and"
-                " --job) to compare the same runner"
-                % ("; ".join(sorted(map(show, lb))), "; ".join(sorted(map(show, la)))))
+            only = lambda x, y: "; ".join("%s, first in %s" % (show(k), where(first_in[k])) for k in sorted(x - y, key=str))
+            die("runner labels differ between before and after (before only: %s; after only: %s); pass --label"
+                " (and --job) to compare the same runner" % (only(lb, la) or "none", only(la, lb) or "none"))
 
     # Each job must run on one runner, the same on both sides: otherwise a shift in which
     # runner a job lands on can pass for a speedup. A job present on one side only is fine.
@@ -1875,8 +1885,9 @@ def cmd_compare(a):
                 if not any(on_a_runner(j) and (not a.job or j.get("name") == a.job) for j in r.get("jobs", [])):
                     continue
                 n += 1
-                there = [a.label in (j.get("labels") or []) for j in first_jobs(r)
-                         if on_a_runner(j) and (not a.job or j.get("name") == a.job)]
+                # Attempt 1 as recorded: a run whose first attempt made no jobs ran nothing there.
+                there = [a.label in (j.get("labels") or []) for j in r.get("jobs", [])
+                         if (j.get("run_attempt") or 1) == 1 and on_a_runner(j) and (not a.job or j.get("name") == a.job)]
                 x += not (there and (any(there) if a.job else all(there)))
             return [x, n]
         res["off_runner_before"], res["off_runner_after"] = off_runner(rb), off_runner(ra)

@@ -2937,6 +2937,32 @@ with tempfile.TemporaryDirectory() as t:
     v, r = _cmp(t, failfast(80000, 0, 10), failfast(81000, 6, 4), "--job", "test (b)")
     if v.get("verdict_code") != "not_valid":
         bad.append("compare: failures that cancelled the job in the queue left its workload: %r" % (v.get("verdict") or v))
+    # Round 10. A first attempt that made no jobs ran nothing on L: off the runner.
+    def jobless(base_id, after):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            secs = 10 if fast else 100
+            if (not after and fast):
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("L",), conclusion="failure"),
+                                              _J("test", 200, secs, labels=("L",), attempt=2)], attempt=2))
+            elif after and not fast:
+                rows.append(_cr(base_id + i, [_J("test", 200, secs, labels=("L",), attempt=2)], attempt=2))
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("L",))]))
+        return rows
+    v, r = _cmp(t, jobless(82000, False), jobless(83000, True), "--job", "test", "--label", "L")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare: a jobless first attempt counted as on the runner: %r %r"
+                   % (v.get("verdict"), (v.get("off_runner_before"), v.get("off_runner_after"))))
+    # Without --label, the refusal names the run that showed the other runner.
+    b_ = [_cr(84000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
+    a_ = [_cr(85000 + i, [_J("test", 0, 50 + i)]) for i in range(5)]
+    a_.append(_cr(85205, [_J("test", 0, 60, conclusion="failure"),
+                          _J("test", 100, 60, labels=("self-hosted", "spare"), attempt=2)], attempt=2))
+    v, r = _cmp(t, b_, a_, "--job", "test")
+    if "error" not in v or "run 85205, a rerun" not in r.stderr:
+        bad.append("compare: the label refusal didn't name the run: %r" % (r.stderr or v))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))
