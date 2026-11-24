@@ -15,8 +15,34 @@ E = os.path.join(ROOT, "evals")
 bad = []
 
 
+def base_measure():
+    """The base's measure.py, for the never-laxer check: JOGGERNAUT_BASE_MEASURE, or, on a pull
+    request's merge commit (CI checks out two commits deep), its first parent's copy."""
+    if os.environ.get("JOGGERNAUT_BASE_MEASURE"):
+        return os.environ["JOGGERNAUT_BASE_MEASURE"]
+    git = lambda *a: subprocess.run(["git", "-C", ROOT] + list(a), capture_output=True, text=True)
+    if git("rev-parse", "-q", "--verify", "HEAD^2").returncode:
+        return None
+    r = git("show", "HEAD^1:skills/ci-measure/scripts/measure.py")
+    if r.returncode:
+        return None
+    path = os.path.join(tempfile.mkdtemp(prefix="joggernaut-base-"), "measure.py")
+    open(path, "w").write(r.stdout)
+    return path
+
+
+BASE = base_measure()
+import differential  # noqa: E402  (beside this file)
+
+
 def run(args, cwd=None):
-    return subprocess.run([sys.executable] + args, cwd=cwd, capture_output=True, text=True)
+    r = subprocess.run([sys.executable] + args, cwd=cwd, capture_output=True, text=True)
+    # Every compare and split here also runs on the base's measure.py: never laxer than it.
+    if BASE and args[:1] == [M] and args[1:2] in (["compare"], ["split"]):
+        msg = differential.check_args(BASE, args[1:], cwd)
+        if msg:
+            bad.append("laxer than the base: measure.py %s: %s" % (" ".join(args[1:]), msg))
+    return r
 
 
 # measure.py on the recorded histories
@@ -2661,6 +2687,27 @@ with tempfile.TemporaryDirectory() as t:
     b_ = json.loads(_split(t, two_ok + [nightly], "--json").stdout or "{}").get("wait_all_workflows_commits")
     if (a_, b_) != (1, 1):
         bad.append("split: an unrelated run changed a two-event commit's wait: %r %r" % (a_, b_))
+    # #47 review: a failed run fetched after the pull request closed (keyed by branch) is checked
+    # with the commit's numbered runs; and a failed run filed under a check that already passed
+    # (ci.yml@integration.yml is a legal file name, read as ci.yml) still fails the commit.
+    late = []
+    for k, (ev, path, ok, prs) in enumerate((("pull_request_target", "ci.yml", True, [42]),
+                                             ("pull_request", "ci.yml", True, [42]),
+                                             ("pull_request", "integration.yml", False, []))):
+        x = _run(k, [_job("test", 10 * k, 10 * k + 1, 10 * k + 10)], 10 * k, name="CI")
+        x.update(event=ev, path=".github/workflows/" + path, conclusion="success" if ok else "failure",
+                 head_sha="%040d" % 43, pull_requests=prs, head_branch="b43", head_repo="o/r")
+        late.append(x)
+    named = []
+    for k, (path, ok) in enumerate((("ci.yml", True), ("ci.yml" + "@" + "integration.yml", False), ("lint.yml", True))):
+        x = _run(k, [_job("test", 10 * k, 10 * k + 1, 10 * k + 10)], 10 * k, name="W%d" % k)
+        x.update(path=".github/workflows/" + path, workflow_id=k, conclusion="success" if ok else "failure",
+                 head_sha="%040d" % 44, pull_requests=[44])
+        named.append(x)
+    a_ = json.loads(_split(t, late, "--json").stdout or "{}").get("wait_all_workflows_commits")
+    b_ = json.loads(_split(t, named, "--json").stdout or "{}").get("wait_all_workflows_commits")
+    if (a_, b_) != (0, 0):
+        bad.append("split: a late or same-check failed run left a commit all-passed: %r %r" % (a_, b_))
     # Pushes per PR: a run keyed by branch on a commit a numbered run counts isn't another PR.
     pp = []
     for k, (sha, prs, ev) in enumerate(((1, [42], "pull_request"), (2, [42], "pull_request"), (2, [], "pull_request_target"))):
@@ -2829,6 +2876,17 @@ for case in sorted(glob.glob(E + "/ci-*/")):
             print("ok   %-15s untouched sample fails: %s" % (name, first))
     finally:
         shutil.rmtree(work)
+
+# Never laxer than the base, on random histories (seeded: a failure names its seed, and
+# `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).
+if BASE:
+    found = differential.run_generated(BASE, range(200))
+    bad += ["laxer than the base: " + x for x in found]
+    if not found:
+        print("ok   never laxer than the base on 200 random histories and every compare and split above")
+else:
+    print("note never-laxer check not run: no base measure.py (set JOGGERNAUT_BASE_MEASURE to one, or run on"
+          " a pull request's merge commit)")
 
 # ci-guard's pre-push template, in scratch git repositories under each shell present
 import selftest_hook  # noqa: E402

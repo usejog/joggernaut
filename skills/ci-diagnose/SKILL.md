@@ -144,7 +144,7 @@ in `references/measuring.md`.
      wait, naming its group, with the other groups beside it. The blended median over every run is printed
      last and labelled as a blend: never report it as the PR wait. With several
      workflows in the file each group is one workflow's runs and the blend
-     pools them; report the "PR wait across workflows" line instead, as the elapsed time for commits where two or more workflows were seen, read as follows: for each commit it takes each workflow's first run within 24 hours of the commit's first, drops the commit if any of those failed (even if a later run passed), and times until their last job finished (an optional slow job counts; a workflow missing for a commit isn't in it). Report a pull-request-wide wait only when every required workflow is present. If branch protection requires only some
+     pools them; report the "PR wait across workflows" line instead, as the elapsed time for commits where two or more workflows were seen, read as follows: for each commit it takes each workflow's first run within 24 hours of the commit's first, drops the commit if any of its runs failed (even if a later run passed; a run fetched after its pull request closed counts with the commit's numbered runs), and times until their last job finished (an optional slow job counts; a workflow missing for a commit isn't in it). Report a pull-request-wide wait only when every required workflow is present. If branch protection requires only some
      jobs (read `required_status_checks` as in ci-workflow; on 403 or 404,
      say it is unknown), the required checks can't pass before the slowest
      required job ends: say which job that is and rank on its path. Reviews,

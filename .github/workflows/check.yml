@@ -18,6 +18,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A pull request's merge commit and its parents: selftest checks measure.py is never
+          # laxer than the base's copy (tools/differential.py).
+          fetch-depth: 2
       - name: Skill format, copies in step, evidence links, leak scan
         run: python3 tools/check.py
       - name: measure.py and the eval checkers against their own sample data

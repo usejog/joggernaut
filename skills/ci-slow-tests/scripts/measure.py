@@ -992,8 +992,27 @@ def cmd_split(a):
     # A run with no file beside runs with one could be another workflow, so look per commit.
     # Checks are (workflow, event) pairs, as each commit's are counted below.
     checks_ = {(wf_key(r), r.get("event")) for r in runs if r.get("event") in PR_EVENTS}
+    # A run keyed by its branch (its pull request closed by the fetch) is checked with the
+    # numbered runs of that branch and commit too, so a failure fetched late still counts.
+    commit_runs, late = {}, []
+    for pr, by_head in pushes.items():
+        for sha, rs in by_head.items():
+            if all(isinstance(x, int) for x in pr):
+                commit_runs[(pr, sha)] = list(rs)
+            else:
+                late.append((pr, sha, rs))
+    for pr, sha, rs in late:
+        into = [k for k, v in commit_runs.items()
+                if k[1] == sha and any((x.get("head_repo"), x.get("head_branch")) == pr for x in v)]
+        for k in into:
+            commit_runs[k] += rs
+        if not into:
+            commit_runs[(pr, sha)] = list(rs)
     if len(checks_) > 1 or (any(placed_wf(r) for r in runs) and not all(placed_wf(r) for r in runs)):
-        for rs in (rs for by_head in pushes.values() for rs in by_head.values()):
+        for rs in commit_runs.values():
+            # Every run of the commit must have passed, not only each check's first: a failure
+            # a later run, or a run filed under the same check, showed still counts.
+            failed = any(x.get("conclusion") != "success" for x in rs)
             rs = sorted(rs, key=lambda x: ts(x["created_at"]))
             t0 = ts(rs[0]["created_at"])
             # A reopened PR runs again days later: keep each workflow's first run of the day.
@@ -1006,7 +1025,7 @@ def cmd_split(a):
                 # One file on two events (pull_request and pull_request_target) is two checks.
                 first.setdefault((wf_key(x), x.get("event")), x)
             rs = list(first.values())
-            if len(rs) > 1 and all(x.get("conclusion") == "success" for x in rs):
+            if len(rs) > 1 and not failed:
                 # From the push (creation), so a rerun's extra wait counts.
                 start = min(ts(x["created_at"]) for x in rs)
                 ends = [ts(j["completed_at"]) for x in rs for j in latest_jobs(x) if j.get("completed_at")]
@@ -1280,11 +1299,11 @@ def cmd_split(a):
             ": a run's wait starts at its last attempt, so theirs covers only the jobs rerun" if late == len(reran)
             else "; %d of them are timed from their last attempt's start (covering only the jobs rerun), %d from"
                  " their creation (no attempt start saved)" % (late, len(reran) - late)))
-    if len(names) > 1:
+    if len(names) > 1 or cross:
         if cross:
             label, value = out["wait_all_workflows_tail"]
-            print("PR wait across workflows (%d in the file; per commit, the first run of each that ran,"
-                  " all passed; %d commits): median %s, %s %s%s"
+            print("PR wait across workflows (%d in the file; per commit, the first run of each check, every run"
+                  " passed; %d commits): median %s, %s %s%s"
                   % (len(names), len(cross), fmt(out["wait_all_workflows_median"]), label, fmt(value),
                      " (provisional: under %d commits)" % P95_FIRM if out["wait_all_workflows_provisional"] else ""))
         else:
