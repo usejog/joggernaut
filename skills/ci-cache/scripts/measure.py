@@ -1472,7 +1472,9 @@ def cmd_compare(a):
                     if (not a.job or j.get("name") == a.job) and j.get("labels"):
                         out.add(tuple(sorted(j["labels"])))
             return out
-        if cb and ca and labels(rcb) != labels(rca):  # a side with no timed run: not enough runs
+        # Every run of each file, failed ones included, as before this change: a runner pool
+        # that only failed runs used still shows the pushes were routed differently.
+        if labels(rb) != labels(ra):
             die("runner labels differ between before and after; pass --label (and --job) "
                 "to compare the same runner")
 
@@ -1538,8 +1540,8 @@ def cmd_compare(a):
             "; and %d more sets" % (len(mb_) - 4) if len(mb_) > 4 else "")
         die("the timed runs%s ran different sets of jobs (a path filter or an `if:`), so a median %s"
             " moves with the mix (before: %d sets, after: %d). Before: %s. Time one job's own duration with"
-            " --job for a verdict; --ran JOB (runs that ran that job, leaving one set a side) gives a"
-            " descriptive reading only"
+            " --job for a verdict, if that job's eligibility (its if: and path filters) is the same on both"
+            " sides; --ran JOB (runs that ran that job, leaving one set a side) gives a descriptive reading only"
             % (" that ran %s" % a.ran if a.ran else "", "of a job's end on the run's clock" if a.end
                else "over the whole runs", len(mb_), len(ma_), show))
     graph_changed = (not a.job or a.end) and len(mb_) == 1 and len(ma_) == 1 and mb_[0][0] != ma_[0][0]
@@ -1736,10 +1738,15 @@ def cmd_compare(a):
             and res["fewer_reached_by"]:
         x = next(c for c in res["reach_checks"] if c["check"] == res["fewer_reached_by"])
         res["verdict_code"] += "_fewer_reached"
-        res["verdict"] += ("; but which runs reached %s changed (%s: %d of %d after, against %d of %d before):"
-                           " runs stopped upstream, skipped by a condition or left out of a matrix may have been"
-                           " the slow ones; name why before calling it faster"
-                           % ((" and ".join(names), {"listed": "runs that didn't run it, of those that list it or a caller",
+        what = " and ".join(names)
+        # The failure-based counts say only that runs missed it and something failed: the joint
+        # count, not a claim about which runs reached it.
+        phrase = ("more runs missed %s with a failure or cancellation in the run" % what
+                  if x["check"] in ("stopped", "missed with a failure") else "which runs reached %s changed" % what)
+        res["verdict"] += ("; but %s (%s: %d of %d after, against %d of %d before): runs stopped upstream, skipped by"
+                           " a condition or left out of a matrix may have been the slow ones; name why before"
+                           " calling it faster"
+                           % ((phrase, {"listed": "runs that didn't run it, of those that list it or a caller",
                                                     "listed by name": "runs that didn't run it, of those that list it by name",
                                                     "ran": "runs that didn't run it, of those where %s ran" % a.ran,
                                                     "job": "runs where %s ran without %s, of those where %s ran" % (a.job, a.ran, a.job),
@@ -1772,7 +1779,8 @@ def cmd_compare(a):
         res["reading"], res["reading_code"] = res["verdict"], res["verdict_code"]
         res["verdict_code"] = "end_descriptive" if a.end else "ran_descriptive"
         res["verdict"] = ("descriptive only (%s): %s; a verdict comes from whole runs that ran one set of jobs a"
-                          " side, or a job's own duration (--job)" % (res["reading"], (
+                          " side, or a job's own duration (--job) where its eligibility is the same on both sides"
+                          % (res["reading"], (
                               "a job's end on the run's clock moves with which runs reached it, their queue order"
                               " and their runners") if a.end else (
                               "the runs where %s ran can change with the change itself (a path filter, a matrix)" % a.ran)))

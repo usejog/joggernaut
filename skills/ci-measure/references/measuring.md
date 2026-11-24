@@ -155,7 +155,10 @@ with counts, so matrix legs count):
 - several sets within a side (a path filter, an `if:`): `compare` refuses a
   whole-run verdict, since the median would move with the mix, and lists
   the before side's sets. Time one job's own duration with `--job`: that
-  is the verdict. `--ran JOB` times whole runs that ran that job (it must
+  is the verdict, as long as that job's eligibility is the same on both
+  sides (its `if:` and path filters unchanged, and about the same share of
+  runs running it; `compare` prints the counts and qualifies a change
+  beyond chance); otherwise report it as unverified. `--ran JOB` times whole runs that ran that job (it must
   leave one set a side), a descriptive reading only (`ran_descriptive`,
   the reading in `reading`): which runs ran a job can change with the
   change itself (a path filter moved from slow pushes to fast ones keeps
@@ -213,8 +216,9 @@ caller), and no one count sees them all without other traffic diluting it,
 so several are checked, and a change in any counts: among the runs that list
 the job (or a caller of it, or it by name), among the runs where the other
 named job ran (both ways, with `--ran` and `--job`), and among all runs
-(the runs that missed it, those that missed it with a failure or
-cancellation in the run, and those that list it and did). `--json` lists each
+(the runs that missed it; those that missed it and had a failure or
+cancellation in the run; and those that list it, missed it and had a job
+fail or be cancelled). `--json` lists each
 (`reach_checks`); the text prints each. If
 more runs fail after than chance explains (a one-sided test at 5%), the
 result is not valid. If more fail after but within chance, the verdict says

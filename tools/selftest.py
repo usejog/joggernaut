@@ -1972,6 +1972,33 @@ with tempfile.TemporaryDirectory() as t:
     if r.returncode == 0:
         bad.append("compare: a canary on two runners, failing on different pushes, passed the runner check\n" + r.stdout)
 
+# A short window under --ran: not enough runs stays the verdict, and its timings stay hidden.
+with tempfile.TemporaryDirectory() as t:
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(_work(i, True)) + "\n" for i in range(4)))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(_work(100 + i, True, integ=10)) + "\n" for i in range(4)))
+    got = json.loads(run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json",
+                          "--ran", "integration"]).stdout or "{}")
+    if got.get("verdict_code") != "not_enough_runs" or got.get("before_median") is not None or got.get("after_median") is not None:
+        bad.append("compare --ran: a short window must stay not_enough_runs with hidden timings: %r %r %r"
+                   % (got.get("verdict_code"), got.get("before_median"), got.get("after_median")))
+# A runner pool only failed runs used, without --label: the labels differ, so it refuses.
+with tempfile.TemporaryDirectory() as t:
+    def smoke(i, slow, fails, pool):
+        t0 = i * 4000
+        x = _run(i, [_job("build", t0, t0 + 1, t0 + (100 if slow else 10)),
+                     dict(_job("smoke", t0, t0 + 1, t0 + 5), labels=[pool],
+                          conclusion="failure" if fails else "success")], t0)
+        x["conclusion"] = "failure" if fails else "success"
+        return x
+    before = [smoke(i, False, True, "ubuntu-latest") for i in range(12)] + [smoke(100 + i, True, False, "ubuntu-latest") for i in range(24)]
+    after = ([smoke(1000 + i, False, False, "ubuntu-latest") for i in range(12)] + [smoke(1100 + i, True, True, "new-pool") for i in range(12)]
+             + [smoke(1200 + i, True, False, "ubuntu-latest") for i in range(12)])
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl"])
+    if r.returncode == 0 or "runner labels differ" not in r.stderr:
+        bad.append("compare: a pool only failed runs used should refuse without --label\n" + r.stdout + r.stderr)
+
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
 if mm.run_minutes(two) != 2 or abs(mm.run_minutes(two, True) - 2.0) > 1e-9:
