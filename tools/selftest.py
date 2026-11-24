@@ -2532,6 +2532,16 @@ for body, want, what in ((WRITTEN, True, "each lint written out"), (LOOP_OK, Tru
                          ('for t in ts css md yaml json spell licenses; do pnpm --filter acme-site run "lint:$t"; done', False,
                           "pnpm --filter on a package that isn't there (runs nothing)"),
                          (WRITTEN + '\necho "Lint passed" >> "$GITHUB_STEP_SUMMARY"', True, "a fold writing the step summary"),
+                         ('for t in ts css md yaml json spell licenses; do pnpm --filter=acme-site run "lint:$t"; done', False,
+                          "pnpm --filter= on a package that isn't there"),
+                         ('for t in ts css md yaml json spell licenses; do pnpm run --no-bail "lint:$t"; done', False,
+                          "pnpm run --no-bail (a failing lint exits 0)"),
+                         ('for t in ts css md yaml json spell licenses; do pnpm run "lint:$t --fix"; done', False,
+                          "a script name with an argument inside its quotes"),
+                         ('echo "LINTS=ts css md yaml json spell" >> "$GITHUB_ENV"', False,
+                          "$GITHUB_ENV leaving one lint out for the next step"),
+                         ('echo "LINTS=ts css md yaml json spell licenses" >> "$GITHUB_ENV"', True,
+                          "$GITHUB_ENV naming every lint for the next step"),
                          ("mkdir reports\n" + WRITTEN, True, "mkdir reports in both jobs (each job's own machine)"),
                          ("pnpm --filter . run lint:ts\n" + "\n".join("pnpm run lint:%s" % x for x in ["css", "md", "yaml", "json", "spell", "licenses"]),
                           True, "a fold with pnpm --filter"),
@@ -2563,6 +2573,11 @@ for body, want, what in ((WRITTEN, True, "each lint written out"), (LOOP_OK, Tru
             text = open(work + "/.github/workflows/ci.yml").read().replace(
                 "jobs:\n", "defaults:\n  run:\n    shell: bash {0}\njobs:\n", 1).replace(
                 "      - run: pnpm test\n", "      - run: pnpm test\n        shell: bash\n", 1)
+            open(work + "/.github/workflows/ci.yml", "w").write(text)
+        if what.startswith("$GITHUB_ENV"):
+            text = open(work + "/.github/workflows/ci.yml").read().replace(
+                "  test:\n", "      - run: |\n          status=0\n          for t in ${LINTS:-ts css md yaml json spell licenses};"
+                " do pnpm run \"lint:$t\" || status=1; done\n          exit $status\n  test:\n", 1)
             open(work + "/.github/workflows/ci.yml", "w").write(text)
         if what == "mkdir reports in both jobs (each job's own machine)":
             text = open(work + "/.github/workflows/ci.yml").read().replace(

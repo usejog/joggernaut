@@ -131,7 +131,7 @@ def run_steps():
         for job_id, job in (doc.get("jobs") or {}).items():
             if not isinstance(job, dict):
                 continue
-            for step in job.get("steps") or []:
+            for n, step in enumerate(job.get("steps") or [], 1):
                 if not isinstance(step, dict) or "run" not in step:
                     continue
                 pick = lambda k: step.get(k) or run_of(job).get(k) or run_of(doc).get(k)
@@ -139,7 +139,7 @@ def run_steps():
                 for e in (doc.get("env"), job.get("env"), step.get("env")):
                     env.update({str(k): str(v) for k, v in (e or {}).items()} if isinstance(e, dict) else {})
                 out.append((str(step["run"] or ""), pick("shell"), pick("working-directory"), env,
-                            "%s: %s, step %d" % (f, job_id, (job.get("steps") or []).index(step) + 1)))
+                            "%s: %s, step %d" % (f, job_id, n)))
     return out
 
 
@@ -149,29 +149,54 @@ SHELLS = {None: "bash -e {0}", "bash": "bash --noprofile --norc -eo pipefail {0}
 # Stubs: a package manager records the script it was asked to run (`pnpm run lint:ts`, or
 # `pnpm lint:ts`; options and their values skipped) and fails when it is $FAIL_SCRIPT; npx
 # and node do nothing.
-# npm runs a script only through `npm run` (or `run-script`); pnpm and yarn take a bare name too.
-NPM = ('#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; esac; done\n'
-       'case ${1:-} in run|run-script) shift ;; *) exit 0 ;; esac\n'
-       'while [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; esac; done\n'
-       '[ -n "${1:-}" ] || exit 0\necho "$1" >>"$LOG"\n[ "$1" != "${FAIL_SCRIPT:-}" ]\n')
-PM = ('#!/bin/sh\nfor a; do [ "${prev:-}" != --filter ] && [ "${prev:-}" != -F ] || case $a in .|"$PKG"|"*"|./) ;;'
-      ' *) exit 0 ;; esac; prev=$a; done\n'  # a filter matching no package runs nothing, and succeeds
-      'skip() { while [ $# -gt 0 ]; do case $1 in --filter|-F|-C|--dir|--workspace) shift 2 ;;'
-      ' -*) shift ;; *) break ;; esac; done; echo "$@"; }\n'
-      'set -- $(skip "$@")\n'
-      'case ${1:-} in run|run-script) shift; set -- $(skip "$@") ;; exec|dlx|install|i|ci|add) exit 0 ;; esac\n'
-      '[ -n "${1:-}" ] || exit 0\necho "$1" >>"$LOG"\n[ "$1" != "${FAIL_SCRIPT:-}" ]\n')
+# Stubs for the package managers, in sh, parsing their own arguments (no word splitting): a
+# script runs as `pnpm run X`, `pnpm X` or `yarn X` (npm only through `run`), after options;
+# `--filter` (or `-F`, `--filter=`) on no package here runs nothing and succeeds; a lint:
+# script package.json doesn't have fails, as the real tool does. Each run script is recorded,
+# one a line, and $FAIL_SCRIPT fails, unless --no-bail (pnpm then exits 0).
+PM = r"""#!/bin/sh
+nobail=
+opts() {
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --filter|-F) case ${2:-} in .|./|"*"|"$PKG") ;; *) echo NOPKG; return ;; esac; shift 2 ;;
+      --filter=*) case ${1#--filter=} in .|./|"*"|"$PKG") ;; *) echo NOPKG; return ;; esac; shift ;;
+      -C|--dir|--workspace) shift 2 ;;
+      --no-bail) echo NOBAIL; shift ;;
+      -*) shift ;;
+      *) echo "$#"; return ;;
+    esac
+  done
+  echo 0
+}
+take() {
+  for r in $(opts "$@"); do
+    case $r in NOPKG) exit 0 ;; NOBAIL) nobail=1 ;; *) left=$r ;; esac
+  done
+}
+take "$@"; shift $(($# - left))
+case ${1:-} in
+  run|run-script) shift; take "$@"; shift $(($# - left)) ;;
+  exec|dlx|install|i|ci|add) exit 0 ;;
+  *) [ "$(basename "$0")" != npm ] || exit 0 ;;
+esac
+[ -n "${1:-}" ] || exit 0
+case $1 in lint:*) printf '%s\n' "$SCRIPTS" | grep -qxF -- "$1" || exit 1 ;; esac
+printf '%s\n' "$1" >>"$LOG"
+[ "$1" != "${FAIL_SCRIPT:-}" ] || [ -n "$nobail" ]
+"""
 NOOP = '#!/bin/sh\nexit 0\n'
 try:
     import json as _json
-    PKG = _json.load(open(os.path.join(d, "package.json"))).get("name") or ""
+    _pkg = _json.load(open(os.path.join(d, "package.json")))
+    PKG, SCRIPTS = _pkg.get("name") or "", "\n".join(_pkg.get("scripts") or {})
 except (OSError, ValueError):
-    PKG = ""
+    PKG, SCRIPTS = "", ""
 LINTS = ["lint:%s" % j for j in ["ts", "css", "md", "yaml", "json", "spell", "licenses"]]
 steps = run_steps()
 with tempfile.TemporaryDirectory() as t:
     os.makedirs(t + "/bin")
-    for tool, body in (("pnpm", PM), ("npm", NPM), ("yarn", PM), ("npx", NOOP), ("node", NOOP)):
+    for tool, body in (("pnpm", PM), ("npm", PM), ("yarn", PM), ("npx", NOOP), ("node", NOOP)):
         open(t + "/bin/" + tool, "w").write(body)
         os.chmod(t + "/bin/" + tool, 0o755)
 
@@ -188,21 +213,41 @@ with tempfile.TemporaryDirectory() as t:
                 home = tempfile.mkdtemp(dir=t)
                 files = {k_: os.path.join(home, k_.lower()) for k_ in ("GITHUB_STEP_SUMMARY", "GITHUB_OUTPUT",
                                                                        "GITHUB_ENV", "GITHUB_PATH")}
+                carried, added = {}, []  # what earlier steps of the job set through $GITHUB_ENV, $GITHUB_PATH
             template = SHELLS.get(shell, shell)
             if "{0}" not in template:
                 template += " {0}"
             script = "%s/step%d.sh" % (t, k)
             open(script, "w").write(re.sub(r"\$\{\{[^}]*\}\}", "", step) + "\n")
             log = "%s/log%d" % (t, k)
-            env = dict(extra, PATH=t + "/bin:/usr/bin:/bin", HOME=home, LOG=log, FAIL_SCRIPT=fail_script,
-                       PKG=PKG, CI="true", GITHUB_ACTIONS="true", **files)
+            env = dict(extra, **carried)
+            env.update(PATH=":".join(added + [t + "/bin", "/usr/bin", "/bin"]), HOME=home, LOG=log,
+                       FAIL_SCRIPT=fail_script, PKG=PKG, SCRIPTS=SCRIPTS, CI="true", GITHUB_ACTIONS="true", **files)
+            for f_ in files.values():
+                open(f_, "w").close()
             try:
                 rc = subprocess.run([x.replace("{0}", script) for x in template.split()],
                                     cwd=os.path.join(work, sub) if sub else work, env=env,
                                     capture_output=True, timeout=30).returncode
             except (subprocess.TimeoutExpired, OSError) as e:
-                rc = "timed out" if isinstance(e, subprocess.TimeoutExpired) else "can't run %s" % template
-            ran = open(log).read().split() if os.path.exists(log) else []
+                rc = "timed out" if isinstance(e, subprocess.TimeoutExpired) else "its shell can't be started"
+            # Later steps of the job get what this one wrote to $GITHUB_ENV (NAME=value, or
+            # NAME<<DELIM ... DELIM) and $GITHUB_PATH.
+            lines_ = open(files["GITHUB_ENV"]).read().split("\n")
+            i_ = 0
+            while i_ < len(lines_):
+                m_ = re.match(r"^([^=<]+)<<(.+)$", lines_[i_])
+                if m_:
+                    j_ = lines_.index(m_.group(2), i_ + 1) if m_.group(2) in lines_[i_ + 1:] else len(lines_)
+                    carried[m_.group(1)] = "\n".join(lines_[i_ + 1:j_])
+                    i_ = j_ + 1
+                    continue
+                if "=" in lines_[i_]:
+                    k_, _, v_ = lines_[i_].partition("=")
+                    carried[k_] = v_
+                i_ += 1
+            added = [l for l in open(files["GITHUB_PATH"]).read().split("\n") if l.strip()][::-1] + added
+            ran = open(log).read().splitlines() if os.path.exists(log) else []
             if os.path.exists(log):
                 os.remove(log)
             got.append((rc, {x for x in ran if x in LINTS}))
