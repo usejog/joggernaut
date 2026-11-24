@@ -19,7 +19,9 @@ the ci-cache and ci-guard checks read the workflow's text, its triggers and
 step in a fresh copy of the repository, with the shell GitHub would use
 (`bash -e` unless the step or `defaults` names another) and the step's
 `env:` and `working-directory:`, against stub package managers that record
-the scripts they are asked to run, and fails each lint in turn, so a lint
+the scripts they are asked to run (a command or option the stub can't
+vouch for fails the step: the check errs toward failing), and fails each
+lint in turn, so a lint
 that stops running, or whose failure no longer fails its step, fails the
 check. It can't see a step's `if:` or a matrix, and other commands run for
 real, so run it only where the agent ran (the eval's sandbox); the assertion check compares expected values, so an

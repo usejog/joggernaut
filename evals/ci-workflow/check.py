@@ -5,7 +5,7 @@ cancel runs on main.
 Every lint must still run, and fail its step when it fails: each `run:` step
 is executed in a fresh copy with the shell GitHub would use (bash -e, or bash
 -eo pipefail with `shell: bash`) against a stub `pnpm` that records the
-scripts it is asked to run and fails the one named in $FAIL_SCRIPT. A
+scripts it is asked to run and fails each lint in turn. A
 loop over the lints, run in the background, passes only if a failing lint
 still fails the step."""
 import os, re, shutil, subprocess, sys, tempfile
@@ -148,60 +148,70 @@ def run_steps():
 # GitHub's shells: unset is `bash -e {0}`; `shell: bash` adds pipefail; `sh` is `sh -e {0}`;
 # any other is a template with {0} for the script's file.
 SHELLS = {None: "bash -e {0}", "bash": "bash --noprofile --norc -eo pipefail {0}", "sh": "sh -e {0}"}
-# Stubs: a package manager records the script it was asked to run (`pnpm run lint:ts`, or
-# `pnpm lint:ts`; options and their values skipped) and fails when it is $FAIL_SCRIPT; npx
-# and node do nothing.
-# Stubs for the package managers, in sh, parsing their own arguments (no word splitting): a
-# script runs as `pnpm run X`, `pnpm X` or `yarn X` (npm only through `run`), after options;
-# `--filter` (or `-F`, `--filter=`) on no package here runs nothing and succeeds; a lint:
-# script package.json doesn't have fails, as the real tool does. Each run script is recorded,
-# one a line, and $FAIL_SCRIPT fails, unless --no-bail (pnpm then exits 0).
+# Stubs for the package managers, in sh, with what they compare baked in (a workflow can set
+# any variable, so the stub reads none of its own from the environment). A script runs as
+# `pnpm run X`, `pnpm X` or `yarn X` (npm only through `run`). Only options whose effect is
+# known are read: -s/--silent, --if-present, --no-bail (pnpm then exits 0 on a failed script),
+# --filter/-F/--filter-prod (on no package here: runs nothing), -C/--dir/--prefix (`.` only),
+# --help and --version (run nothing); any other option fails the step, as does a folder with
+# no package.json or a lint: script it doesn't have. Each script run is recorded, one a line;
+# the one named in the probe's fail file fails. npx and node can't be run here: they fail.
 PM = r"""#!/bin/sh
 nobail=
-opts() {
+[ -f package.json ] || exit 1
+opt() {
+  case $1 in
+    -s|--silent|--if-present) echo 1 ;;
+    --no-bail) echo B ;;
+    --help|-h|--version|-v) echo H ;;
+    --filter|-F|--filter-prod) case ${2:-} in .|./|"*"|"__PKG__") echo 2 ;; *) echo N ;; esac ;;
+    --filter=*|--filter-prod=*) case ${1#*=} in .|./|"*"|"__PKG__") echo 1 ;; *) echo N ;; esac ;;
+    -C|--dir|--prefix) case ${2:-} in .|./) echo 2 ;; *) echo X ;; esac ;;
+    --dir=*|--prefix=*) case ${1#*=} in .|./) echo 1 ;; *) echo X ;; esac ;;
+    -*) echo X ;;
+    *) echo 0 ;;
+  esac
+}
+skip() {
   while [ $# -gt 0 ]; do
-    case $1 in
-      --filter|-F|--filter-prod) case ${2:-} in .|./|"*"|"$PKG") ;; *) echo NOPKG; return ;; esac; shift 2 ;;
-      --filter=*|--filter-prod=*) case ${1#*=} in .|./|"*"|"$PKG") ;; *) echo NOPKG; return ;; esac; shift ;;
-      -C|--dir|--prefix) case ${2:-} in .|./) ;; *) echo NODIR; return ;; esac; shift 2 ;;
-      -C*|--dir=*|--prefix=*) case ${1#-C} in .|./|=.|=./) ;; *) case ${1#*=} in .|./) ;; *) echo NODIR; return ;; esac ;; esac; shift ;;
-      --help|-h|--version|-v) echo HELP; return ;;
-      --workspace) shift 2 ;;
-      --no-bail) echo NOBAIL; shift ;;
-      -*) shift ;;
-      *) echo "$#"; return ;;
+    r=$(opt "$@")
+    case $r in
+      0) break ;;
+      N|H) exit 0 ;;
+      X) exit 1 ;;
+      B) nobail=1; shift ;;
+      *) shift "$r" ;;
     esac
   done
-  echo 0
+  rest=$#
 }
-take() {
-  for r in $(opts "$@"); do
-    case $r in NOPKG|HELP) exit 0 ;; NODIR) exit 1 ;; NOBAIL) nobail=1 ;; *) left=$r ;; esac
-  done
-}
-take "$@"; shift $(($# - left))
+skip "$@"; shift $(($# - rest))
 case ${1:-} in
-  run|run-script) shift; take "$@"; shift $(($# - left)) ;;
-  exec|dlx|install|i|ci|add) exit 0 ;;
-  *) [ "$(basename "$0")" != npm ] || exit 0 ;;
+  run|run-script) shift; skip "$@"; shift $(($# - rest)) ;;
+  install|i|ci|add) exit 0 ;;
+  exec|dlx) exit 1 ;;
+  *) [ "$(basename "$0")" != npm ] || exit 1 ;;
 esac
 [ -n "${1:-}" ] || exit 0
-case $1 in lint:*) printf '%s\n' "$JOGGERNAUT_EVAL_SCRIPTS" | grep -qxF -- "$1" || exit 1 ;; esac
-printf '%s\n' "$1" >>"$LOG"
-[ "$1" != "${FAIL_SCRIPT:-}" ] || [ -n "$nobail" ]
+case $1 in lint:*) grep -qxF -- "$1" "__SCRIPTS__" || exit 1 ;; esac
+printf '%s\n' "$1" >>"__LOG__"
+[ "$1" != "$(cat "__FAIL__")" ] || [ -n "$nobail" ]
 """
-NOOP = '#!/bin/sh\nexit 0\n'
+NOOP = '#!/bin/sh\nexit 1\n'
 try:
     import json as _json
     _pkg = _json.load(open(os.path.join(d, "package.json")))
-    PKG, SCRIPTS = _pkg.get("name") or "", "\n".join(_pkg.get("scripts") or {})
+    PKG, SCRIPTS = _pkg.get("name") or "", "\n".join(_pkg.get("scripts") or {}) + "\n"
 except (OSError, ValueError):
     PKG, SCRIPTS = "", ""
 LINTS = ["lint:%s" % j for j in ["ts", "css", "md", "yaml", "json", "spell", "licenses"]]
 steps = run_steps()
 with tempfile.TemporaryDirectory() as t:
     os.makedirs(t + "/bin")
-    for tool, body in (("pnpm", PM), ("npm", PM), ("yarn", PM), ("npx", NOOP), ("node", NOOP)):
+    open(t + "/scripts", "w").write(SCRIPTS)
+    baked = PM.replace("__PKG__", PKG.replace('"', "")).replace("__SCRIPTS__", t + "/scripts").replace(
+        "__LOG__", t + "/log").replace("__FAIL__", t + "/fail")
+    for tool, body in (("pnpm", baked), ("npm", baked), ("yarn", baked), ("npx", NOOP), ("node", NOOP)):
         open(t + "/bin/" + tool, "w").write(body)
         os.chmod(t + "/bin/" + tool, 0o755)
 
@@ -224,13 +234,15 @@ with tempfile.TemporaryDirectory() as t:
                 template += " {0}"
             script = "%s/step%d.sh" % (t, k)
             open(script, "w").write(re.sub(r"\$\{\{[^}]*\}\}", "", step) + "\n")
-            log = "%s/log%d" % (t, k)
+            log = t + "/log"
+            open(log, "w").close()
+            open(t + "/fail", "w").write(fail_script)
             # As GitHub merges them: the workflow's and job's env, then what earlier steps wrote to
             # $GITHUB_ENV, then the step's own env.
             env = dict(extra[0], **carried)
             env.update(extra[1])
-            env.update(PATH=":".join(added + [t + "/bin", "/usr/bin", "/bin"]), HOME=home, LOG=log,
-                       FAIL_SCRIPT=fail_script, PKG=PKG, JOGGERNAUT_EVAL_SCRIPTS=SCRIPTS, CI="true", GITHUB_ACTIONS="true", **files)
+            env.update(PATH=":".join(added + [t + "/bin", "/usr/bin", "/bin"]), HOME=home, CI="true",
+                       GITHUB_ACTIONS="true", **files)
             for f_ in files.values():
                 open(f_, "w").close()
             try:
@@ -256,6 +268,9 @@ with tempfile.TemporaryDirectory() as t:
                 if "=" in lines_[i_]:
                     k_, _, v_ = lines_[i_].partition("=")
                     carried[k_] = v_
+                elif lines_[i_].strip():
+                    rc = rc or "an unreadable $GITHUB_ENV line"  # GitHub fails the step
+                    break
                 i_ += 1
             added = [l for l in open(files["GITHUB_PATH"]).read().split("\n") if l.strip()][::-1] + added
             ran = open(log).read().splitlines() if os.path.exists(log) else []
