@@ -70,17 +70,21 @@ of what it prints, for a made-up repository with made-up numbers:
 
 ```text
 Joggernaut · made-up example: acme/web · 150 PR runs over 3.75 days   read-only
-PR wait: median 14m 10s, slowest 5% 31m 02s, about 40 pushes a day
+PR wait, runs that ran the test job (124 runs, 98% of the wait):
+  median 14m 10s, slowest 5% 31m 02s, about 40 pushes a day
+  other runs: lint only (docs changes), 13 runs, median 2m 05s
+  blended over all 137 successful runs: median 13m 45s (a mix, not a wait)
+On the slowest path of the test-job runs (build -> test):
   waiting for a machine   0m 40s
   setup                   7m 25s   <- biggest: 52%
   running                 6m 05s
 Runner-minutes in failed, timed-out or cancelled runs 38%, catch-up 12%
 
 On the slowest path, observed in these runs         a run          a day
-> 1  pnpm cache never saved on main: cold PRs   -4m 50s on 96 runs  -2h 04m  ci-cache
-       install 5m 20s on 96 cold runs, 0m 30s on 41 warm; same job, same runner
+> 1  pnpm cache never saved on main: cold PRs   -4m 50s on 90 runs  -1h 56m  ci-cache
+       install 5m 20s on 90 cold runs, 0m 30s on 34 warm; same job, same runner
 On the slowest path, ceilings (not observed)
-  2  tests use 2 of 4 cores                     up to -2m 05s   up to -1h 23m  ci-slow-tests
+  2  tests use 2 of 4 cores                     up to -2m 05s   up to -1h 09m  ci-slow-tests
        with ideal scaling, twice the workers halves the 4m 10s test step
 Off the slowest path (runner-minutes, not wait)
   3  old PR runs keep going after a new push    up to 9 min on each of 54 runs        ci-workflow
@@ -331,9 +335,11 @@ before editing a tracked file or starting a fix.
 
 ```text
  ci-diagnose ──► ranked causes ──► one fixer skill ──► pull request ──► ci-measure
- read-only       wait saved a      cache, workflow,     diff + baseline   5+ runs a side,
- 150 PR runs     day, slowest      slow tests, flaky,   (provisional)     tests compared
-                 path only         guard                                  by name
+ read-only       by wait saved a   cache, workflow,     diff + baseline   5+ runs a side,
+ 150 PR runs,    day on the runs   slow tests, flaky,   (provisional)     tests compared
+ grouped by the  that ran them;    guard                                  by name
+ longest job     off the slowest
+ each one ran    path, by minutes
 ```
 
 Each folder under `skills/` is a `SKILL.md` in the

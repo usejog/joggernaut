@@ -894,6 +894,278 @@ r = run([M, "compare", "--before", "ci-history/before.jsonl", "--after", "ci-his
 if r.returncode != 0 or "verdict: not enough runs yet" not in r.stdout:
     bad.append("compare: no comparable runs at all should say not enough runs\n" + r.stdout + r.stderr)
 
+# Reusable workflows. GitHub lists a called workflow's jobs in the caller's run, named
+# "CALLER / JOB". A caller's tests sit in called jobs and a short gate job finishes last:
+# the slowest path must run through the called jobs, not file their time before the gate.
+from datetime import datetime as _dt, timezone as _tz
+
+
+def _at(t):
+    return _dt.fromtimestamp(1793000000 + t, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _job(name, queued, started, done, setup=10, conclusion="success"):
+    steps = [] if conclusion == "skipped" else [
+        {"name": "Set up job", "conclusion": "success", "started_at": _at(started), "completed_at": _at(started + setup)},
+        {"name": "Run tests", "conclusion": "success", "started_at": _at(started + setup), "completed_at": _at(done)}]
+    return {"id": abs(hash((name, queued))) % 10 ** 9, "name": name, "run_attempt": 1, "conclusion": conclusion,
+            "created_at": _at(queued), "started_at": _at(started), "completed_at": _at(done),
+            "labels": ["ubuntu-latest"], "runner_name": "r", "steps": steps}
+
+
+def _run(i, jobs, t0, name="CI"):
+    return {"id": 70000 + i, "name": name, "path": ".github/workflows/ci.yml", "event": "pull_request",
+            "head_branch": "b%d" % i, "head_sha": "%040d" % i, "run_attempt": 1, "head_message": "Fix",
+            "head_repo": "o/r", "conclusion": "success", "created_at": _at(t0), "run_started_at": _at(t0),
+            "updated_at": _at(t0 + 3000), "pull_requests": [i], "pull_request_bases": ["main"], "jobs": jobs}
+
+
+def _caller_run(i, t0, python=True, e2e_extra=0):
+    # plan (a called workflow) -> Python / unit, Python / integration -> Python / report;
+    # E2E / smoke after plan; a gate after everything. With python=False, a path filter
+    # skipped the Python suite: its caller shows as one skipped job, as GitHub lists it.
+    jobs = [_job("Plan / changes", t0 + 1, t0 + 3, t0 + 20)]
+    end = t0 + 20 + 2 + 120 + e2e_extra
+    jobs.append(_job("E2E / smoke", t0 + 20, t0 + 22, end))
+    if python:
+        jobs += [_job("Python / unit (3.12)", t0 + 20, t0 + 25, t0 + 20 + 900),
+                 _job("Python / integration", t0 + 20, t0 + 24, t0 + 20 + 400)]
+        jobs.append(_job("Python / report", t0 + 920, t0 + 923, t0 + 950, setup=5))
+        end = max(end, t0 + 950)
+    else:
+        jobs.append(_job("Python", t0 + 20, t0 + 20, t0 + 20, conclusion="skipped"))
+    jobs.append(_job("All checks pass", end, end + 2, end + 5, setup=1))
+    return _run(i, jobs, t0)
+
+
+with tempfile.TemporaryDirectory() as t:
+    full = [_caller_run(i, i * 4000, e2e_extra=10 * i) for i in range(6)]
+    out = t + "/called.jsonl"
+    open(out, "w").write("".join(json.dumps(x) + "\n" for x in full))
+    got = json.loads(run([M, "split", "--in", out, "--json"]).stdout)
+    chain = got["slowest_path_chains"][0]
+    if chain["jobs"] != ["Plan / changes", "Python / unit (3.12)", "Python / report", "All checks pass"] or chain["runs"] != 6:
+        bad.append("split: the slowest path didn't run through the called jobs: %r" % got["slowest_path_chains"])
+    sh = got["slowest_path_share"]
+    if "upstream" in got["slowest_path_split"] or abs(sum(sh.values()) - 1) > 1e-9 or sh["running"] < 0.9:
+        bad.append("split: a called workflow's running time wasn't on the slowest path: %r" % sh)
+    # The parts add up to each run's wait: here every run is 955 s from start to the gate's end.
+    rows = [json.loads(l) for l in open(out)]
+    for row in rows:
+        chain_, parts, _ = mm.path_split(row)
+        if abs(sum(parts.values()) - mm.run_wall(row)) > 1e-6:
+            bad.append("path_split: parts add up to %r, the wait is %r" % (sum(parts.values()), mm.run_wall(row)))
+            break
+    called = {x["caller"]: x for x in got["called_workflows"]}
+    if called.get("Python", {}).get("median") != 930 or called.get("Python", {}).get("runs") != 6:
+        bad.append("split: the Python called workflow should span 930 s in 6 runs: %r" % called.get("Python"))
+    # A rerun of failed jobs lists the jobs that passed before under the new attempt as GitHub
+    # does (python/cpython run 45186939309): newly queued, with their old start and end. They
+    # aren't on the new attempt's path, nor in its called workflows' times. Here the rerun
+    # starts 30 s after the reused jobs ended, so a link by end time alone would take them.
+    re_ = copy.deepcopy(full[0])
+    re_["run_attempt"] = 2
+    re_["run_started_at"] = _at(985)
+    for j in re_["jobs"]:
+        j["run_attempt"] = 2
+        j["created_at"] = _at(986)
+    re_["jobs"] = [j for j in re_["jobs"] if j["name"] != "E2E / smoke"]
+    re_["jobs"].append(dict(_job("E2E / smoke", 990, 992, 1100), run_attempt=2))
+    chain_, parts, _ = mm.path_split(re_)
+    if [j["name"] for j in chain_] != ["E2E / smoke"] or sum(parts.values()) != 115:
+        bad.append("path_split: a rerun's path took jobs from the attempt before: %r" % [j["name"] for j in chain_])
+    open(t + "/rerun.jsonl", "w").write(json.dumps(re_) + "\n")
+    got_re = json.loads(run([M, "split", "--in", t + "/rerun.jsonl", "--json"]).stdout)
+    if any(x["caller"] == "Python" or (x["median"] or 0) < 0 for x in got_re["called_workflows"]):
+        bad.append("split: a rerun's reused jobs went into its called workflows' times: %r" % got_re["called_workflows"])
+
+    # Links: a need's end stamped a second after the next job was queued still links; a long
+    # gap is "between", not "before the first job"; a skipped job is never a link; of two jobs
+    # ending in the same second, the one queued first is taken, and the tie is counted.
+    def chain_of(jobs):
+        got_ = mm.path_split(_run(0, jobs, 0))
+        return [j["name"] for j in got_[0]], got_[1], got_[2]
+    names, parts, _ = chain_of([_job("build", 1, 2, 301), _job("test", 300, 302, 600)])
+    if names != ["build", "test"]:
+        bad.append("path_split: a need stamped a second late wasn't linked: %r" % names)
+    names, parts, _ = chain_of([_job("build", 1, 2, 600), _job("deploy", 700, 702, 760)])
+    if names != ["build", "deploy"] or parts["between"] != 100 or parts["before_first"] != 1:
+        bad.append("path_split: a long gap should stay between the jobs: %r %r" % (names, parts))
+    names, parts, _ = chain_of([_job("build", 1, 2, 290), _job("docs", 1, 1, 299, conclusion="skipped"),
+                                _job("test", 300, 302, 600)])
+    if names != ["build", "test"]:
+        bad.append("path_split: a skipped job was taken as a link: %r" % names)
+    names, parts, ties = chain_of([_job("b", 1, 3, 300), _job("a", 2, 4, 300), _job("gate", 300, 301, 310)])
+    if names != ["b", "gate"] or ties != 1:
+        bad.append("path_split: a tie should go to the job queued first and be counted: %r %r" % (names, ties))
+
+    # Mixed cohorts: 14 pushes skip the Python suite (about 2.5 min), 6 run it (about 16 min).
+    # One median over all 20 is the fast group's, so the headline must be the group that
+    # holds most of the wait, with each group's count, median and tail, and the blend named.
+    mixed = full + [_caller_run(10 + i, (10 + i) * 4000, python=False) for i in range(14)]
+    out = t + "/mixed.jsonl"
+    open(out, "w").write("".join(json.dumps(x) + "\n" for x in mixed))
+    got = json.loads(run([M, "split", "--in", out, "--json"]).stdout)
+    groups = {c["longest_job"]: c for c in got["cohorts"]}
+    head = got["headline"] or {}
+    if (head.get("longest_job") != "CI / Python / unit (3.12)" or head.get("runs") != 6 or head.get("median") != 955
+            or groups.get("CI / E2E / smoke", {}).get("runs") != 14 or got["wait_median"] > 200):
+        bad.append("split: cohorts wrong: headline %r, groups %r" % (head, sorted(groups)))
+    text = run([M, "split", "--in", out]).stdout
+    if ("PR wait, runs whose longest job was CI / Python / unit (3.12) (6 successful runs" not in text
+            or "blended, all 20 successful runs" not in text
+            or not re.search(r"^ +14 runs .* CI / E2E / smoke$", text, re.M)):
+        bad.append("split: the headline should name its group and the blend\n" + text)
+    if "Python / unit (3.12)" not in text.split("slowest path of the runs in that headline")[-1].split("job that")[0]:
+        bad.append("split: the slowest path should describe the headline group\n" + text)
+    text = run([M, "split", "--in", out, "--cohort", "CI / E2E / smoke"]).stdout
+    if "PR wait, runs whose longest job was CI / E2E / smoke (14 successful runs" not in text or "chosen with --cohort" not in text:
+        bad.append("split: --cohort should choose the headline group\n" + text)
+    # The skipped caller isn't a job that took no time: the per-job table counts jobs that ran.
+    if any(x["job"] == "CI / Python" for x in got["jobs"]):
+        bad.append("split: a skipped job was counted in the jobs table")
+    # A group needs 5 runs to be the headline: one slow outlier doesn't head the report, and
+    # with no group of 5 the blend is the headline and says so.
+    odd = mixed + [_caller_run(40, 40 * 4000, e2e_extra=6000)]
+    odd[-1]["jobs"].append(_job("E2E / soak", 40 * 4000 + 20, 40 * 4000 + 22, 40 * 4000 + 7000))
+    open(t + "/odd.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in odd))
+    got = json.loads(run([M, "split", "--in", t + "/odd.jsonl", "--json"]).stdout)
+    if (got["cohorts"][0]["longest_job"] != "CI / E2E / soak" or (got["headline"] or {}).get("longest_job")
+            != "CI / Python / unit (3.12)"):
+        bad.append("split: a one-run group headed the report: %r" % (got["headline"],))
+    few_ = [_caller_run(50 + i, (50 + i) * 4000) for i in range(3)] + [
+        _caller_run(60 + i, (60 + i) * 4000, python=False) for i in range(3)]
+    open(t + "/few.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in few_))
+    text = run([M, "split", "--in", t + "/few.jsonl"]).stdout
+    if "PR wait, all 6 successful runs blended" not in text or "no group of them has 5 runs" not in text:
+        bad.append("split: with no group of 5 the headline should be the blend, named\n" + text)
+    # One group only: the plain line, no blend.
+    text = run([M, "split", "--in", t + "/called.jsonl"]).stdout
+    if "PR wait (run start to last job done, 6 successful runs)" not in text or "blended" in text:
+        bad.append("split: one group should print the plain PR wait line\n" + text)
+
+# Transient GitHub errors: a GET is tried 3 times with backoff; a run whose jobs still can't
+# be read is left out and named, never written with no jobs; a rate limit stops with its
+# reset time and isn't retried; a 404 isn't retried.
+import io
+import contextlib
+import types
+
+
+class _FakeGh:
+    def __init__(self, script):
+        self.script, self.calls = script, []
+
+    def __call__(self, cmd, **kw):
+        if cmd[0] != "gh":
+            return _real_run(cmd, **kw)
+        path = cmd[-1]
+        self.calls.append(path)
+        for match, answers in self.script:
+            if match in path:
+                ans = answers.pop(0) if len(answers) > 1 else answers[0]
+                if isinstance(ans, tuple):
+                    raise subprocess.CalledProcessError(1, cmd, "", ans[1])
+                return types.SimpleNamespace(stdout=ans, returncode=0)
+        raise AssertionError("unexpected gh call " + path)
+
+
+_real_run = subprocess.run
+_slept = []
+mm.sleep = _slept.append
+E502 = (1, "gh: Server Error (HTTP 502)")
+
+
+def _with(fake, fn):
+    mm.subprocess.run = fake
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()) as so:
+            try:
+                return fn(), so.getvalue(), err.getvalue(), None
+            except SystemExit as e:
+                return None, so.getvalue(), err.getvalue(), e
+    finally:
+        mm.subprocess.run = _real_run
+
+
+f = _FakeGh([("x/y", [E502, E502, '{"ok": 1}'])])
+got, _, _, ex = _with(f, lambda: mm.gh_get("x/y"))
+if got != {"ok": 1} or len(f.calls) != 3 or _slept != [2, 6]:
+    bad.append("gh_get: two 502s then an answer should take 3 tries with backoff: %r %r %r" % (got, f.calls, _slept))
+f = _FakeGh([("x/y", [E502])])
+got, _, err, ex = _with(f, lambda: mm.gh_get("x/y"))
+if ex is None or len(f.calls) != 3 or "failed 3 times: HTTP 502" not in err:
+    bad.append("gh_get: three 502s should stop, naming them: %r %r" % (f.calls, err))
+f = _FakeGh([("x/y", [(1, "gh: error connecting to api.github.com"), '{"ok": 2}'])])
+got, _, _, ex = _with(f, lambda: mm.gh_get("x/y"))
+if got != {"ok": 2}:
+    bad.append("gh_get: a dropped connection should be retried")
+f = _FakeGh([("x/y", ['{"cut', '{"ok": 3}'])])
+got, _, _, ex = _with(f, lambda: mm.gh_get("x/y"))
+if got != {"ok": 3} or len(f.calls) != 2:
+    bad.append("gh_get: an answer cut off mid-way should be tried again: %r" % f.calls)
+f = _FakeGh([("x/y", [(1, "gh: You have exceeded a secondary rate limit. (HTTP 403)")])])
+got, _, err, ex = _with(f, lambda: mm.gh_get("x/y"))
+if ex is None or len(f.calls) != 1 or "secondary rate limit" not in err:
+    bad.append("gh_get: a secondary rate limit should stop at once: %r %r" % (f.calls, err))
+f = _FakeGh([("rate_limit", ['{"resources": {"core": {"remaining": 0, "reset": 1793000000}}}']),
+             ("x/y", [(1, "gh: API rate limit exceeded for user ID 1. (HTTP 429)")])])
+got, _, err, ex = _with(f, lambda: mm.gh_get("x/y"))
+if ex is None or f.calls.count("x/y") != 1 or "resets at" not in err:
+    bad.append("gh_get: a primary rate limit on a 429 should stop with its reset time: %r" % err)
+f = _FakeGh([("x/y", [(1, "gh: Not Found (HTTP 404)")])])
+got, _, _, ex = _with(f, lambda: mm.gh_get("x/y", missing=True))
+if got is not None or len(f.calls) != 1:
+    bad.append("gh_get: a 404 should not be retried: %r" % f.calls)
+f = _FakeGh([("rate_limit", ['{"resources": {"core": {"remaining": 0, "reset": 1793000000}}}']),
+             ("x/y", [(1, "gh: API rate limit exceeded for user ID 1. (HTTP 403)")])])
+got, _, err, ex = _with(f, lambda: mm.gh_get("x/y"))
+if ex is None or f.calls.count("x/y") != 1 or "resets at" not in err:
+    bad.append("gh_get: a rate limit should stop at once with its reset time: %r %r" % (f.calls, err))
+
+with tempfile.TemporaryDirectory() as t:
+    listed = [{"id": 11, "status": "completed", "conclusion": "success", "event": "push", "created_at": _at(0)},
+              {"id": 12, "status": "completed", "conclusion": "failure", "event": "push", "created_at": _at(10)},
+              {"id": 13, "status": "completed", "conclusion": "success", "event": "push", "created_at": _at(20)}]
+    jobs = json.dumps([{"jobs": [_job("test", 0, 1, 60)]}])
+
+    outs = itertools.count()
+
+    def fetch_with(created, calls=None, failing="/runs/12/jobs"):
+        script = [("rate_limit", ['{"resources": {"core": {"remaining": 5000, "reset": 0}}}']),
+                  (failing, [E502]), ("/jobs", [jobs]),
+                  ("/runs?", [json.dumps({"total_count": 3, "workflow_runs": listed}),
+                              json.dumps({"total_count": 3, "workflow_runs": []})])]
+        a = types.SimpleNamespace(repo="o/r", workflow="ci.yml", event="push", branch=None, limit=10,
+                                  created=created, out=t + "/runs-%d.jsonl" % next(outs))
+        cwd = os.getcwd()
+        os.chdir(t)
+        try:
+            fake = _FakeGh(script)
+            res = _with(fake, lambda: mm.cmd_fetch(a))
+            if calls is not None:
+                calls.extend(fake.calls)
+            return a.out, res
+        finally:
+            os.chdir(cwd)
+    path, (_, so, err, ex) = fetch_with("<=" + _at(100))
+    ids = [json.loads(l)["id"] for l in open(path)] if os.path.exists(path) else []
+    if ex is not None or ids != [11, 13] or "left out: run 12 (failure), jobs read failed 3 times: HTTP 502" not in so:
+        bad.append("fetch: a run whose jobs can't be read should be left out and named: %r\n%s%s" % (ids, so, err))
+    seen = []
+    path, (_, so, err, ex) = fetch_with(_at(-100) + ".." + _at(100), seen)
+    if ex is None or os.path.exists(path) or "run 12 (failure)" not in err:
+        bad.append("fetch: a window read whole was written with a run left out\n" + so + err)
+    if any("/runs/13/" in c for c in seen):
+        bad.append("fetch: a window read whole kept reading after a run it must refuse")
+    # Every run unreadable: more than one in 20.
+    path, (_, so, err, ex) = fetch_with("<=" + _at(100), failing="/jobs")
+    if ex is None or os.path.exists(path) or "more than one run in 20" not in err:
+        bad.append("fetch: a baseline with most runs unreadable was written\n" + so + err)
+mm.sleep = mm.time.sleep
+
+
 # every check.py fails on its untouched sample (the planted cause is there)
 for case in sorted(glob.glob(E + "/ci-*/")):
     name = os.path.basename(case.rstrip("/"))

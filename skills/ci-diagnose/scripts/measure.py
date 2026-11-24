@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -133,22 +134,89 @@ def fmt(s):
     return "%s%dm %02ds" % (sign, m, r)
 
 
-def gh_get(path, paginate=False, missing=False):
-    """GET only. Returns parsed JSON (a list of pages when paginating); with missing,
-    None when the call fails instead of stopping."""
+# A GET that fails with a server error (HTTP 5xx), a dropped connection or a cut-off
+# answer is tried TRIES times in all, waiting BACKOFF seconds before each new try. A rate
+# limit is never retried: retrying spends the limit, and GitHub asks clients to wait.
+TRIES = 3
+BACKOFF = (2, 6)
+sleep = time.sleep  # the selftest swaps this out, so no test waits
+TRANSIENT = re.compile(r"HTTP 5\d\d|error connecting|connection (?:reset|refused)|broken pipe|i/o timeout"
+                       r"|TLS handshake timeout|unexpected EOF|context deadline exceeded|no such host"
+                       r"|server closed|stream error", re.I)
+RATE_LIMITED = re.compile(r"rate limit|HTTP 429", re.I)
+
+
+class Unread(Exception):
+    """A GET still failing after TRIES tries, for a reason a retry could have fixed."""
+
+    def __init__(self, what, why):
+        Exception.__init__(self, "%s failed %d times: %s" % (what, TRIES, why))
+        self.why = why
+
+
+def gh_text(cmd, what, parse=None):
+    """Run a gh GET, with retries; its output (passed through parse, when given), or Unread
+    once the tries run out. Anything a retry can't fix (a 404, a permission refusal)
+    raises CalledProcessError at once."""
+    why = ""
+    for n in range(TRIES):
+        if n:
+            sleep(BACKOFF[min(n, len(BACKOFF)) - 1])
+        try:
+            out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+        except FileNotFoundError:
+            die("gh is not installed; install the GitHub CLI and run `gh auth login`")
+        except subprocess.CalledProcessError as e:
+            err = e.stderr or ""
+            first = (err.strip().splitlines() or [str(e.returncode)])[0]
+            if re.search(r"HTTP 403|HTTP 429", err) and RATE_LIMITED.search(err):
+                rate_stop(what, err)
+            if not TRANSIENT.search(err):
+                raise
+            code = re.search(r"HTTP \d+", first)
+            why = code.group(0) if code else first[:80]
+            continue
+        if parse is None:
+            return out
+        try:
+            return parse(out)
+        except ValueError:  # an answer cut off mid-way: try again, like a dropped connection
+            why = "unreadable answer"
+    raise Unread(what, why)
+
+
+def rate_stop(what, err):
+    """Stop on a rate limit, saying when it lifts."""
+    if re.search(r"secondary rate limit", err, re.I):
+        die("%s hit GitHub's secondary rate limit; wait a few minutes before fetching again" % what)
+    try:
+        out = subprocess.run(["gh", "api", "--method", "GET", "rate_limit"], check=True,
+                             capture_output=True, text=True).stdout  # this call doesn't count against it
+        reset = datetime.utcfromtimestamp(json.loads(out)["resources"]["core"]["reset"]).strftime("%H:%M UTC")
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError):
+        reset = "a time GitHub didn't say"
+    die("%s hit GitHub's rate limit; it resets at %s" % (what, reset))
+
+
+def gh_get(path, paginate=False, missing=False, keep_going=False):
+    """GET only, with retries. Returns parsed JSON (a list of pages when paginating); with
+    missing, None on a 404 or 422 instead of stopping; with keep_going, raises Unread when
+    a retry-worthy failure outlasts every try instead of stopping."""
     cmd = ["gh", "api", "--method", "GET", "-H", "Accept: application/vnd.github+json", path]
     if paginate:
         cmd[2:2] = ["--paginate", "--slurp"]
+    what = "gh api " + path.split("?")[0]
     try:
-        out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
-    except FileNotFoundError:
-        die("gh is not installed; install the GitHub CLI and run `gh auth login`")
+        return gh_text(cmd, what, json.loads)
     except subprocess.CalledProcessError as e:
         if missing and re.search(r"HTTP 40[4]|HTTP 422", e.stderr or ""):
             return None
         first = (e.stderr or "").strip().splitlines()[:1]
-        die("gh api %s failed: %s" % (path.split("?")[0], first[0] if first else e.returncode))
-    return json.loads(out)
+        die("%s failed: %s" % (what, first[0] if first else e.returncode))
+    except Unread as e:
+        if keep_going:
+            raise
+        die(str(e))
 
 
 def check_rate():
@@ -295,7 +363,11 @@ def cmd_fetch(a):
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(a.out) or ".", prefix=".measure-", suffix=".partial")
     out = os.fdopen(fd, "w")
     try:
-        write_runs(a, runs, out)
+        # A window read whole is a side a comparison counts failures over: a run left out could
+        # be a failure the check never sees, so the first one stops it. Elsewhere a few may be
+        # left out, named (one, or one run in 20); more says GitHub is failing, not one run.
+        whole = bool(a.created) and not a.created.lstrip().startswith("<")
+        left_out = write_runs(a, runs, out, 0 if whole else max(1, len(runs) // 20))
         out.close()
         os.replace(tmp, a.out)
     except BaseException:
@@ -305,7 +377,9 @@ def cmd_fetch(a):
             if os.path.exists(tmp):
                 os.unlink(tmp)
         raise
-    print("wrote %d runs to %s" % (len(runs), a.out))
+    print("wrote %d runs to %s" % (len(runs) - len(left_out), a.out))
+    for line in left_out:
+        print("  left out: " + line)
 
 
 def pr_bases(a, r):
@@ -320,17 +394,35 @@ def pr_bases(a, r):
         return [(p.get("base") or {}).get("ref") for p in listed]
     owner = a.repo.split("/")[0]
     prs = gh_get("repos/%s/pulls?state=all&per_page=100&head=%s" % (
-        a.repo, quote("%s:%s" % (owner, r["head_branch"]), safe="")), missing=True) or []
+        a.repo, quote("%s:%s" % (owner, r["head_branch"]), safe="")), missing=True, keep_going=True) or []
     return sorted({(p.get("base") or {}).get("ref") for p in prs})
 
 
-def write_runs(a, runs, out):
+def write_runs(a, runs, out, may_leave_out):
+    """Write each run with its jobs. A run whose jobs (or pull requests) still can't be read
+    after every try is left out, never written with no jobs; returns those, one line each.
+    Stops once more than may_leave_out runs are left out."""
+    left_out = []
     for i, r in enumerate(runs):
         if i and i % 50 == 0:
             check_rate()  # other tools may share this token; stop at the floor, not past it
             print("  %d of %d runs read" % (i, len(runs)), file=sys.stderr)
-        pages = gh_get("%s/runs/%d/jobs?filter=all&per_page=100" % ("repos/%s/actions" % a.repo, r["id"]),
-                       paginate=True)
+        read = "jobs"
+        try:
+            pages = gh_get("%s/runs/%d/jobs?filter=all&per_page=100" % ("repos/%s/actions" % a.repo, r["id"]),
+                           paginate=True, keep_going=True)
+            read = "pull requests"
+            bases = pr_bases(a, r)
+        except Unread as e:
+            left_out.append("run %d (%s), %s read failed %d times: %s"
+                            % (r["id"], r.get("conclusion") or r.get("status"), read, TRIES, e.why))
+            if len(left_out) > may_leave_out:
+                die("%s; not writing %s: %s" % (
+                    left_out[-1], a.out,
+                    "a window read whole must hold every run (one left out could be a failure); its runs"
+                    " have all finished, so fetching it again reads the same ones" if not may_leave_out
+                    else "more than one run in 20 couldn't be read; fetch again later"))
+            continue
         jobs = [j for p in pages for j in p.get("jobs", [])]
         rec = {
             "id": r["id"], "name": r.get("name"), "path": r.get("path"),
@@ -341,7 +433,7 @@ def write_runs(a, runs, out):
             "conclusion": r.get("conclusion"), "created_at": r.get("created_at"),
             "run_started_at": r.get("run_started_at"), "updated_at": r.get("updated_at"),
             "pull_requests": [p.get("number") for p in r.get("pull_requests") or []],
-            "pull_request_bases": pr_bases(a, r),
+            "pull_request_bases": bases,
             "jobs": [{
                 "id": j["id"], "name": j.get("name"), "run_attempt": j.get("run_attempt", 1),
                 "conclusion": j.get("conclusion"), "created_at": j.get("created_at"),
@@ -353,6 +445,7 @@ def write_runs(a, runs, out):
             } for j in jobs],
         }
         out.write(json.dumps(rec) + "\n")
+    return left_out
 
 
 # ---------------------------------------------------------------- split
@@ -401,11 +494,96 @@ def run_wall(run):
     return max(secs(start, j["completed_at"]) or 0.0 for j in jobs)
 
 
-def slowest_job(run):
-    jobs = [j for j in latest_jobs(run) if j.get("completed_at")]
-    if not jobs:
+# The jobs list has no `needs:`. GitHub queues a job when the last job it needs ends, so the
+# job that ended last before another was queued (or up to LINK_EARLY seconds after: whole-
+# second stamps) is taken as the one it waited for.
+LINK_EARLY = 1.0
+PATH_PARTS = ("before_first", "between", "waiting", "setup", "running", "cleanup", "other")
+
+
+def slowest_path(run):
+    """The chain of jobs that decided when a run ended, first to last, read from the jobs'
+    times; a called workflow's jobs ("caller / called") are jobs like any other here.
+    Returns (chain, before_first, between, ties): the time from the run's start until the
+    chain's first job was queued, the time between one job on it ending and the next being
+    queued, and how many links had another job end within a second of the one taken."""
+    start = ts(run.get("run_started_at") or run.get("created_at"))
+    done = [j for j in this_attempt(run) if j.get("completed_at") and j.get("created_at")]
+    if not done:
         return None
-    return max(jobs, key=lambda j: ts(j["completed_at"]))
+    node = max(done, key=lambda j: ts(j["completed_at"]))
+    ran = [j for j in done if executed(j)]
+    chain, between, ties = [node], 0.0, 0
+    while True:
+        queued = ts(node["created_at"])
+        prior = [j for j in ran if ts(j["created_at"]) < queued and ts(j["completed_at"]) <= queued + LINK_EARLY]
+        if not prior:
+            break
+        # Ties go to the job queued first, then by name, so the same history gives the same path.
+        prior.sort(key=lambda j: (-ts(j["completed_at"]), ts(j["created_at"]), j.get("name") or ""))
+        p = prior[0]
+        # A long gap is time no listed job explains (an approval, a concurrency group): it
+        # stays "between", never given to a job.
+        gap = queued - ts(p["completed_at"])
+        ties += len(prior) > 1 and ts(p["completed_at"]) - ts(prior[1]["completed_at"]) < 1.0
+        between += max(0.0, gap)
+        chain.insert(0, p)
+        node = p
+    return chain, max(0.0, ts(chain[0]["created_at"]) - start), between, ties
+
+
+def this_attempt(run):
+    """The final attempt's jobs that ran in it. A rerun of failed jobs lists the jobs that
+    passed before under the new attempt too, newly queued but with their old start and end:
+    they ran before this attempt started, so its path and its called workflows' times
+    leave them out."""
+    start = ts(run.get("run_started_at") or run.get("created_at"))
+    return [j for j in latest_jobs(run)
+            if (j.get("started_at") or j.get("created_at")) and ts(j.get("started_at") or j["created_at"]) >= start - LINK_EARLY]
+
+
+def path_split(run, pattern=None):
+    """The slowest path's time in parts that add up to the run's wait: before its first job
+    was queued, between its jobs, and each of its jobs' waiting, setup, running, cleanup
+    and time no step covers. None for a run with no finished job."""
+    sp = slowest_path(run)
+    if not sp:
+        return None
+    chain, before_first, between, ties = sp
+    parts = dict.fromkeys(PATH_PARTS, 0.0)
+    parts["before_first"], parts["between"] = before_first, between
+    for j in chain:
+        js = job_split(j, pattern)
+        for k in ("waiting", "setup", "running", "cleanup", "other"):
+            parts[k] += js[k]
+    return chain, parts, ties
+
+
+def cohorts(ok_runs):
+    """Successful runs grouped by the longest job each one ran, longest by that job's median
+    running time over every run here that ran it: runs that skipped a suite (a path filter,
+    an `if:`) land apart from runs that ran it. Returns {job: [runs]}; a job is named
+    "WORKFLOW / JOB", called workflows' jobs included."""
+    times = {}
+    for r in ok_runs:
+        for j in latest_jobs(r):
+            if executed(j) and j.get("completed_at"):
+                times.setdefault("%s / %s" % (r.get("name"), j.get("name")), []).append(
+                    secs(j.get("started_at"), j.get("completed_at")) or 0.0)
+    rank = {k: median(v) for k, v in times.items()}
+    groups = {}
+    for r in ok_runs:
+        ran = {"%s / %s" % (r.get("name"), j.get("name")) for j in latest_jobs(r) if executed(j)}
+        ran &= set(rank)
+        key = min(ran, key=lambda k: (-rank[k], k)) if ran else "(no job ran)"
+        groups.setdefault(key, []).append(r)
+    return groups
+
+
+def caller_of(name):
+    """The calling job's name for a called workflow's job ("caller / called"), or None. A
+    job whose own name has " / " in it is read the same way: the name is all GitHub gives."""
+    return name.split(" / ")[0] if name and " / " in name else None
 
 
 CATCH_UP = re.compile(r"^Merge (?:branch|remote-tracking branch) '[^']+'(?: of \S+)? into ")
@@ -429,6 +607,32 @@ def cmd_split(a):
     walls = [w for w in (run_wall(r) for r in runs if r.get("conclusion") == "success") if w is not None]
     out = {"runs": len(runs), "wait_median": median(walls), "wait_p95": pct(walls, 0.95),
            "wait_tail": list(tail(walls)), "p95_provisional": len(walls) < P95_FIRM}
+    # Runs that ran different jobs (a path filter, an `if:`) wait different times, and one
+    # median over all of them describes neither. Group them by the longest job each ran; the
+    # headline is the group that holds the most of the total wait, unless --cohort names one.
+    groups = cohorts([r for r in runs if r.get("conclusion") == "success"])
+    total_wait = sum(walls) or 1.0
+    table = []
+    for key, rs in groups.items():
+        w = [x for x in (run_wall(r) for r in rs) if x is not None]
+        if w:
+            table.append({"longest_job": key, "runs": len(w), "median": median(w), "tail": list(tail(w)),
+                          "share_of_wait": sum(w) / total_wait})
+    table.sort(key=lambda c: (-c["share_of_wait"], c["longest_job"]))
+    out["cohorts"] = table
+    if a.cohort:
+        pick = [c for c in table if c["longest_job"] == a.cohort]
+        if not pick:
+            die("no group of runs whose longest job is %r; the groups are: %s"
+                % (a.cohort, "; ".join(c["longest_job"] for c in table)))
+        head = pick[0]
+    else:
+        # A group of a run or two can be an outlier, so the headline needs MIN_RUNS; with
+        # none that big (job names that change from run to run), the blend is the headline.
+        big = [c for c in table if c["runs"] >= MIN_RUNS]
+        head = big[0] if big else (table[0] if len(table) == 1 else None)
+    out["headline"] = head
+    path_runs = groups[head["longest_job"]] if head else [r for r in runs if r.get("conclusion") == "success"]
     # With several workflows in one file, a pull request waits for all of them:
     # per commit, from the first run's start to the last job done, where every run passed.
     names = {r.get("name") for r in runs}
@@ -471,26 +675,54 @@ def cmd_split(a):
     out["pr_commits"] = len(commits)
     out["runs_per_day"] = round(len(commits) / span_days, 1) if span_days >= 1 and commits else None
 
-    # The three-way split on the slowest path: the job that finished last in each run.
-    path = {"upstream": [], "waiting": [], "setup": [], "running": [], "cleanup": [], "other": []}
-    path_jobs = {}
-    per_job = {}
+    # The slowest path: the chain of jobs that decided when each run ended, through called
+    # workflows' jobs, split into parts that add up to its wait.
+    path = {k: [] for k in PATH_PARTS}
+    path_jobs, chains, on_path, ties = {}, {}, {}, 0
+    per_job, called = {}, {}
     ok_runs = [r for r in runs if r.get("conclusion") == "success"]
+    on_head = {id(r) for r in path_runs}
     for r in ok_runs:
-        # The same cohort as the PR wait: a cancelled or failed run can stop early and
-        # make setup look like most of the time.
-        sj = slowest_job(r)
-        if sj:
-            sp = job_split(sj, a.setup_pattern)
-            sp["upstream"] = secs(r.get("run_started_at") or r.get("created_at"), sj.get("created_at")) or 0.0
-            for k in path:
-                path[k].append(sp[k])
-            path_jobs[sj["name"]] = path_jobs.get(sj["name"], 0) + 1
+        # The same runs as the headline wait: a cancelled or failed run can stop early and
+        # make setup look like most of the time, and a run that skipped the slowest suite
+        # has another path.
+        ps = path_split(r, a.setup_pattern) if id(r) in on_head else None
+        if ps:
+            chain, parts, t = ps
+            ties += t
+            for k in PATH_PARTS:
+                path[k].append(parts[k])
+            last = chain[-1].get("name")
+            path_jobs[last] = path_jobs.get(last, 0) + 1
+            key = tuple(j.get("name") or "" for j in chain)
+            chains[key] = chains.get(key, 0) + 1
+            for j in chain:
+                on_path.setdefault(j.get("name") or "", []).append(secs(j.get("created_at"), j.get("completed_at")) or 0.0)
+        spans = {}
+        fresh = {id(j) for j in this_attempt(r)}
         for j in latest_jobs(r):
+            if not executed(j):
+                continue  # a skipped job took no time; counting it as 0 would halve a median
             key = "%s / %s" % (r.get("name"), j.get("name"))
             per_job.setdefault(key, []).append(job_split(j, a.setup_pattern))
+            c = caller_of(j.get("name"))
+            if c and id(j) in fresh and j.get("created_at") and j.get("completed_at"):
+                lo, hi = spans.get(c, (None, None))
+                q, e = ts(j["created_at"]), ts(j["completed_at"])
+                spans[c] = (q if lo is None else min(lo, q), e if hi is None else max(hi, e))
+        for c, (lo, hi) in spans.items():
+            called.setdefault(c, []).append(hi - lo)
     out["slowest_path_split"] = {k: median(v) for k, v in path.items()}
+    total_path = sum(sum(v) for v in path.values())
+    out["slowest_path_share"] = {k: (sum(v) / total_path if total_path else None) for k, v in path.items()}
     out["slowest_path_jobs"] = sorted(path_jobs.items(), key=lambda kv: -kv[1])
+    out["slowest_path_chains"] = [{"jobs": list(k), "runs": n}
+                                  for k, n in sorted(chains.items(), key=lambda kv: (-kv[1], kv[0]))]
+    out["slowest_path_ties"] = ties
+    out["on_slowest_path"] = sorted(({"job": k, "runs": len(v), "median": median(v)} for k, v in on_path.items()),
+                                    key=lambda x: (-x["runs"] * (x["median"] or 0), x["job"]))
+    out["called_workflows"] = sorted(({"caller": k, "runs": len(v), "median": median(v), "tail": list(tail(v))}
+                                      for k, v in called.items()), key=lambda x: (-(x["median"] or 0), x["caller"]))
 
     jobs_table = []
     for key, sps in per_job.items():
@@ -581,9 +813,33 @@ def cmd_split(a):
         else ", under 0.1 pushes a day" if out["runs_per_day"] == 0
         else ", about %s pushes a day" % out["runs_per_day"]))
     label, value = out["wait_tail"]
-    print("PR wait (run start to last job done, %d successful runs): median %s, %s %s%s"
-          % (len(walls), fmt(out["wait_median"]), label, fmt(value),
-             " (provisional: under %d runs)" % P95_FIRM if out["p95_provisional"] else ""))
+    few = lambda n: " (provisional: under %d runs)" % P95_FIRM if n < P95_FIRM else ""
+    if len(table) <= 1:
+        print("PR wait (run start to last job done, %d successful runs): median %s, %s %s%s"
+              % (len(walls), fmt(out["wait_median"]), label, fmt(value), few(len(walls))))
+    elif head is None:
+        print("PR wait, all %d successful runs blended (run start to last job done): median %s, %s %s%s"
+              % (len(walls), fmt(out["wait_median"]), label, fmt(value), few(len(walls))))
+        print("  runs ran different jobs, but no group of them has %d runs, so this mixes %d groups"
+              " (--json lists them)" % (MIN_RUNS, len(table)))
+    else:
+        print("PR wait, runs whose longest job was %s (%d successful runs, %.0f%% of all successful runs' wait%s):"
+              " median %s, %s %s%s"
+              % (head["longest_job"], head["runs"], 100 * head["share_of_wait"],
+                 "; chosen with --cohort" if a.cohort else ", the most of any group of %d or more" % MIN_RUNS,
+                 fmt(head["median"]),
+                 head["tail"][0], fmt(head["tail"][1]), few(head["runs"])))
+        print("  successful runs ran different jobs; grouped by the longest job each ran (by its median here),"
+              " most of the wait first:")
+        for c in table[:6]:
+            print("  %5d runs  %3.0f%% of the wait  median %-8s %s %-8s  %s" % (
+                c["runs"], 100 * c["share_of_wait"], fmt(c["median"]), c["tail"][0], fmt(c["tail"][1]),
+                c["longest_job"]))
+        if len(table) > 6:
+            print("  and %d more groups, %d runs (--json lists every group)"
+                  % (len(table) - 6, sum(c["runs"] for c in table[6:])))
+        print("  blended, all %d successful runs (mixes these groups; not the wait of any one): median %s, %s %s"
+              % (len(walls), fmt(out["wait_median"]), label, fmt(value)))
     if len(names) > 1:
         if cross:
             label, value = out["wait_all_workflows_tail"]
@@ -593,13 +849,31 @@ def cmd_split(a):
                      " (provisional: under %d commits)" % P95_FIRM if out["wait_all_workflows_provisional"] else ""))
         else:
             print("PR wait across workflows: no commit has passing runs of two or more workflows here")
-    sp = out["slowest_path_split"]
-    tot = sum(v or 0 for v in sp.values()) or 1
-    print("slowest path, median split (upstream: run start until the last job was queued,"
-          " i.e. jobs it needs):")
-    for k in ("upstream", "waiting", "setup", "running", "cleanup", "other"):
-        print("  %-8s %9s  %3.0f%%" % (k, fmt(sp[k]), 100.0 * (sp[k] or 0) / tot))
+    sp, share = out["slowest_path_split"], out["slowest_path_share"]
+    print("slowest path%s: the chain of jobs that decided when each run ended, called"
+          " workflows' jobs included, read from the jobs' times (check it against `needs:`)."
+          " Median a run, and share of all its seconds:"
+          % (" of the runs in that headline" if len(table) > 1 and head else ", successful runs"))
+    for k, label in (("before_first", "before its first job was queued"),
+                     ("between", "between its jobs (one ended, the next queued)"),
+                     ("waiting", "waiting for a machine"), ("setup", "setup"), ("running", "running"),
+                     ("cleanup", "cleanup (post steps)"), ("other", "in a job, no step")):
+        print("  %-46s %9s  %3.0f%%" % (label, fmt(sp[k]), 100.0 * (share[k] or 0)))
+    for c in out["slowest_path_chains"][:3]:
+        print("  path in %d runs: %s" % (c["runs"], " -> ".join(c["jobs"])))
+    if out["slowest_path_ties"]:
+        print("  %d links had two jobs end within a second; the path took the one queued first"
+              % out["slowest_path_ties"])
+    print("jobs on the slowest path, by time on it (queued to done, median): " + ", ".join(
+        "%s %s in %d runs" % (x["job"], fmt(x["median"]), x["runs"])
+        for x in out["on_slowest_path"][:5]))
     print("job that finishes last: " + ", ".join("%s (%d runs)" % kv for kv in out["slowest_path_jobs"][:3]))
+    if out["called_workflows"]:
+        print("called workflows (jobs named \"CALLER / JOB\"; a job whose own name holds \" / \" is grouped too),"
+              " first job queued to last done, successful runs:")
+        for x in out["called_workflows"][:10]:
+            print("  %-48s n=%-4d median %-8s %s %s" % (x["caller"][:48], x["runs"], fmt(x["median"]),
+                                                       x["tail"][0], fmt(x["tail"][1])))
     print("jobs by median total (top 10):")
     for row in jobs_table[:10]:
         print("  %-48s n=%-4d wait %-8s setup %-8s run %-8s total %s" % (
@@ -1268,9 +1542,11 @@ SCCACHE = re.compile(r"^\s*(cache hits|cache misses|compile requests)\s+(\d+)\s*
 def cmd_cachelog(a):
     cmd = ["gh", "api", "--method", "GET", "repos/%s/actions/jobs/%s/logs" % (a.repo, a.job)]
     try:
-        out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+        out = gh_text(cmd, "the log of job %s" % a.job)
     except subprocess.CalledProcessError:
         die("could not read the log of job %s" % a.job)
+    except Unread as e:
+        die(str(e))
     # Print only fixed outcome labels and counters, never log text.
     for line in out.splitlines():
         text = re.sub(r"^\S+Z\s", "", line)
@@ -1392,6 +1668,8 @@ def main(argv=None):
     s.add_argument("--in", dest="input", default="runs.jsonl")
     s.add_argument("--workflow", help="workflow name to keep")
     s.add_argument("--setup-pattern", help="regex for setup step names (lower case)")
+    s.add_argument("--cohort", help="the group of runs the headline wait and slowest path describe, named by"
+                   " its longest job as split lists it (default: the group with the most of the wait)")
     s.add_argument("--json", action="store_true")
 
     c = sub.add_parser("compare", help="before against after, with a verdict")
