@@ -2503,6 +2503,21 @@ with tempfile.TemporaryDirectory() as t:
                 or (want[1] > 0) != ("carried no pull-request number" in text):
             bad.append("split #14: fork runs %r keyed as %r, not %r"
                        % (specs, (got.get("pr_commits"), got.get("pr_runs_keyed_by_branch")), want))
+    # --workflow a.yml selects the file a.yml, not also another file whose display name is a.yml;
+    # a renamed workflow is one workflow and one set of jobs.
+    rows = []
+    for k, (path, name, ok) in enumerate((("a.yml", "CI", True), ("b.yml", "a.yml", False))):
+        x = _run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 120)], 9000 * k, name=name)
+        x.update(path=".github/workflows/" + path, conclusion="success" if ok else "failure")
+        rows.append(x)
+    got = json.loads(_split(t, rows, "--json", "--workflow", "a.yml").stdout or "{}")
+    if (got.get("passed_runs"), got.get("ended_runs")) != (1, 1):
+        bad.append("split: --workflow a.yml pooled another file named a.yml: %r" % ((got.get("passed_runs"), got.get("ended_runs")),))
+    rows = [_run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 120)], 9000 * k, name=n)
+            for k, n in enumerate(("CI", "Checks"))]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    if got.get("job_sets") != 1 or got.get("workflows") != ["Checks"]:
+        bad.append("split: a renamed workflow made two sets or two workflows: %r %r" % (got.get("job_sets"), got.get("workflows")))
     # #14: a repository whose pull-request workflow runs on pull_request_target alone.
     rows = []
     for i in range(6):
@@ -2533,7 +2548,7 @@ with tempfile.TemporaryDirectory() as t:
     got = json.loads(_split(t, rows, "--json").stdout or "{}")
     text = _split(t, rows).stdout
     head = got.get("headline") or {}
-    if (head.get("commonest_set") or {}).get("median") != 602 or head["commonest_set"].get("jobs") != ["CI / build"] \
+    if (head.get("commonest_set") or {}).get("median") != 602 or head["commonest_set"].get("jobs") != [".github/workflows/ci.yml / build"] \
             or head.get("job_sets") != 2 or (head.get("commonest_set") or {}).get("runs") != 3 \
             or (head.get("commonest_set") or {}).get("tied_with") != 1 or len(got.get("cohorts") or []) != 1 \
             or "ran 2 different sets of jobs" not in text or "tied with 1 other set" not in text:

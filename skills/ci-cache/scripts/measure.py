@@ -878,7 +878,12 @@ def pr_pushes(runs):
 
 
 def cmd_split(a):
-    runs = [r for r in read_runs(a.input) if workflow_matches(r, a.workflow)]
+    every = read_runs(a.input)
+    # --workflow names a file (ci.yml) when one of the runs' files has that name, else a
+    # display name: never both, so a file and another file's display name don't pool.
+    files = {os.path.basename(r.get("path") or "") for r in every}
+    runs = [r for r in every if not a.workflow or (os.path.basename(r.get("path") or "") == a.workflow
+                                                     if a.workflow in files else r.get("name") == a.workflow)]
     if not runs:
         die("no runs to read")
     # PR wait over successful runs, as compare measures it.
@@ -911,7 +916,7 @@ def cmd_split(a):
             by_set = {}
             for r, x in walls_of:
                 if x is not None:
-                    js = tuple(sorted("%s / %s" % (r.get("name"), j.get("name")) for j in latest_jobs(r) if executed(j)))
+                    js = tuple(sorted("%s / %s" % (wf_key(r), j.get("name")) for j in latest_jobs(r) if executed(j)))
                     by_set.setdefault(js, []).append(x)
             top = min(by_set.items(), key=lambda kv: (-len(kv[1]), kv[0]))
             ties = sum(1 for v in by_set.values() if len(v) == len(top[1])) - 1
@@ -922,7 +927,7 @@ def cmd_split(a):
                                             "tied_with": ties}})
     table.sort(key=lambda c: (-c["share_of_wait"], c["longest_job"]))
     out["cohorts"] = table
-    out["job_sets"] = len({tuple(sorted("%s / %s" % (r.get("name"), j.get("name")) for j in latest_jobs(r) if executed(j)))
+    out["job_sets"] = len({tuple(sorted("%s / %s" % (wf_key(r), j.get("name")) for j in latest_jobs(r) if executed(j)))
                            for r in runs if r.get("conclusion") == "success" and run_wall(r) is not None})
     if a.cohort:
         pick = [c for c in table if c["longest_job"] == a.cohort]
@@ -966,7 +971,7 @@ def cmd_split(a):
     # Each workflow once, by its newest run's display name (a file can be renamed).
     filed = any(r.get("path") for r in runs)
     newest = {}
-    for r in sorted(runs, key=lambda x: x.get("created_at") or ""):
+    for r in sorted(runs, key=lambda x: ts(x.get("created_at")) or 0):
         if r.get("path") or not filed:
             newest[wf_key(r)] = r.get("name") or ""
     shared = {n for n in newest.values() if list(newest.values()).count(n) > 1}
@@ -1210,9 +1215,11 @@ def cmd_split(a):
               % (head["job_sets"], ", ".join(cs["jobs"]), cs["runs"],
                  ", tied with %d other set%s" % (cs["tied_with"], "s" * (cs["tied_with"] > 1)) if cs["tied_with"] else "",
                  fmt(cs["median"])))
-    if head and head["reruns"]:
-        print("  %d of the headline's runs passed on a rerun: a run's wait starts at its last attempt, so theirs"
-              " covers only the jobs rerun" % head["reruns"])
+    reruns = head["reruns"] if head else sum(1 for r in runs if r.get("conclusion") == "success"
+                                             and run_wall(r) is not None and (r.get("run_attempt") or 1) > 1)
+    if reruns:
+        print("  %d of the %s runs passed on a rerun: a run's wait starts at its last attempt, so theirs"
+              " covers only the jobs rerun" % (reruns, "headline's" if head else "blended"))
     if len(names) > 1:
         if cross:
             label, value = out["wait_all_workflows_tail"]
