@@ -2031,6 +2031,46 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("flaky --runs-dir: a run with no jobs page dropped out of the line: %r\n%s" % (got, r.stderr))
 
 
+# The ci-workflow check reads a fold written as a loop over literal words (#34): every task
+# the loop names counts, and one it leaves out still fails.
+LOOP_FOLD = """name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          tasks=(%s)
+          for t in "${tasks[@]}"; do pnpm run "lint:$t" & pids+=("$!"); done
+          for p in "${pids[@]}"; do wait "$p" || failed=1; done
+          exit "${failed:-0}"
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm test
+"""
+for tasks, want in (("ts css md yaml json spell licenses", 0), ("ts css md yaml json spell", 1)):
+    work = tempfile.mkdtemp(prefix="joggernaut-loop-")
+    try:
+        shutil.copytree(E + "/ci-workflow/repo", work, dirs_exist_ok=True)
+        subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "s"], cwd=work, check=True)
+        subprocess.run(["git", "tag", "sample"], cwd=work, check=True)
+        wfdir = os.path.join(work, ".github/workflows")
+        for f in os.listdir(wfdir):
+            os.remove(os.path.join(wfdir, f))
+        open(os.path.join(wfdir, "ci.yml"), "w").write(LOOP_FOLD % tasks)
+        open(os.path.join(work, "PR.md"), "w").write("Folded the lints.")
+        r = run([E + "/ci-workflow/check.py", work])
+        if (r.returncode != 0) != bool(want) or (want and "lint:licenses no longer runs" not in r.stdout):
+            bad.append("ci-workflow check misread a loop fold of %r\n%s" % (tasks, r.stdout))
+    finally:
+        shutil.rmtree(work)
+
 # every check.py fails on its untouched sample (the planted cause is there)
 for case in sorted(glob.glob(E + "/ci-*/")):
     name = os.path.basename(case.rstrip("/"))

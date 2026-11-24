@@ -15,8 +15,9 @@ sample and its CI history is made up; none describes a real project.
 
 Each `check.py` decides by script, not by a model. Its limits, stated plainly:
 the workflow checks (ci-cache, ci-workflow, ci-guard) read the workflow's
-text, its triggers and `run:` lines, and don't execute it, so a step that
-only echoes a lint's name, or runs lints in the background and drops their
+text, its triggers and `run:` lines, and don't execute it (ci-workflow
+expands a loop over literal task names), so a step that only echoes a
+lint's name, or runs lints in the background and drops their
 exit codes, can pass; the assertion check compares expected values, so an
 assertion rewritten against a constant can pass; the ci-diagnose check looks for the planted cause in free text, and the ci-measure check reads an exact `Verdict:` first line and a `Stopped running:` line the prompt asks for. A passing eval is evidence, not proof: read the agent's diff.
 Checks diff against the sample as handed over (the `sample` tag), so an agent
