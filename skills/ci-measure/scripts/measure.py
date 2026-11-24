@@ -1496,7 +1496,7 @@ def cmd_compare(a):
     # base, any outcome, and with --ran the runs where that job got a runner in some attempt.
     ran_any = lambda r: any(j.get("name") == a.ran and on_a_runner(j) for j in r.get("jobs", []))
     # Every completed run, neutral and skipped ones too, as the label check read before.
-    # Not by cache state: a runner seen only on runs of the other state still shows where the
+    # Not by cache state (every run, finished or not): a runner seen only on the other state shows where the
     # pushes went (as the label check always read).
     selected = lambda rs: [r for r in rs if in_workflow(r) and (not a.ran or ran_any(r))]
     # The runs the per-job and whole-run runner checks read, as before: every green run of
@@ -1879,6 +1879,8 @@ def cmd_compare(a):
         def off_runner(rs):
             n = x = 0
             for r in selected(rs):
+                if a.cache and cache.get(str(r["id"])) != a.cache:
+                    continue  # routing within the selected cache state: the timed runs' state
                 # Runs where it got a runner, in any attempt (a job cancelled in the queue never
                 # did); off the runner when the first attempt didn't run it there (it ran
                 # elsewhere, or only on a retry). With --job, that job alone, --end or not.

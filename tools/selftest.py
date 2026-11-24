@@ -2977,6 +2977,24 @@ with tempfile.TemporaryDirectory() as t:
     v, r = _cmp(t, b_, a_, "--job", "test", "--cache", "hit", "--cache-state", t + "/cache.json")
     if "error" not in v:
         bad.append("compare --cache: a runner seen only on misses was hidden: %r" % v.get("verdict"))
+    # Routing within the selected cache state: hits reach L slow before and fast after, misses
+    # the other way; pooled, the counts match.
+    hits2 = {}
+    def routed_cache(base_id, after):
+        rows = []
+        for i in range(60):
+            hit = i < 30
+            slow = (i % 30) < 25
+            on_l = (slow != after) if hit else (slow == after)
+            hits2[str(base_id + i)] = "hit" if hit else "miss"
+            rows.append(_cr(base_id + i, [_J("test", 0, 100 if slow else 10, labels=("L" if on_l else "M",))]))
+        return rows
+    b_, a_ = routed_cache(88000, False), routed_cache(89000, True)
+    open(t + "/cache2.json", "w").write(json.dumps(hits2))
+    v, r = _cmp(t, b_, a_, "--job", "test", "--label", "L", "--cache", "hit", "--cache-state", t + "/cache2.json")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare --cache: routing among the selected cache state was pooled away: %r %r"
+                   % (v.get("verdict"), (v.get("off_runner_before"), v.get("off_runner_after"))))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))
