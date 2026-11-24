@@ -2483,7 +2483,8 @@ with tempfile.TemporaryDirectory() as t:
     rows_id[0]["workflow_id"], rows_id[1]["workflow_id"] = 17, 35
     rows_id[1]["name"] = "Lint"
     got = json.loads(_split(t, rows_id, "--json").stdout or "{}")
-    if got.get("wait_all_workflows_commits") != 1 or got.get("wait_all_workflows_unplaced_commits") != 0:
+    if got.get("wait_all_workflows_commits") != 1 or got.get("wait_all_workflows_unplaced_commits") != 0 \
+            or sorted(got.get("workflows") or []) != ["CI", "Lint"]:
         bad.append("split #7: a run with its workflow id but no file wasn't placed: %r %r"
                    % (got.get("wait_all_workflows_commits"), got.get("wait_all_workflows_unplaced_commits")))
     # ... and one 48 hours later, outside the commit's window, changes nothing.
@@ -2559,6 +2560,15 @@ with tempfile.TemporaryDirectory() as t:
     if got.get("job_sets") != 1 or got2.get("job_sets") != 1:
         bad.append("split: a run with no file, or another workflow's failure, made another set of jobs: %r %r"
                    % (got.get("job_sets"), got2.get("job_sets")))
+    # Two workflows told apart only by their saved ids (one with no file) are two sets of jobs.
+    rows = [_run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + (60 if k < 3 else 600))], 9000 * k) for k in range(5)]
+    for k, x in enumerate(rows):
+        x["workflow_id"] = 17 if k < 3 else 35
+        if k >= 3:
+            del x["path"]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    if got.get("job_sets") != 2:
+        bad.append("split: workflows told apart by id made one set of jobs: %r" % got.get("job_sets"))
     # #14: a repository whose pull-request workflow runs on pull_request_target alone.
     rows = []
     for i in range(6):

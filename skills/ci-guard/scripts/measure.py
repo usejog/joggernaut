@@ -887,6 +887,12 @@ def cmd_split(a):
     for r in every:
         if not r.get("path") and r.get("workflow_id") in id_path:
             r["path"] = id_path[r["workflow_id"]]
+    # An id stands for a workflow only where every run with a file has its id too: a file from
+    # an older fetch has a file and no id, and its workflow's id-only runs would make another.
+    if any(r.get("path") and r.get("workflow_id") is None for r in every):
+        for r in every:
+            if not r.get("path"):
+                r.pop("workflow_id", None)
     # --workflow names a file (ci.yml) when one of the runs' files has that name, else a
     # display name: never both, so a file and another file's display name don't pool.
     files = {os.path.basename(r.get("path") or "") for r in every}
@@ -918,7 +924,7 @@ def cmd_split(a):
     groups = cohorts([r for r in runs if r.get("conclusion") == "success"])
     # A run's set of jobs, as compare keys it: names with counts; with several workflow files
     # in the file, each name with its file.
-    several = len({r["path"] for r in runs if r.get("path") and r.get("conclusion") == "success"}) > 1
+    several = len({wf_key(r) for r in runs if placed_wf(r) and r.get("conclusion") == "success"}) > 1
     set_of = lambda r: tuple(sorted(("%s / %s" % (wf_key(r), j.get("name")) if several else j.get("name") or "")
                                     for j in latest_jobs(r) if executed(j)))
     total_wait = sum(walls) or 1.0
@@ -986,10 +992,10 @@ def cmd_split(a):
                 if ends:
                     cross.append(max(ends) - start)
     # Each workflow once, by its newest run's display name (a file can be renamed).
-    filed = any(r.get("path") for r in runs)
+    filed = any(placed_wf(r) for r in runs)
     newest = {}
     for r in sorted(runs, key=lambda x: ts(x.get("created_at")) or 0):
-        if r.get("path") or not filed:
+        if placed_wf(r) or not filed:
             newest[wf_key(r)] = r.get("name") or ""
     shared = {n for n in newest.values() if list(newest.values()).count(n) > 1}
     out["workflows"] = sorted(n + (" (%s)" % k if n in shared else "") for k, n in newest.items())

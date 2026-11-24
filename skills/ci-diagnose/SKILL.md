@@ -100,8 +100,10 @@ in `references/measuring.md`.
    days, and join only the files from this fetch, by name
    (`cat .joggernaut/before-ci.jsonl .joggernaut/before-lint.jsonl >
    .joggernaut/before.jsonl`): `split` then prints the PR wait across them
-   per commit. It tells workflows apart by file, not by display name, and
-   leaves out a commit with a run that names no file. That line counts a commit
+   per commit. It tells workflows apart by file, not by display name (a run
+   saved with no file takes its file from another run of the same workflow
+   id, or stands for its id), and leaves out a commit with a run it can't
+   place. That line counts a commit
    once every workflow it ran passed, timed from the first run's creation
    (so a rerun and the wait for it count), keeping each workflow's first run
    within 24 hours of that (a cut-off the script chooses, so a pull request reopened days later doesn't stretch the wait), and a commit's workflows may have tested different bases; a commit missing a required workflow can still
