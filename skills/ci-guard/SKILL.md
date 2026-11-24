@@ -72,17 +72,18 @@ in `references/measuring.md`.
    pre-commit) or by hand, keep it: add the checks to the tool's config or
    to the pre-push already in that folder, with the same rules, so both can
    still stop a push; use the template there only if that folder has no
-   pre-push. Otherwise copy `scripts/pre-push` from this skill to
-   `.githooks/pre-push` (if that file exists, add the checks to it
-   instead) and edit only its settings block: the default branch, and one
+   pre-push, and leave `core.hooksPath` as it is. Only if it isn't set,
+   copy `scripts/pre-push` from this skill to `.githooks/pre-push` (if that
+   file exists, add the checks to it instead) and install it with
+   `git config core.hooksPath .githooks`, a one-line setup step in the
+   README or the repository's setup script (see "Hooks and worktrees"
+   below). Either way, edit only the template's settings block: the default branch, and one
    `check` line per command with the files it reads as git pathspecs. It
    reads every pushed branch, compares each with what the remote has (a new
    branch with its merge-base with the default branch), skips a check only
    when no pushed change touches its files, and runs everything when it
    can't tell. It streams each check's output and time, and warns when the
-   working tree isn't what is pushed. Install it with `git config core.hooksPath .githooks`,
-   a one-line setup step in the README or the repository's setup script
-   (see "Hooks and worktrees" below). Time it, and report two
+   working tree isn't what is pushed. Time it, and report two
    numbers from step 1 apart: runner-minutes it can save (the minutes of
    failed rounds the hook would have caught: check that it catches those
    errors on the changed files; the hook itself uses no runner) and wait
@@ -111,20 +112,21 @@ in `references/measuring.md`.
      agent, approved the current head.
 5. **For Claude Code users, offer a Stop hook** in `.claude/settings.json`
    that runs the pre-push checks when the agent finishes. With the template
-   installed at `<hooks folder>/pre-push` (the folder from step 2), the
-   command is this; with a hook tool, its own command for the same checks:
+   installed as the repository's pre-push hook, the command is this; with a
+   hook tool, its own command for the same checks:
 
    ```sh
-   input=$(cat)
-   case $input in *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;; esac
-   hook="$(git rev-parse --show-toplevel 2>/dev/null)/<hooks folder>/pre-push"
+   case $(tr -d ' \t\r\n') in *'"stop_hook_active":true'*) exit 0 ;; esac
+   hook=$(git rev-parse --path-format=absolute --git-path hooks/pre-push 2>/dev/null) || exit 0
    [ -x "$hook" ] || exit 0
    "$hook" --all >&2 || exit 2
    ```
 
-   It finds the hook from the repository's root, since the hook runs
-   wherever Claude last changed to; `--all` checks the working tree from
-   its root. It lets the agent stop when `stop_hook_active` is true, so a
+   `git rev-parse --git-path hooks/pre-push` takes path relocation into
+   account (git docs); it gave the `core.hooksPath` folder, relative or
+   absolute, from any folder and worktree, on git 2.54. That matters
+   because the hook runs wherever Claude last changed to. `--all` checks
+   the working tree from its root. It lets the agent stop when `stop_hook_active` is true, so a
    failure it can't fix doesn't hold it forever, and outside a repository
    or without the hook file. On a failure, it
    exits 2 with the failed check's output on stderr: Claude Code's hook docs
