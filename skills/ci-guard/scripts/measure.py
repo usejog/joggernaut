@@ -1952,13 +1952,12 @@ def junit_results(path):
           # a collection error) shows; numbers in the message (times, ids) are blanked.
           for c in suite:
               if local(c.tag) in FAILED_TAGS:
-                  # The message, or the text's first line (a Python traceback's last: its error).
-                  text = [l for l in (c.text or "").strip().split("\n") if l.strip()]
-                  msg = (c.get("message") or (text[-1] if text and text[0].startswith("Traceback")
-                                              else text[0] if text else "")).strip()
-                  # Run-specific parts blanked: addresses, temp names, then any number. Keyed by a
-                  # short hash, never shown: a message can hold a secret (a URL with a password).
-                  msg = re.sub(r"0[xX][0-9a-fA-F]+|\btmp[\w.-]{6,}|\d+(?:\.\d+)*(?:[eE][-+]?\d+)?", "#", " ".join(msg.split()))
+                  # The message, else the whole text (a traceback's error line can be followed by
+                  # notes). Addresses and numbers blanked (times, ids, line numbers); a text that
+                  # differs otherwise, a temporary path say, counts as another error: the cautious
+                  # side for `tests`. Keyed by a short hash, never shown: it can hold a secret.
+                  msg = (c.get("message") or (c.text or "")).strip()
+                  msg = re.sub(r"0[xX][0-9a-fA-F]+|\d+(?:\.\d+)*(?:[eE][-+]?\d+)?", "#", " ".join(msg.split()))
                   msg = "message %s" % hashlib.sha256(msg.encode()).hexdigest()[:8] if msg else ""
                   k = json.dumps([where, suite_path, suite_file, local(c.tag), c.get("type") or "", msg])
                   errs[k] = errs.get(k, 0) + 1

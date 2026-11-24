@@ -818,7 +818,10 @@ for before, after, what in (
 # and temp names don't count.
 for before, after, want in (
         ("Traceback (most recent call last):\n  x\nRuntimeError: cleanup", "Traceback (most recent call last):\n  x\nRuntimeError: collection", 1),
-        ('<error type="E" message="Pool at 0x7f3a2b1c9d50 in /tmp/tmpa8fkq2zx"/>', '<error type="E" message="Pool at 0x7fe41d0c8a90 in /tmp/tmpq9wneb1c"/>', 0),
+        ('<error type="E" message="Pool at 0x7f3a2b1c9d50 failed"/>', '<error type="E" message="Pool at 0x7fe41d0c8a90 failed"/>', 0),
+        ("Traceback (most recent call last):\n  x\nRuntimeError: cleanup failed\nSee fixture.log",
+         "Traceback (most recent call last):\n  x\nRuntimeError: collection failed\nSee fixture.log", 1),
+        ('<error type="E" message="missing fixtures/tmp.cleanup.json"/>', '<error type="E" message="missing fixtures/tmp.collection.json"/>', 1),
         ('<error type="E" message="at 0x7f3a2b1c9d50"/>', '<error type="E" message="at 0X7F3A2B1C9D50"/>', 0)):
     wrap = lambda e: ('<testsuite name="s">%s<testcase classname="k" name="x"/></testsuite>'
                       % (e if e.startswith("<") else '<error type="RuntimeError">%s</error>' % e))
