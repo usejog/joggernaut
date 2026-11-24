@@ -115,8 +115,8 @@ in `references/measuring.md`.
      waiting for someone to rerun a failure isn't in it). Runs that ran
      different jobs (a path filter, an `if:`, a suite skipped on docs-only
      pushes) wait different times, and one median over the mix describes
-     none of them. So `split` groups the successful runs by the slowest job
-     each one ran (slowest by that job's median running time over the file)
+     none of them. So `split` groups the successful runs by the longest job
+     each one ran (longest by that job's median running time over the file)
      and prints each group's run count, median, slowest 5% and share of the
      total wait. The headline is the group with the most of the wait
      (`--cohort JOB` picks another); the slowest path below describes that
@@ -278,7 +278,7 @@ in `references/measuring.md`.
 ## What it measures
 
 PR wait at the median and slowest 5% (the slowest run below 20 runs) for each
-group of runs that ran the same slowest job, the waiting/setup/running split per job
+group of runs that ran the same longest job, the waiting/setup/running split per job
 and on the slowest path (through called workflows' jobs), minutes on failed or cancelled runs, pushes per pull
 request, and catch-up runs. It changes no tracked file, so there is no after.
 
@@ -290,7 +290,7 @@ This is reasoning from how CI works, not a measurement.
   only time on that path shortens the wait; time saved elsewhere saves runner-minutes, and shortens the wait only if freeing a machine, a concurrency or matrix slot, or shared disk or database capacity lets a required job start or run sooner; the before logs can hint at that (queue or lock waits), and `ci-measure`'s after measures it.
 - Runs that skip a suite and runs that run it wait different times, so a
   median over both moves with how many pushes changed only docs, not with
-  CI. Grouping runs by the slowest job they ran keeps each median to runs
+  CI. Grouping runs by the longest job they ran keeps each median to runs
   that did comparable work, and the group with the most of the wait is the
   one whose fixes save the most.
 - Every job pays three different costs (waiting for a machine, setting up,

@@ -26,7 +26,7 @@ MEASURE split --in .joggernaut/before.jsonl
 `split` heads its output with the PR wait of one group of runs. Runs that
 ran different jobs (a path filter, an `if:`, a suite skipped on docs-only
 pushes) wait different times, so it groups the successful runs by the
-slowest job each one ran, lists every group with its run count, median,
+longest job each one ran, lists every group with its run count, median,
 slowest runs and share of the total wait, and heads with the group that
 holds the most of the wait (`--cohort JOB` picks another). The median over
 all of them comes last, labelled as a blend; it is no group's wait. The

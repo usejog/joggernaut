@@ -978,19 +978,19 @@ with tempfile.TemporaryDirectory() as t:
     out = t + "/mixed.jsonl"
     open(out, "w").write("".join(json.dumps(x) + "\n" for x in mixed))
     got = json.loads(run([M, "split", "--in", out, "--json"]).stdout)
-    groups = {c["slowest_job"]: c for c in got["cohorts"]}
+    groups = {c["longest_job"]: c for c in got["cohorts"]}
     head = got["headline"] or {}
-    if (head.get("slowest_job") != "CI / Python / unit (3.12)" or head.get("runs") != 6 or head.get("median") != 955
+    if (head.get("longest_job") != "CI / Python / unit (3.12)" or head.get("runs") != 6 or head.get("median") != 955
             or groups.get("CI / E2E / smoke", {}).get("runs") != 14 or got["wait_median"] > 200):
         bad.append("split: cohorts wrong: headline %r, groups %r" % (head, sorted(groups)))
     text = run([M, "split", "--in", out]).stdout
-    if ("PR wait, runs whose slowest job was CI / Python / unit (3.12) (6 successful runs" not in text
+    if ("PR wait, runs whose longest job was CI / Python / unit (3.12) (6 successful runs" not in text
             or "blended, all 20 successful runs" not in text or "14 runs" not in text):
         bad.append("split: the headline should name its group and the blend\n" + text)
     if "Python / unit (3.12)" not in text.split("slowest path of the runs in that headline")[-1].split("job that")[0]:
         bad.append("split: the slowest path should describe the headline group\n" + text)
     text = run([M, "split", "--in", out, "--cohort", "CI / E2E / smoke"]).stdout
-    if "PR wait, runs whose slowest job was CI / E2E / smoke (14 successful runs" not in text or "chosen with --cohort" not in text:
+    if "PR wait, runs whose longest job was CI / E2E / smoke (14 successful runs" not in text or "chosen with --cohort" not in text:
         bad.append("split: --cohort should choose the headline group\n" + text)
     # The skipped caller isn't a job that took no time: the per-job table counts jobs that ran.
     if any(x["job"] == "CI / Python" for x in got["jobs"]):

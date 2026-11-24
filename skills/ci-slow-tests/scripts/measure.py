@@ -556,7 +556,7 @@ def path_split(run, pattern=None):
 
 
 def cohorts(ok_runs):
-    """Successful runs grouped by the slowest job each one ran, slowest by that job's median
+    """Successful runs grouped by the longest job each one ran, longest by that job's median
     running time over every run here that ran it: runs that skipped a suite (a path filter,
     an `if:`) land apart from runs that ran it. Returns {job: [runs]}; a job is named
     "WORKFLOW / JOB", called workflows' jobs included."""
@@ -604,7 +604,7 @@ def cmd_split(a):
     out = {"runs": len(runs), "wait_median": median(walls), "wait_p95": pct(walls, 0.95),
            "wait_tail": list(tail(walls)), "p95_provisional": len(walls) < P95_FIRM}
     # Runs that ran different jobs (a path filter, an `if:`) wait different times, and one
-    # median over all of them describes neither. Group them by the slowest job each ran; the
+    # median over all of them describes neither. Group them by the longest job each ran; the
     # headline is the group that holds the most of the total wait, unless --cohort names one.
     groups = cohorts([r for r in runs if r.get("conclusion") == "success"])
     total_wait = sum(walls) or 1.0
@@ -612,20 +612,20 @@ def cmd_split(a):
     for key, rs in groups.items():
         w = [x for x in (run_wall(r) for r in rs) if x is not None]
         if w:
-            table.append({"slowest_job": key, "runs": len(w), "median": median(w), "tail": list(tail(w)),
+            table.append({"longest_job": key, "runs": len(w), "median": median(w), "tail": list(tail(w)),
                           "share_of_wait": sum(w) / total_wait})
-    table.sort(key=lambda c: (-c["share_of_wait"], c["slowest_job"]))
+    table.sort(key=lambda c: (-c["share_of_wait"], c["longest_job"]))
     out["cohorts"] = table
     if a.cohort:
-        pick = [c for c in table if c["slowest_job"] == a.cohort]
+        pick = [c for c in table if c["longest_job"] == a.cohort]
         if not pick:
-            die("no group of runs whose slowest job is %r; the groups are: %s"
-                % (a.cohort, "; ".join(c["slowest_job"] for c in table)))
+            die("no group of runs whose longest job is %r; the groups are: %s"
+                % (a.cohort, "; ".join(c["longest_job"] for c in table)))
         head = pick[0]
     else:
         head = table[0] if table else None
     out["headline"] = head
-    path_runs = groups[head["slowest_job"]] if head else []
+    path_runs = groups[head["longest_job"]] if head else []
     # With several workflows in one file, a pull request waits for all of them:
     # per commit, from the first run's start to the last job done, where every run passed.
     names = {r.get("name") for r in runs}
@@ -810,16 +810,17 @@ def cmd_split(a):
         print("PR wait (run start to last job done, %d successful runs): median %s, %s %s%s"
               % (len(walls), fmt(out["wait_median"]), label, fmt(value), few(len(walls))))
     else:
-        print("PR wait, runs whose slowest job was %s (%d successful runs, %.0f%% of all their wait%s):"
+        print("PR wait, runs whose longest job was %s (%d successful runs, %.0f%% of all successful runs' wait%s):"
               " median %s, %s %s%s"
-              % (head["slowest_job"], head["runs"], 100 * head["share_of_wait"],
+              % (head["longest_job"], head["runs"], 100 * head["share_of_wait"],
                  "; chosen with --cohort" if a.cohort else ", the most of any group", fmt(head["median"]),
                  head["tail"][0], fmt(head["tail"][1]), few(head["runs"])))
-        print("  successful runs ran different jobs; by the slowest job each ran (most of the wait first):")
+        print("  successful runs ran different jobs; grouped by the longest job each ran (by its median here),"
+              " most of the wait first:")
         for c in table[:6]:
             print("  %5d runs  %3.0f%% of the wait  median %-8s %s %-8s  %s" % (
                 c["runs"], 100 * c["share_of_wait"], fmt(c["median"]), c["tail"][0], fmt(c["tail"][1]),
-                c["slowest_job"]))
+                c["longest_job"]))
         if len(table) > 6:
             print("  and %d more groups, %d runs" % (len(table) - 6, sum(c["runs"] for c in table[6:])))
         print("  blended, all %d successful runs (mixes these groups; not the wait of any one): median %s, %s %s"
@@ -1652,7 +1653,7 @@ def main(argv=None):
     s.add_argument("--workflow", help="workflow name to keep")
     s.add_argument("--setup-pattern", help="regex for setup step names (lower case)")
     s.add_argument("--cohort", help="the group of runs the headline wait and slowest path describe, named by"
-                   " its slowest job as split lists it (default: the group with the most of the wait)")
+                   " its longest job as split lists it (default: the group with the most of the wait)")
     s.add_argument("--json", action="store_true")
 
     c = sub.add_parser("compare", help="before against after, with a verdict")
