@@ -83,8 +83,8 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    where a rerun uploaded a name again,
    each attempt's under `RUN_ID/attempt-N/ARTIFACT_NAME/`, or a passing
    attempt's report replaces the failed one's. Folders named by a number or
-   `attempt-N` don't become part of a test's name; `--short` (names alone,
-   to match a `failed.txt`) refuses names it can't tell apart. A test that
+   `attempt-N` don't become part of a test's name; `--short` (the leg and
+   the test's name, to match a `failed.txt` that gives names alone) refuses names it can't tell apart. A test that
    passed only on a retry inside the job (Surefire's `flakyFailure`) counts
    as failing there. An XML file that isn't JUnit (coverage) is named and
    skipped; an empty folder is no evidence.

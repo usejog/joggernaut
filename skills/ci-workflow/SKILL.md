@@ -192,9 +192,10 @@ in `references/measuring.md`.
      with the old one, not the formula. Its minutes change by both jobs'
      new billed durations against the old job's. If the moved steps need something the kept
      ones build, the new job depends on it and this arithmetic doesn't hold.
-     A step left in the old job after the moved ones that has an effect
-     outside the job (a publish, a deploy, a push) would no longer wait for
-     them: move it into a job that needs both halves, or don't split.
+     A job with a step after the moved ones that has an effect outside the
+     job (a publish, a deploy, a push) stays whole: in a new job the moved
+     checks would no longer hold that step back. Native parallel steps keep
+     such a step after the group.
      The old job can pass its required check while the new job fails, and
      every job that `needs` the old job (a publish, a deploy, on push or
      release too) would no longer wait for the moved steps: add the new job

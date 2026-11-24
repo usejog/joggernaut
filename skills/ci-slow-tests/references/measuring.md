@@ -156,7 +156,8 @@ with counts, so matrix legs count):
   whole-run verdict, since the median would move with the mix, and lists
   the before side's sets. Name the workload with `--ran JOB` (only runs that
   ran that job; write it into the baseline before reading the after side),
-  which must leave one set a side, or time one job's own duration with
+  which must leave one set a side (its failures are also checked among the
+  runs that started that job), or time one job's own duration with
   `--job`.
 
 The same jobs can still run different tests (per-pull-request test

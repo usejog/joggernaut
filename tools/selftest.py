@@ -1497,6 +1497,31 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("compare --end: runs with a failed job before the timed one were timed: %r\n%s"
                    % ({k: got.get(k) for k in ("before_runs", "after_runs", "verdict_code")}, r.stderr))
 
+# --ran: the workload's own failures count. Integration starts timing out on its slow runs
+# after; the workflow-wide failure share is unchanged, but among runs that started it, it rose.
+with tempfile.TemporaryDirectory() as t:
+    def integ_run(i, ran, ok, fast=False):
+        x = _work(i, ran, integ=10 if fast else 90)
+        if ran and not ok:
+            x["jobs"][-1]["conclusion"] = "timed_out"
+            x["conclusion"] = "failure"
+        if not ran and not ok:
+            x["jobs"][0]["conclusion"] = "failure"
+            x["conclusion"] = "failure"
+        return x
+    before = ([integ_run(i, True, True) for i in range(65)] + [integ_run(100 + i, True, False) for i in range(25)]
+              + [integ_run(200 + i, False, True) for i in range(60)])
+    after = ([integ_run(1000 + i, True, True, fast=True) for i in range(5)] + [integ_run(1100 + i, True, False) for i in range(25)]
+             + [integ_run(1200 + i, False, True) for i in range(95)] + [integ_run(1300 + i, False, False) for i in range(25)][:0])
+    # Workflow-wide failures: 25 of 150 before; 25 of 125 after, about the same share.
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--ran", "integration", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("verdict_code") != "not_valid" or got.get("failed_after_ran") != [25, 30]:
+        bad.append("compare --ran: failures among runs that started the job should be checked: %r\n%s"
+                   % ({k: got.get(k) for k in ("verdict_code", "failed_before", "failed_after", "failed_after_ran")}, r.stderr))
+
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
 if mm.run_minutes(two) != 2 or abs(mm.run_minutes(two, True) - 2.0) > 1e-9:
@@ -1869,6 +1894,16 @@ reps = {x["id"]: ({"test-results/r.xml": _rep("p")} if i % 2 == 0 else {"failed.
 got, r = _flaky_rows(rows, reps, "--short")
 if not got or got.get("failed_txt_names_no_report_shows") != ["T"]:
     bad.append("flaky: a failed.txt name no report shows should be named: %r" % (got,))
+# The unmatched-name note is per workflow: workflow A's JUnit says nothing of workflow B's failed.txt.
+rows, reps = [], {}
+for i in range(4):
+    x = _fr(i, i + 1, i % 2 == 0, path="a.yml" if i % 2 == 0 else "b.yml")
+    rows.append(x)
+    reps[x["id"]] = ({"r.xml": _rep("p")} if i % 2 == 0 else
+                     {"failed.txt": "s::c::T\n", "u.xml": '<testsuite name="s"><testcase classname="c" name="U"/></testsuite>'})
+got, r = _flaky_rows(rows, reps)
+if not got or got.get("failed_txt_names_no_report_shows") != ["s::c::T"]:
+    bad.append("flaky: another workflow's JUnit hid an unmatched failed.txt name: %r" % (got or {}).get("failed_txt_names_no_report_shows"))
 # --short counts a skipped namesake: Unit.T passed and Integration.T skipped in one report.
 rows = [_fr(0, 1, True), _fr(1, 2, False)]
 both = ('<testsuite name="s"><testcase classname="Unit" name="T"/>'

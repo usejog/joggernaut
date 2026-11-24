@@ -1569,6 +1569,13 @@ def cmd_compare(a):
            "excluded": excluded}
     fb, fa = fail_rate(rb), fail_rate(ra)
     res["failed_before"], res["failed_after"] = fb, fa
+    # With --ran, the workload is the runs that started that job: its failures are checked
+    # among those runs too, so slow runs that start failing there can't leave the fast ones.
+    if a.ran:
+        started = lambda rs: [r for r in rs if any(j.get("name") == a.ran and j.get("started_at")
+                                                   for j in r.get("jobs", []))]
+        rfb, rfa = fail_rate(started(rb)), fail_rate(started(ra))
+        res["failed_before_ran"], res["failed_after_ran"] = rfb, rfa
     # Runs cancelled with no failure (a newer push, a concurrency group) are in neither the
     # timings nor the failure rate. A change that gets slow runs cancelled can look faster.
     cancelled = lambda rs: (sum(1 for r in rs if in_workflow(r) and r.get("conclusion") == "cancelled"
@@ -1607,6 +1614,10 @@ def cmd_compare(a):
     elif fails_rose(fb, fa):
         res["verdict_code"] = "not_valid"
         res["verdict"] = "not valid: more runs fail after (%d of %d) than before (%d of %d)" % (fa + fb)
+    elif a.ran and fails_rose(rfb, rfa):
+        res["verdict_code"] = "not_valid"
+        res["verdict"] = ("not valid: more of the runs that started %s fail after (%d of %d) than before (%d of %d)"
+                          % ((a.ran,) + rfa + rfb))
     else:
         est, lo, hi, conf = shift_interval(before, after)
         res["shift_estimate"], res["shift_interval_95"] = est, [lo, hi]
@@ -1945,7 +1956,7 @@ def failed_tests(folder, short=None):
     job (Surefire's flakyFailure and the like) failed. A test's name is its artifact folders
     (a matrix leg's) and its suites, class, file and name: folders named by number or attempt
     and the report's file name are left out, so the same test matches across runs. With short
-    (a dict), names are the test's name alone, and short records what each stood for."""
+    (a dict), names are the leg and the test's name, and short records what each stood for."""
     failed, passed, skipped, found, txt, junit = set(), set(), [], False, set(), set()
     # A file's leg: its artifact folders, numbered and attempt folders left out and shard
     # numbers blanked, the same for JUnit reports and failed.txt.
@@ -2043,8 +2054,9 @@ def cmd_flaky(a):
             continue
         reports[int(d)] = got[:2]
         not_junit += [os.path.join(d, x) for x in got[2]]
-        txt_names |= got[3]
-        junit_names |= got[4]
+        wf_ = by_id[int(d)].get("path") or by_id[int(d)].get("name") or ""
+        txt_names |= {(wf_, n) for n in got[3]}
+        junit_names |= {(wf_, n) for n in got[4]}
     if not reports:
         die("no report in %s for any run in %s" % (a.reports, a.input))
     twice = sorted(k for k, v in (short_of or {}).items() if len(v) > 1)
@@ -2111,7 +2123,9 @@ def cmd_flaky(a):
     unread = sum(1 for r in runs if r.get("conclusion") in FAILED and r["id"] not in reports)
     # A failed.txt name no JUnit report shows (a file at the run's root beside reports in a
     # leg's folder, a name spelled otherwise): its failures can't meet a pass of the same test.
-    lone = sorted(txt_names - junit_names) if junit_names else []
+    # Per workflow: a JUnit report of another workflow says nothing about these names.
+    has_junit = {w for w, _ in junit_names}
+    lone = sorted(n for w, n in txt_names - junit_names if w in has_junit)
     if a.json:
         print(json.dumps({"tests": rows, "failed_runs_without_reports": unread, "empty_report_folders": empty,
                           "failed_txt_names_no_report_shows": lone,
@@ -2131,8 +2145,9 @@ def cmd_flaky(a):
     if not_junit:
         print("  XML files that aren't JUnit, not read: %s" % ", ".join(not_junit[:10]))
     if lone:
-        print("  failed.txt names no JUnit report shows (put failed.txt in its leg's folder and spell names"
-              " as the reports do; use --short for names alone): %s" % ", ".join(lone[:5]))
+        print("  failed.txt names no JUnit report of their workflow shows (put failed.txt in its leg's folder,"
+              " and spell names as the reports do, or use --short for the leg and the test's name): %s"
+              % ", ".join(lone[:5]))
     print("tests that failed, by the pull requests (or pushed branches) where a failure stood alone (a"
           " report showing the test passed before and after it, on the same workflow and base, no one else's"
           " run failing it between), most first:")
