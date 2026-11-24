@@ -199,9 +199,11 @@ it reports reads every finished run of the workflow and event in each file,
 whatever those filters say, so a filter can't hide or dilute a failure; a job
 named with `--job` or `--ran` is checked among its own runs as well (both
 named: each one's runs and the runs where both ran, the worst counting). When
-fewer runs reached the named job after than chance explains, a faster or
-mixed verdict ends in `_fewer_reached`: runs that stopped earlier (failed or
-cancelled before it) or did other work aren't timed, so say why. If
+more runs stopped before the named job after than chance explains (they list
+it, didn't run it, and a job of theirs failed or was cancelled), a faster or
+mixed verdict ends in `_fewer_reached`: the runs that reached it may be the
+fast ones, so say why. A run that skipped it with nothing failing (a path
+filter) doesn't count. If
 more runs fail after than chance explains (a one-sided test at 5%), the
 result is not valid. If more fail after but within chance, the verdict says
 "median faster …, but more runs failed after": at a few runs a side the test
