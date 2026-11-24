@@ -128,10 +128,11 @@ different work, so a total wait compares the selections, not the CI:
    before the change, with the same event (step 1's baseline), so `compare`
    reads both sides the same way.
 3. **Compare jobs whose work doesn't depend on the selection** (a full
-   typecheck, say), each by `compare --job NAME`, and, where the jobs before
-   it don't depend on the selection either, by its end on the run's clock,
-   `compare --job NAME --end` (it refuses when the runs ran different sets
-   of jobs): the change can make one job finish sooner and another later. Check with `MEASURE tests` that each job
+   typecheck, say), each by `compare --job NAME`, its own duration: the
+   verdict. Beside it, `compare --job NAME --end` reads its end on the run's
+   clock, which shows the change making one job finish sooner and another
+   later; that reading is descriptive only, never a verdict, since it moves
+   with which runs reached the job, their queue order and their runners. Check with `MEASURE tests` that each job
    ran the same tests on both sides. Report the total wait beside them as a
    description only.
 

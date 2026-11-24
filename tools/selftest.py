@@ -131,6 +131,18 @@ spec = importlib.util.spec_from_file_location("measure", M)
 mm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mm)
 mm.proc()  # measure.py imports subprocess on first use; the fakes below replace its run
+
+
+def rose_checks(got):
+    """The reach checks of a compare --json answer whose misses rose beyond chance."""
+    return {x["check"] for x in got.get("reach_checks") or []
+            if mm.fails_rose(tuple(x["missed_before"]), tuple(x["missed_after"]))}
+
+
+def end_qualified(got, check, suffix="_fewer_reached"):
+    """--end is descriptive: its reading carries the qualification, and the named check rose."""
+    return (got.get("verdict_code") == "end_descriptive" and suffix in (got.get("end_reading_code") or "")
+            and (check is None or check in rose_checks(got)))
 if mm.fails_rose((0, 20), (3, 23)):
     bad.append("fails_rose: 0/20 against 3/23 is within chance (Fisher p = 0.14)")
 try:
@@ -1635,9 +1647,9 @@ with tempfile.TemporaryDirectory() as t:
                    % (got.get("verdict_code"), got.get("failed_after_job")))
     r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--job", "integration", "--end"])
     got = json.loads(r.stdout) if r.returncode == 0 else {}
-    if not (got.get("verdict_code") or "").endswith("_fewer_reached"):
-        bad.append("compare --job --end: fewer runs reaching the job should qualify the verdict: %r %r"
-                   % (got.get("verdict_code"), got.get("not_reaching_after")))
+    if not end_qualified(got, "stopped"):
+        bad.append("compare --job --end: runs stopped upstream should qualify the reading: %r %r"
+                   % (got.get("end_reading_code"), rose_checks(got)))
 
 # Only the runs where both named jobs ran show the rise: each job's own runs hold 35 failures of
 # 80 on both sides, and among runs where both ran it goes 0/40 -> 35/40.
@@ -1683,7 +1695,7 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "compare", "--before", t + "/b2.jsonl", "--after", t + "/a2.jsonl", "--json",
              "--ran", "backend", "--job", "integration", "--end"])
     got = json.loads(r.stdout) if r.returncode == 0 else {}
-    if (("_more_cancelled" not in (got.get("verdict_code") or "") and got.get("verdict_code") != "not_valid")
+    if ((not end_qualified(got, None, "_more_cancelled") and got.get("verdict_code") != "not_valid")
             or got.get("cancelled_job_workload") != "integration" or got.get("cancelled_after_job") != [35, 40]):
         bad.append("compare: cancellations where integration ran should qualify, named as integration's: %r %r %r"
                    % (got.get("verdict_code"), got.get("cancelled_job_workload"), got.get("cancelled_after_job")))
@@ -1721,7 +1733,7 @@ with tempfile.TemporaryDirectory() as t:
         open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
         r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--job", "integration", "--end"])
         got = json.loads(r.stdout) if r.returncode == 0 else {}
-        if (not (got.get("verdict_code") or "").startswith("faster") or not (got.get("verdict_code") or "").endswith("_fewer_reached")
+        if (not end_qualified(got, "stopped") or not (got.get("end_reading_code") or "").startswith("faster")
                 or got.get("not_reaching_after") != [30 + 94 * lists, 36 + 94 * lists] or got.get("not_reaching_before") != [94 * lists, 36 + 94 * lists]):
             bad.append("compare --job --end: runs stopped before the job should qualify (docs list it: %s): %r %r"
                        % (lists, got.get("verdict_code"), got.get("not_reaching_after")))
@@ -1747,7 +1759,7 @@ with tempfile.TemporaryDirectory() as t:
         open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
         r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--job", name, "--end"])
         got = json.loads(r.stdout) if r.returncode == 0 else {}
-        if not (got.get("verdict_code") or "").endswith("_fewer_reached") or got.get("not_reaching_after") != [30, 36]:
+        if not end_qualified(got, "listed" if caller else "listed by name") or got.get("not_reaching_after") != [30, 36]:
             bad.append("compare --job %s --end: a condition skipping it on the slow runs should qualify: %r %r"
                        % (name, got.get("verdict_code"), got.get("not_reaching_after")))
 
@@ -1773,7 +1785,8 @@ with tempfile.TemporaryDirectory() as t:
             be["conclusion"] = "failure" if shape == "moved" else "cancelled"
             jobs.append(dict(_job(target, end, end, end), conclusion="skipped", steps=[], started_at=None))
         x = _run(i, jobs, t0)
-        if shape == "moved" and not miss and slow and i % 1000 < 12:
+        if shape == "moved" and not miss and slow and i < 1000:
+            # before: the slow runs fail after integration, as many as fail before it after
             jobs.append(dict(_job("report", end + 12, end + 13, end + 14), conclusion="failure"))
             x["conclusion"] = "failure"
         if miss and shape in ("moved", "docs"):
@@ -1795,10 +1808,37 @@ with tempfile.TemporaryDirectory() as t:
         open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
         r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--job", target, "--end"] + extra)
         got = json.loads(r.stdout) if r.returncode == 0 else {}
-        code = got.get("verdict_code") or ""
-        if code != "not_valid" and not code.endswith("_fewer_reached") and "_fewer_reached_" not in code:
-            bad.append("compare --job --end (%s): runs missing the job after should qualify: %r %r\n%s"
-                       % (shape, code, got.get("reach_checks"), r.stderr[-300:]))
+        want = {"moved": "stopped", "leg": "ran", "nested": "listed", "docs": "stopped"}[shape]
+        reading = got.get("end_reading_code") or ""
+        # Never a bare faster reading; the intended check rose; with failures moved, the
+        # workflow's failure count is the same on both sides.
+        ok = (got.get("verdict_code") == "end_descriptive" and want in rose_checks(got)
+              and (not reading.startswith("faster") or "_fewer_reached" in reading))
+        if not ok or (shape == "moved" and got.get("failed_before") != got.get("failed_after")):
+            bad.append("compare --job --end (%s): runs missing the job after should qualify through %s: %r %r %r %r"
+                       % (shape, want, got.get("verdict_code"), got.get("end_reading_code"), rose_checks(got),
+                          (got.get("failed_before"), got.get("failed_after"))))
+
+# --ran integration --job backend: backend's own time never changes, but integration stops running
+# on the slow ones after, so the runs where both ran are the fast ones. The "job" check sees it.
+with tempfile.TemporaryDirectory() as t:
+    def bk(i, slow, integ):
+        t0 = i * 4000
+        jobs = [_job("backend", t0, t0 + 1, t0 + (100 if slow else 10))]
+        if integ:
+            end = mm.ts(jobs[0]["completed_at"]) - 1793000000
+            jobs.append(_job("integration", end, end + 1, end + 11))
+        return _run(i, jobs, t0)
+    before = [bk(i, i >= 6, True) for i in range(36)]
+    after = [bk(1000 + i, i >= 6, i < 6) for i in range(36)]
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json",
+             "--ran", "integration", "--job", "backend"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if not (got.get("verdict_code") or "").endswith("_fewer_reached") or "job" not in rose_checks(got):
+        bad.append("compare --ran integration --job backend: the workload losing integration should qualify: %r %r"
+                   % (got.get("verdict_code"), rose_checks(got)))
 
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)

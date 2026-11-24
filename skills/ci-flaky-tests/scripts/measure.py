@@ -1599,12 +1599,21 @@ def cmd_compare(a):
         prefixes = lambda n: [" / ".join(n.split(" / ")[:k]) for k in range(len(n.split(" / ")), 0, -1)]
         lists = lambda r, n: any(j.get("name") in prefixes(n) for j in r.get("jobs", []) if j.get("name"))
         missed = lambda r: not ran_all(r, names)
-        upstream = lambda r: missed(r) and any(j.get("conclusion") in FAILED + ("cancelled",) for j in r.get("jobs", []))
+        listed_any = lambda r: all(lists(r, n) for n in names)
+        listed_direct = lambda r: all(any(j.get("name") == n for j in r.get("jobs", [])) for n in names)
+        # Stopped upstream: listed, not run, and a job of that run failed or was cancelled.
+        upstream = lambda r: listed_any(r) and missed(r) and any(
+            j.get("conclusion") in FAILED + ("cancelled",) for j in r.get("jobs", []))
         count = lambda w, f: (sum(1 for r in w if f(r)), len(w))
-        checks = [("listed", lambda rs: count([r for r in finished(rs) if all(lists(r, n) for n in names)], missed))]
+        checks = [("listed", lambda rs: count([r for r in finished(rs) if listed_any(r)], missed)),
+                  ("listed by name", lambda rs: count([r for r in finished(rs) if listed_direct(r)], missed))]
         if a.ran and a.job and a.ran != a.job:
+            # Both ways: the --ran workload losing the --job one, and the --job one's runs
+            # losing the --ran job (which would drop them from the timed runs).
             checks.append(("ran", lambda rs: count([r for r in finished(rs) if ran_all(r, [a.ran])],
                                                    lambda r: not ran_all(r, [a.job]))))
+            checks.append(("job", lambda rs: count([r for r in finished(rs) if ran_all(r, [a.job])],
+                                                   lambda r: not ran_all(r, [a.ran]))))
         checks += [("stopped", lambda rs: count(finished(rs), upstream)), ("all", lambda rs: count(finished(rs), missed))]
         res["reach_checks"] = [{"check": c, "missed_before": list(f(rb)), "missed_after": list(f(ra))} for c, f in checks]
         res["not_reaching_before"], res["not_reaching_after"] = checks[0][1](rb), checks[0][1](ra)
@@ -1710,10 +1719,22 @@ def cmd_compare(a):
         res["verdict"] += ("; but fewer runs reached %s after (%s: %d of %d missed it, against %d of %d before):"
                            " stopped upstream, skipped by a condition or left out of a matrix, so the runs that"
                            " reached it may be the fast ones; name why before calling it faster"
-                           % ((" and ".join(names), {"listed": "of the runs that list it", "ran": "of the runs where %s ran" % a.ran,
+                           % ((" and ".join(names), {"listed": "of the runs that list it or a caller",
+                                                    "listed by name": "of the runs that list it by name",
+                                                    "ran": "of the runs where %s ran" % a.ran,
+                                                    "job": "of the runs where %s ran, missing %s" % (a.job, a.ran),
                                                     "stopped": "stopped upstream, of all runs", "all": "of all runs"}[x["check"]])
                               + tuple(x["missed_after"]) + tuple(x["missed_before"])))
-    if graph_changed and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
+    if a.end and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
+        # A job's end on the run's clock moves with which runs reached it, their queue order
+        # and the runners of every job before it, none of which the jobs list pins down. It is
+        # reported, never a verdict: the job's own duration (--job) and the whole run's wait are.
+        res["end_reading"], res["end_reading_code"] = res["verdict"], res["verdict_code"]
+        res["verdict_code"] = "end_descriptive"
+        res["verdict"] = ("descriptive only (%s): a job's end on the run's clock moves with which runs reached it,"
+                          " their queue order and their runners; give the job's own duration (--job) and the whole"
+                          " run's wait for a verdict" % res["end_reading"])
+    if graph_changed and res["verdict_code"] not in ("not_enough_runs", "not_valid", "end_descriptive"):
         # One set a side, different sets: the change altered the jobs, or the mix of pull
         # requests did. Never a plain verdict: only the workflow's diff can say which.
         res["verdict_code"] += "_jobs_changed"
@@ -2406,7 +2427,8 @@ def main(argv=None):
     c.add_argument("--workflow")
     c.add_argument("--job", help="compare one job's duration instead of the run's")
     c.add_argument("--end", action="store_true", help="with --job: time from the run's start to the job's"
-                   " end (its end on the run's clock), not the job's own duration")
+                   " end (its end on the run's clock), not the job's own duration; a descriptive reading,"
+                   " never a verdict")
     c.add_argument("--ran", help="time only whole runs that ran this job (a workload named before the after"
                    " side is read); needed when runs ran different sets of jobs")
     c.add_argument("--event", default="pull_request")

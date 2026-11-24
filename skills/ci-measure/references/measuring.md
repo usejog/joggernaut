@@ -189,9 +189,12 @@ it faster. `--job NAME --end` times that
 job from the run's start to its end, on the run's clock (its queue and the
 jobs before it count), not the job's own duration, so the same job-set rule
 applies to it over every job the runs ran (a job queued beside it can hold
-its runner), and every job's runner must match on both sides. Its end also
-moves with which job got a runner first, so report it beside the job's own
-duration (`--job` alone) and the whole run's wait, never alone.
+its runner), and every job's runner must match on both sides. Its reading is
+descriptive only (`end_descriptive`; the reading itself is in `--json` as
+`end_reading`): a job's end moves with which runs reached it, their queue
+order and their runners, more than any check can pin down. Report it beside
+the job's own duration (`--job` alone) and the whole run's wait, which give
+the verdict.
 
 `compare` needs at least 5 successful comparable runs a side. Those are the
 runs it times; `--label`, `--job` and `--cache` choose them. The failure rate
