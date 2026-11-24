@@ -156,9 +156,11 @@ with counts, so matrix legs count):
   whole-run verdict, since the median would move with the mix, and lists
   the before side's sets. Name the workload with `--ran JOB` (only runs that
   ran that job; write it into the baseline before reading the after side),
-  which must leave one set a side (its failures are also checked among the
-  runs that started that job), or time one job's own duration with
-  `--job`.
+  which must leave one set a side, or time one job's own duration with
+  `--job`. Either way the named job picks a workload, the runs where it
+  ran: failures and cancellations are checked among those runs as well as
+  over the whole workflow, so a job whose slow runs start failing or being
+  cancelled can't leave only its fast ones to time.
 
 The same jobs can still run different tests (per-pull-request test
 selection inside a job); only `MEASURE tests` shows that, and only for the

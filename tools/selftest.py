@@ -1512,15 +1512,60 @@ with tempfile.TemporaryDirectory() as t:
     before = ([integ_run(i, True, True) for i in range(65)] + [integ_run(100 + i, True, False) for i in range(25)]
               + [integ_run(200 + i, False, True) for i in range(60)])
     after = ([integ_run(1000 + i, True, True, fast=True) for i in range(5)] + [integ_run(1100 + i, True, False) for i in range(25)]
-             + [integ_run(1200 + i, False, True) for i in range(95)] + [integ_run(1300 + i, False, False) for i in range(25)][:0])
+             + [integ_run(1200 + i, False, True) for i in range(95)])
     # Workflow-wide failures: 25 of 150 before; 25 of 125 after, about the same share.
     open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
     open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
     r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--ran", "integration", "--json"])
     got = json.loads(r.stdout) if r.returncode == 0 else {}
-    if got.get("verdict_code") != "not_valid" or got.get("failed_after_ran") != [25, 30]:
+    if got.get("verdict_code") != "not_valid" or got.get("failed_after_job") != [25, 30]:
         bad.append("compare --ran: failures among runs that started the job should be checked: %r\n%s"
-                   % ({k: got.get(k) for k in ("verdict_code", "failed_before", "failed_after", "failed_after_ran")}, r.stderr))
+                   % ({k: got.get(k) for k in ("verdict_code", "failed_before", "failed_after", "failed_after_job")}, r.stderr))
+
+# The workload a named job picks: a skipped row with a timestamp isn't a start; --job (and --end)
+# checks it as --ran does; its cancellations count; a small rise in its failures is reported.
+with tempfile.TemporaryDirectory() as t:
+    def wl(i, ran, outcome, integ=90):
+        x = _work(i, True, integ=integ)
+        if not ran:
+            x["jobs"][-1] = dict(x["jobs"][-1], conclusion="skipped", steps=[])  # timestamped skip
+        elif outcome == "timed_out":
+            x["jobs"][-1]["conclusion"], x["conclusion"] = "timed_out", "failure"
+        elif outcome == "cancelled":
+            x["jobs"][-1]["conclusion"], x["conclusion"] = "cancelled", "cancelled"
+        return x
+    before = [wl(i, True, "ok") for i in range(40)] + [wl(100 + i, False, "ok") for i in range(90)]
+    after = ([wl(1000 + i, True, "ok", integ=10) for i in range(5)] + [wl(1100 + i, True, "timed_out") for i in range(35)]
+             + [wl(1200 + i, False, "ok") for i in range(90)])
+    # workflow-wide the skipped rows dilute the rise; among runs where integration ran it is 0/40 -> 35/40
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    for extra in (["--ran", "integration"], ["--job", "integration", "--end"], ["--job", "integration"]):
+        r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json"] + extra)
+        got = json.loads(r.stdout) if r.returncode == 0 else {}
+        if got.get("verdict_code") != "not_valid":
+            bad.append("compare %s: failures where the job ran rose 0/40 -> 35/40: %r" % (extra, got.get("verdict_code")))
+    after = ([wl(2000 + i, True, "ok") for i in range(75)] + [wl(2100 + i, True, "cancelled") for i in range(25)]
+             + [wl(2200 + i, False, "ok") for i in range(115)])
+    before = [wl(3000 + i, True, "ok", integ=95) for i in range(100)] + [wl(3100 + i, False, "ok") for i in range(115)]
+    open(t + "/b2.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a2.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    r = run([M, "compare", "--before", t + "/b2.jsonl", "--after", t + "/a2.jsonl", "--ran", "integration", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if not (got.get("verdict_code") or "").endswith("_more_cancelled"):
+        bad.append("compare --ran: cancellations among the workload's runs should qualify: %r %r"
+                   % (got.get("verdict_code"), got.get("cancelled_after_job")))
+    before = [wl(4000 + i, True, "ok") for i in range(5)] + [wl(4100 + i, False, "ok") for i in range(24)] + [
+        dict(wl(4200, False, "ok"), conclusion="failure")]
+    after = [wl(5000 + i, True, "ok", integ=10) for i in range(5)] + [wl(5100, True, "timed_out")] + [
+        wl(5200 + i, False, "ok") for i in range(24)]
+    open(t + "/b3.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a3.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    r = run([M, "compare", "--before", t + "/b3.jsonl", "--after", t + "/a3.jsonl", "--ran", "integration", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("verdict_code") != "faster_more_failures":
+        bad.append("compare --ran: a rise in the workload's failures within chance should be reported: %r %r %r"
+                   % (got.get("verdict_code"), got.get("failed_after_job"), r.stderr[-300:]))
 
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
@@ -1904,6 +1949,19 @@ for i in range(4):
 got, r = _flaky_rows(rows, reps)
 if not got or got.get("failed_txt_names_no_report_shows") != ["s::c::T"]:
     bad.append("flaky: another workflow's JUnit hid an unmatched failed.txt name: %r" % (got or {}).get("failed_txt_names_no_report_shows"))
+# --short tells legs apart: posix.T on Linux and win.T on Windows are two short names.
+rows = [_fr(i, i + 1, True) for i in range(2)]
+reps = {rows[0]["id"]: {"linux/r.xml": '<testsuite name="s"><testcase classname="posix" name="T"/></testsuite>',
+                        "windows/r.xml": '<testsuite name="s"><testcase classname="win" name="T"/></testsuite>'},
+        rows[1]["id"]: {"linux/r.xml": '<testsuite name="s"><testcase classname="posix" name="T"/></testsuite>'}}
+got, r = _flaky_rows(rows, reps, "--short")
+if got is None:
+    bad.append("flaky --short: tests in two legs with one name were refused\n" + r.stderr)
+# A workflow with failed.txt and no JUnit is named: it shows no pass to stand failures between.
+rows = [_fr(0, 1, True, path="a.yml"), _fr(1, 2, False, path="b.yml")]
+got, r = _flaky_rows(rows, {rows[0]["id"]: {"r.xml": _rep("p")}, rows[1]["id"]: {"failed.txt": "T\n"}})
+if not got or got.get("workflows_with_no_junit_pass_evidence") != ["b.yml"]:
+    bad.append("flaky: a workflow with failed.txt only should be named: %r" % (got,))
 # --short counts a skipped namesake: Unit.T passed and Integration.T skipped in one report.
 rows = [_fr(0, 1, True), _fr(1, 2, False)]
 both = ('<testsuite name="s"><testcase classname="Unit" name="T"/>'

@@ -1569,19 +1569,23 @@ def cmd_compare(a):
            "excluded": excluded}
     fb, fa = fail_rate(rb), fail_rate(ra)
     res["failed_before"], res["failed_after"] = fb, fa
-    # With --ran, the workload is the runs that started that job: its failures are checked
-    # among those runs too, so slow runs that start failing there can't leave the fast ones.
-    if a.ran:
-        started = lambda rs: [r for r in rs if any(j.get("name") == a.ran and j.get("started_at")
-                                                   for j in r.get("jobs", []))]
-        rfb, rfa = fail_rate(started(rb)), fail_rate(started(ra))
-        res["failed_before_ran"], res["failed_after_ran"] = rfb, rfa
+    # A named job (--ran, or --job) picks a workload: the runs where that job ran, in any
+    # attempt. Its failures and cancellations are checked among those runs too, so slow runs
+    # that start failing or being cancelled there can't leave only the fast ones to time.
+    work = a.ran or a.job
+    started = lambda rs: [r for r in rs if any(j.get("name") == work and executed(j) for j in r.get("jobs", []))]
+    wfb, wfa = (fail_rate(started(rb)), fail_rate(started(ra))) if work else ((0, 0), (0, 0))
+    if work:
+        res["failed_before_job"], res["failed_after_job"] = wfb, wfa
     # Runs cancelled with no failure (a newer push, a concurrency group) are in neither the
     # timings nor the failure rate. A change that gets slow runs cancelled can look faster.
     cancelled = lambda rs: (sum(1 for r in rs if in_workflow(r) and r.get("conclusion") == "cancelled"
                                 and not run_failed(r)),
                             sum(1 for r in rs if in_workflow(r) and r.get("conclusion") not in (None, "skipped", "neutral")))
     res["cancelled_before"], res["cancelled_after"] = cancelled(rb), cancelled(ra)
+    wcb, wca = (cancelled(started(rb)), cancelled(started(ra))) if work else ((0, 0), (0, 0))
+    if work:
+        res["cancelled_before_job"], res["cancelled_after_job"] = wcb, wca
 
     def minutes(rs):
         # What the runs cost: every job and attempt, rounded up per job as GitHub bills,
@@ -1614,10 +1618,10 @@ def cmd_compare(a):
     elif fails_rose(fb, fa):
         res["verdict_code"] = "not_valid"
         res["verdict"] = "not valid: more runs fail after (%d of %d) than before (%d of %d)" % (fa + fb)
-    elif a.ran and fails_rose(rfb, rfa):
+    elif work and fails_rose(wfb, wfa):
         res["verdict_code"] = "not_valid"
-        res["verdict"] = ("not valid: more of the runs that started %s fail after (%d of %d) than before (%d of %d)"
-                          % ((a.ran,) + rfa + rfb))
+        res["verdict"] = ("not valid: more of the runs where %s ran fail after (%d of %d) than before (%d of %d)"
+                          % ((work,) + wfa + wfb))
     else:
         est, lo, hi, conf = shift_interval(before, after)
         res["shift_estimate"], res["shift_interval_95"] = est, [lo, hi]
@@ -1626,13 +1630,15 @@ def cmd_compare(a):
         # The interval says the after runs tend to be faster (or slower). It speaks for
         # the median only when the medians moved the same way; a change that speeds most
         # runs and slows the middle one is reported as mixed.
-        if hi < 0 and moved < 0 and rate(fa) > rate(fb):
+        if hi < 0 and moved < 0 and (rate(fa) > rate(fb) or (work and rate(wfa) > rate(wfb))):
             # A higher failure rate after, even within chance, isn't a clean speedup: at a
-            # few runs a side the failure test can't rule out a real rise.
+            # few runs a side the failure test can't rule out a real rise. The workload's own
+            # rate counts as well as the workflow's.
+            sb, sa, where_ = (fb, fa, "runs") if rate(fa) > rate(fb) else (wfb, wfa, "runs where %s ran" % work)
             res["verdict_code"] = "faster_more_failures"
-            res["verdict"] = ("median faster (%s), but more runs failed after (%d of %d) than before"
+            res["verdict"] = ("median faster (%s), but more %s failed after (%d of %d) than before"
                               " (%d of %d): name each failure's cause before calling it faster"
-                              % ((runs,) + fa + fb))
+                              % ((runs, where_) + sa + sb))
         elif hi < 0 and moved < 0:
             res["verdict_code"], res["verdict"] = "faster", "median faster (%s)" % runs
         elif lo > 0 and moved > 0:
@@ -1645,6 +1651,9 @@ def cmd_compare(a):
             res["verdict_code"] = "no_change_yet"
             res["verdict"] = "no measurable change yet with %s; more runs can tighten this" % sides
     (cxb, nb_), (cxa, na_) = res["cancelled_before"], res["cancelled_after"]
+    if res["verdict_code"] in ("faster", "mixed") and work and not fails_rose((cxb, nb_), (cxa, na_)) \
+            and fails_rose(wcb, wca):
+        (cxb, nb_), (cxa, na_) = wcb, wca  # the workload's own share rose: report that one
     if res["verdict_code"] in ("faster", "mixed") and fails_rose((cxb, nb_), (cxa, na_)):
         # A larger share cancelled after, beyond chance (the failure check's exact test): the
         # runs that finished may be the fast ones.
@@ -1691,6 +1700,9 @@ def cmd_compare(a):
         " (higher after, within chance: report it)" if rate(fa) > rate(fb) and not fails_rose(fb, fa) else "",
         "; beyond chance from %d failed beside these %d" % (need, fa[1] - fa[0])
         if need is not None and fa[0] < need else "")))
+    if work:
+        print("runs where %s ran: failed before %d of %d, after %d of %d; cancelled before %d of %d, after %d of %d"
+              % ((work,) + wfb + wfa + wcb + wca))
     print("cancelled runs, in neither the timings nor the failure rate: before %d of %d, after %d of %d%s"
           % (res["cancelled_before"] + res["cancelled_after"] + (
               " (a larger share after: slow runs being cancelled can pass for a speedup; say so)"
@@ -1993,8 +2005,9 @@ def failed_tests(folder, short=None):
                     # Shortened to the leg and the test's name, so it matches failed.txt lines
                     # in the same leg's folder; over every report read, one short name must
                     # stand for one suite, class and file.
-                    short.setdefault(fields[-1], set()).add(json.dumps(fields[1:]))
-                    return "::".join(x for x in (where, fields[-1]) if x)
+                    key = "::".join(x for x in (where, fields[-1]) if x)
+                    short.setdefault(key, set()).add(json.dumps(fields[1:]))
+                    return key
                 return show_test(json.dumps([where] + fields[1:]))
             for t, outs in res.items():
                 fields = json.loads(t)
@@ -2125,10 +2138,13 @@ def cmd_flaky(a):
     # leg's folder, a name spelled otherwise): its failures can't meet a pass of the same test.
     # Per workflow: a JUnit report of another workflow says nothing about these names.
     has_junit = {w for w, _ in junit_names}
-    lone = sorted(n for w, n in txt_names - junit_names if w in has_junit)
+    lone = sorted({n for w, n in txt_names - junit_names if w in has_junit})
+    # A workflow with failed.txt names and no JUnit report shows no pass of any test, so no
+    # failure of its can stand alone.
+    no_pass = sorted({w for w, _ in txt_names} - has_junit)
     if a.json:
         print(json.dumps({"tests": rows, "failed_runs_without_reports": unread, "empty_report_folders": empty,
-                          "failed_txt_names_no_report_shows": lone,
+                          "failed_txt_names_no_report_shows": lone, "workflows_with_no_junit_pass_evidence": no_pass,
                           "runs_without_base": sum(1 for r in runs if (r.get("event") or "").startswith("pull_request")
                                                    and not r.get("pull_request_bases")),
                           "xml_not_junit": not_junit}, indent=2))
@@ -2144,6 +2160,9 @@ def cmd_flaky(a):
         print("  folders with no report in them, counted as unread: %s" % ", ".join(empty[:10]))
     if not_junit:
         print("  XML files that aren't JUnit, not read: %s" % ", ".join(not_junit[:10]))
+    if no_pass:
+        print("  workflows with failed.txt and no JUnit report, so no pass of a test can be seen and none of"
+              " their failures can stand alone: %s" % ", ".join(no_pass))
     if lone:
         print("  failed.txt names no JUnit report of their workflow shows (put failed.txt in its leg's folder,"
               " and spell names as the reports do, or use --short for the leg and the test's name): %s"
@@ -2352,7 +2371,7 @@ def main(argv=None):
                     help="a JSONL file fetch wrote, or a folder of saved gh api answers")
     fl.add_argument("--reports", required=True, help="a folder holding one folder per run id, each with that"
                     " run's JUnit XML or a failed.txt of failing test names")
-    fl.add_argument("--short", action="store_true", help="name JUnit tests by their name alone, to match"
+    fl.add_argument("--short", action="store_true", help="name JUnit tests by their leg and name only, to match"
                     " failed.txt lines that give only the name")
     fl.add_argument("--top", type=int, default=15)
     fl.add_argument("--json", action="store_true")

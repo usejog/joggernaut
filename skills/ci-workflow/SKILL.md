@@ -192,6 +192,12 @@ in `references/measuring.md`.
      with the old one, not the formula. Its minutes change by both jobs'
      new billed durations against the old job's. If the moved steps need something the kept
      ones build, the new job depends on it and this arithmetic doesn't hold.
+     A job output a moved step produces (`outputs: ref: ${{ steps.X.outputs.ref }}`)
+     moves with it: the new job declares it, and every job that read it
+     from the old job (`needs.verify.outputs.ref`) reads it from the new one;
+     otherwise it resolves empty and a consumer can silently fall back to a
+     default (another ref, another target). Keep the producer in the old job
+     when that is simpler.
      A job with a step after the moved ones that has an effect outside the
      job (a publish, a deploy, a push) stays whole: in a new job the moved
      checks would no longer hold that step back. Native parallel steps keep
