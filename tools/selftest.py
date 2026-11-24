@@ -1907,6 +1907,10 @@ with tempfile.TemporaryDirectory() as t:
                   and got.get("fewer_reached_by") in ("listed", "listed by name"))
         else:
             ok = code.startswith("faster") and ("_%s_reached" % way) in code
+        if kind == "widened":
+            head_ = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl"] + extra).stdout.splitlines()[:1]
+            if head_ != ["measure: run (start to last job done), runs that ran job preview"]:
+                bad.append("compare --ran: the heading should name the whole-run measure: %r" % head_)
         if not ok:
             bad.append("compare %s (%s): a changed workload passed for a speedup: %r %r %r\n%s"
                        % (" ".join(extra), kind, code, got.get("reach_checks"), got.get("failed_before"), r.stderr[-300:]))
@@ -1939,7 +1943,7 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--job", "integration (postgres)"])
     got = json.loads(r.stdout) if r.returncode == 0 else {}
     if (got.get("failed_before") != got.get("failed_after") or got.get("fewer_reached_by") != "missed with a failure"
-            or not (got.get("verdict_code") or "").startswith("faster") or "_fewer_reached" not in got.get("verdict_code")):
+            or not (got.get("verdict_code") or "").startswith("faster") or "_missed_with_failure" not in got.get("verdict_code")):
         bad.append("compare --job: a planner failing before the leg should qualify through missed-with-a-failure: %r %r %r"
                    % (got.get("verdict_code"), got.get("fewer_reached_by"), (got.get("failed_before"), got.get("failed_after"))))
     # A run cancelled while queued (no jobs at all) also counts as missed with a failure.

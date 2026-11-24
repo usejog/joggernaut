@@ -1738,11 +1738,14 @@ def cmd_compare(a):
             and res["fewer_reached_by"]:
         x = next(c for c in res["reach_checks"] if c["check"] == res["fewer_reached_by"])
         res["verdict_code"] += "_fewer_reached"
-        what = " and ".join(names)
+        job_names = " and ".join(names)
         # The failure-based counts say only that runs missed it and something failed: the joint
-        # count, not a claim about which runs reached it.
-        phrase = ("more runs missed %s with a failure or cancellation in the run" % what
-                  if x["check"] in ("stopped", "missed with a failure") else "which runs reached %s changed" % what)
+        # count, not a claim about which runs reached it, so they get their own suffix.
+        joint = x["check"] in ("stopped", "missed with a failure")
+        if joint:
+            res["verdict_code"] = res["verdict_code"][:-len("_fewer_reached")] + "_missed_with_failure"
+        phrase = ("more runs missed %s with a failure or cancellation in the run" % job_names
+                  if joint else "which runs reached %s changed" % job_names)
         res["verdict"] += ("; but %s (%s: %d of %d after, against %d of %d before): runs stopped upstream, skipped by"
                            " a condition or left out of a matrix may have been the slow ones; name why before"
                            " calling it faster"
@@ -1755,7 +1758,9 @@ def cmd_compare(a):
                                                     "all": "runs that didn't run it, of all runs"}[x["check"]])
                               + tuple(x["missed_after"]) + tuple(x["missed_before"])))
     if work and res["verdict_code"] in qualify + tuple(q + "_more_cancelled" for q in qualify) + tuple(
-            q + s_ for q in qualify for s_ in ("_fewer_reached", "_more_cancelled_fewer_reached")) and res["more_reached_by"]:
+            q + s_ for q in qualify for s_ in ("_fewer_reached", "_more_cancelled_fewer_reached",
+                                               "_missed_with_failure", "_more_cancelled_missed_with_failure")) \
+            and res["more_reached_by"]:
         x = next(c for c in res["reach_checks"] if c["check"] == res["more_reached_by"])
         res["verdict_code"] += "_more_reached"
         res["verdict"] += ("; but more runs reached %s after (%s, %d of %d ran it, against %d of %d before): the work"

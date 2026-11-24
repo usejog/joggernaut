@@ -209,7 +209,9 @@ named with `--job` or `--ran` is checked among its own runs as well (both
 named: each one's runs and the runs where both ran, the worst counting). When fewer
 runs reached the named job after than chance explains, a faster or mixed
 verdict ends in `_fewer_reached`; when more did (a filter or a matrix that
-widened), in `_more_reached`. Either way the runs timed may not be like the
+widened), in `_more_reached`; when only the runs that missed it with a
+failure or cancellation in the run rose, in `_missed_with_failure` (seen
+together, not a claimed cause). Either way the runs timed may not be like the
 runs before, so say why. Runs can miss a job in several ways (a failure or
 cancellation before it, a condition, a matrix leg left out, a skipped
 caller), and no one count sees them all without other traffic diluting it,
