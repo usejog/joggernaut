@@ -66,6 +66,53 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    `.joggernaut/before.jsonl`, fetch it first as `references/measuring.md`
    says. `python3 scripts/measure.py split --in .joggernaut/before.jsonl` lists jobs that failed and then passed on a
    rerun of the same commit (`--json` lists them all; the text shows ten). Where CI keeps JUnit reports, name the tests.
+   A rerun is only one sign: a test that fails on a pull request is usually
+   followed by a new push, not a rerun, so a test failing on many pull
+   requests can show up there a few times. Count those too. Put each run's
+   test reports in a folder named by its run id
+   (`.joggernaut/reports/RUN_ID/`): the JUnit XML its jobs upload, or a
+   `failed.txt` of failing test names taken from the check annotations or
+   the log where there is no report. `gh run download` keeps one artifact
+   per name: save each artifact under its name
+   (`.joggernaut/reports/RUN_ID/ARTIFACT_NAME/`, which keeps a matrix leg's
+   reports apart from another's; where the workflow puts the run id in the
+   artifact's name, save it under the name without it, so the same test
+   matches across runs; put a `failed.txt` in the folder of the leg it came
+   from, since a test is known by its leg; a folder named only by a number is
+   read as an artifact id, so name legs with a word, `node-22` not `22`), and
+   where a rerun uploaded a name again,
+   each attempt's under `RUN_ID/attempt-N/ARTIFACT_NAME/`, or a passing
+   attempt's report replaces the failed one's. Folders named by a number or
+   `attempt-N` don't become part of a test's name; `--short` (the leg and
+   the test's name, to match a `failed.txt` that gives names alone) refuses names it can't tell apart. A test that
+   passed only on a retry inside the job (Surefire's `flakyFailure`) counts
+   as failing there. An XML file that isn't JUnit (coverage) is named and
+   skipped; an empty folder is no evidence.
+   Read failed runs, and the runs around their failures, so a pass on both
+   sides of each failure can show. Then:
+
+   ```sh
+   python3 scripts/measure.py flaky --in .joggernaut/before.jsonl --reports .joggernaut/reports
+   ```
+
+   Runs are lined up per workflow file and per base (the branch a pull
+   request targets, or the branch pushed). A pull request run with no base
+   recorded (a closed pull request read from saved answers, or a fork's) is
+   lined up with its own pull request's runs only, so it never stands
+   alone: read the runs with `fetch`, which records the base. A failure stands alone when a
+   report shows the test passing before it and after it on that line, with
+   no other pull request's run between them failing it (or failed with no
+   report read): one pull request's own change fails the
+   test on that pull request only, and a broken base fails it on every run
+   until fixed. A test that stood alone on 3 or more pull requests (a
+   choice: two can share a change) is **recurring**, a candidate. A green
+   run with no report is no evidence (it may not have run the test). Before
+   treating a recurring test as flaky, read two or three of those pull
+   requests and check that none changed what the test covers (a snapshot or
+   schema test that many changes break isn't flaky), then reproduce it
+   (step 2). Its cost: the failed runs' runner-minutes, observed; the wait,
+   only where a rerun followed. Several tests failing in one run share that
+   run's cost.
    Rank by occurrences times the observed cost of each (as ci-diagnose's Reliability section gives it).
 2. **Reproduce before changing anything.** Run the one test many times,
    in a fixed batch, the way CI ran it, then under strain: fewer CPUs or a busy

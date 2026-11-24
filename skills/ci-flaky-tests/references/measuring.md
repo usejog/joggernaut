@@ -9,6 +9,35 @@ there and adds that folder to `.git/info/exclude`, so nothing gets committed.
 Needs Python 3.9+ and the GitHub CLI, logged in (`gh auth status`). If `gh`
 isn't logged in, stop and ask the person to run `gh auth login`.
 
+## When the agent may not run the script's GitHub calls
+
+Some teams guard what their agents run. `fetch` and `cachelog` run `gh`, and
+`fetch` runs `git` to check that its output isn't tracked. Everything else
+only reads files. To describe runs without letting the script call
+anything, save GitHub's own answers with plain GET calls you run yourself,
+then point `split` (or `flaky`) at the folder: with a folder, the script
+never imports `subprocess` and starts no process. Whether a guard may allow
+the file at all is the person's policy; ask, and don't work around a guard.
+
+```sh
+mkdir -p .joggernaut/saved   # untracked: git ls-files .joggernaut must list nothing
+gh api --method GET --paginate --slurp repos/OWNER/NAME/actions/workflows/ci.yml/runs \
+  -f event=pull_request -f status=completed -f per_page=100 \
+  -f created='START..YYYY-MM-DDTHH:MM:SSZ' > .joggernaut/saved/runs.json   # a few days; every page in one file
+# then, for each run id in it (filter=all keeps the attempts before a rerun):
+gh api --method GET --paginate --slurp repos/OWNER/NAME/actions/runs/RUN_ID/jobs \
+  -f filter=all -f per_page=100 > .joggernaut/saved/jobs-RUN_ID.json
+MEASURE split --runs-dir .joggernaut/saved
+```
+
+Files are told apart by what they hold, so names don't matter. A run with
+no jobs saved, fewer jobs than its pages' count, or only its latest
+attempt's jobs is left out and named; more than one in 20 stops it. This is
+for describing runs. `compare` refuses a folder: a saved listing can't show
+the query that filled it (a listing of successes alone is complete by its
+own count, with every failure missing), so a verdict reads only files
+`fetch` wrote.
+
 ## Baseline, before any change
 
 If `git ls-files .joggernaut` lists anything, the folder is tracked: stop
@@ -91,8 +120,9 @@ record the same way on both sides:
 - On the after side, also require the fix in that base or commit
   (`git merge-base --is-ancestor FIX_SHA BASE`), with no revert of it there.
 - On the after side, a run that passed but prints no such line is unknown:
-  leave it out. A failed run that stopped before that line (before
-  checkout, or in it) stays: it is never timed, and its failure counts.
+  leave it out. A failed or cancelled run that stopped before that line
+  (before checkout, or in it) stays: it is never timed, and its failure or
+  cancellation counts.
 
 Write the kept runs, one line each as `fetch` wrote them, to
 `before-fix.jsonl` and `after-fix.jsonl`, and compare those, with the
@@ -111,15 +141,88 @@ fetch it only once it has ended and every run created in it has finished;
 finish keeps the fastest of the window and can pass for a speedup with no
 change at all.
 
-`compare` times every successful comparable run in each file, whatever jobs
-it ran. If `split` shows groups and the two sides hold them in different
-mixes (more docs-only pushes after, say), the medians move with the mix:
-say so, and time the job the fix changes with `--job`.
+Runs that ran different jobs did different work. `compare` reads a run's
+work, as far as the jobs list shows it, as the set of jobs it ran (names
+with counts, so matrix legs count):
+
+- one set on both sides: whole runs compare as before;
+- one set on each side, different between them: the verdict ends in
+  `_jobs_changed` (`faster_jobs_changed`, say) and is never a plain one. It
+  holds only if the workflow's diff explains every difference (jobs
+  folded, split or renamed) and every removed job's work still runs (the
+  tests compared by name, below); otherwise the mix of pull requests
+  changed, not the CI;
+- several sets within a side (a path filter, an `if:`): `compare` refuses a
+  whole-run verdict, since the median would move with the mix, and lists
+  the before side's sets. Time one job's own duration with `--job`: that
+  is the verdict, as long as that job's eligibility is the same on both
+  sides (its `if:` and path filters unchanged, and about the same share of
+  runs running it; `compare` prints the counts and qualifies a change
+  beyond chance) and the same kind of pushes reach the measured runner
+  (routing unchanged); otherwise report it as unverified. `--ran JOB` times whole runs that ran that job (it must
+  leave one set a side), a descriptive reading only (`ran_descriptive`,
+  the reading in `reading`): which runs ran a job can change with the
+  change itself (a path filter moved from slow pushes to fast ones keeps
+  every count), so it is never a verdict. Either way the named job picks a
+  workload, the runs where it ran: failures and cancellations are checked among those runs as well as
+  over the whole workflow, so a job whose slow runs start failing or being
+  cancelled can't leave only its fast ones to time.
+
+The same jobs can still run different tests (per-pull-request test
+selection inside a job); only `MEASURE tests` shows that, and only for the
+reports compared, and it passes a run that ran more tests. Where selection
+can vary inside a job, a speed verdict needs every timed run to have run the
+same tests: compare each run's report with one reference run's both ways
+(`--before A --after B`, then `--before B --after A`; both pass only when
+the names match). If they all match, the verdict stands; if timing only the
+matching runs would mean dropping rows from the files, don't build such
+files (the failure rate must read every run): report the timings as
+unverified instead (issue #32 tracks a tool check). The same holds for a step that
+runs on some runs only (an `if:` on a step, such as a site build on some
+paths): if the timed runs didn't all run the same steps (the run file records
+each step's conclusion; a skipped step shows `skipped`), report the timings
+as unverified, for the same reason. A step a cache hit skips is the cache's
+effect: time hits and misses apart, each with both options
+(`--cache-state STATE.json --cache hit`, then `--cache-state STATE.json --cache miss`). `compare` also counts each side's runs cancelled with no
+failure (a newer push, a concurrency group): they are in neither the
+timings nor the failure rate. When the share cancelled rose beyond chance
+(the failure check's one-sided exact test), over the workflow or among a
+named job's runs, a faster (also with more failures) or mixed verdict ends in
+`_more_cancelled`: if the change makes slow
+runs get cancelled, the runs left are the fast ones. Equal shares can still
+hide which runs finished (issue #33): read the cancelled runs before calling
+it faster. `--job NAME --end` times that
+job from the run's start to its end, on the run's clock (its queue and the
+jobs before it count), not the job's own duration, so the same job-set rule
+applies to it over every job the runs ran (a job queued beside it can hold
+its runner), and every job's runner must match on both sides. Its reading is
+descriptive only (`end_descriptive`; the reading itself is in `--json` as
+`reading`): a job's end moves with which runs reached it, their queue
+order and their runners, more than any check can pin down. Report it beside
+the job's own duration (`--job` alone) and the whole run's wait, which give
+the verdict.
 
 `compare` needs at least 5 successful comparable runs a side. Those are the
 runs it times; `--label`, `--job` and `--cache` choose them. The failure rate
 it reports reads every finished run of the workflow and event in each file,
-whatever those filters say, so a filter can't hide or dilute a failure. If
+whatever those filters say, so a filter can't hide or dilute a failure; a job
+named with `--job` or `--ran` is checked among its own runs as well (both
+named: each one's runs and the runs where both ran, the worst counting). When fewer
+runs reached the named job after than chance explains, a faster or mixed
+verdict ends in `_fewer_reached`; when more did (a filter or a matrix that
+widened), in `_more_reached`; when only the runs that missed it with a
+failure or cancellation in the run rose, and no direct count did, in
+`_missed_with_failure` (seen together, not a claimed cause). Either way the runs timed may not be like the
+runs before, so say why. Runs can miss a job in several ways (a failure or
+cancellation before it, a condition, a matrix leg left out, a skipped
+caller), and no one count sees them all without other traffic diluting it,
+so several are checked, and a change in any counts: among the runs that list
+the job (or a caller of it, or it by name), among the runs where the other
+named job ran (both ways, with `--ran` and `--job`), and among all runs
+(the runs that missed it; those that missed it and had a failure or
+cancellation in the run; and those that list it, missed it and had a job
+fail or be cancelled). `--json` lists each
+(`reach_checks`); the text prints each. If
 more runs fail after than chance explains (a one-sided test at 5%), the
 result is not valid. If more fail after but within chance, the verdict says
 "median faster …, but more runs failed after": at a few runs a side the test

@@ -60,7 +60,11 @@ before it starts and every 50 runs, and stops when fewer than 300 requests
 are left (a default reserve, so other tools sharing the token keep some);
 it checks every 50 runs, not every request, so it can end under 300. Run it with `python3 scripts/measure.py <command> --help`.
 If Python isn't available, follow the same method by hand with `gh api`; the
-steps below say what each command computes.
+steps below say what each command computes. If the person's guard doesn't let
+an agent run the script's own GitHub calls, `split` reads GitHub's answers
+saved with `gh api` and starts no process (`references/measuring.md`, "When
+the agent may not run the script's GitHub calls"); a verdict still needs
+`fetch`'s file.
 
 ## Steps
 
@@ -105,6 +109,38 @@ baseline now (step 3.3): a lost test fails the change before it merges.
 If the change touched tests or test setup, run the break-it probe (step
 3.4) now too, and record which behaviour the changed test caught.
 
+**A pull request that changes CI can measure itself before it merges.** A
+`pull_request` run uses the workflow files of the pull request's merge ref,
+so its runs are the new CI. Check two exceptions first: a reusable workflow
+called as `owner/repo/...@ref` runs from that ref, not from the pull
+request, and a checkout that selects the head runs something else. When CI
+selects tests per pull request, runs of different pull requests did
+different work, so a total wait compares the selections, not the CI:
+
+1. **After side, with the person's yes** (runs cost minutes): fix the count
+   first (5, say), then push that many empty commits
+   (`git commit --allow-empty`), one at a time, each after the previous run
+   has finished, so none is cancelled by a concurrency group and none
+   overlaps another. An empty commit leaves the pull request's diff alone,
+   so the selection stays the same, unless the selector compares only the
+   latest push. Keep every run, failed and cancelled included.
+2. **Before side**: other pull requests' runs into the same base from
+   before the change, with the same event (step 1's baseline), so `compare`
+   reads both sides the same way.
+3. **Compare jobs whose work doesn't depend on the selection** (a full
+   typecheck, say), each by `compare --job NAME`, its own duration: the
+   verdict. Beside it, `compare --job NAME --end` reads its end on the run's
+   clock, which shows the change making one job finish sooner and another
+   later; that reading is descriptive only, never a verdict, since it moves
+   with which runs reached the job, their queue order and their runners. Check with `MEASURE tests` that each job
+   ran the same tests on both sides. Report the total wait beside them as a
+   description only.
+
+These are still the branch's runs: label them **provisional**. Runs in a row
+on one pull request share its cache and its moment, and the window after the
+merge (step 3) is still the result. A squash merge drops the empty commits;
+under a merge-commit policy, ask before adding them.
+
 ### 3. After the change merges
 
 1. Fetch only runs created in a window after the merge, chosen before you
@@ -125,8 +161,9 @@ If the change touched tests or test setup, run the break-it probe (step
    a pull request, and leave
    out runs whose base lacks the fix, or whose checkout prints no such line
    (mark those unknown); a run's time alone doesn't show it. Keep a failed
-   run that stopped before that line (before checkout, or in it): it is
-   never timed, and its failure counts, as on the before side. `--base`
+   or cancelled run that stopped before that line (before checkout, or in
+   it): it is never timed, and its failure, or its cancellation, counts, as
+   on the before side. `--base`
    leaves out runs it can't place on the branch, fork runs included, on both
    sides and whether they passed or failed (`references/measuring.md`). An ancestor
    fix may have been reverted since: also check that no revert of it is an ancestor of that run's BASE. Leave out pull requests
@@ -154,14 +191,32 @@ If the change touched tests or test setup, run the break-it probe (step
    ```sh
    python3 scripts/measure.py compare --before .joggernaut/before-fix.jsonl \
      --after .joggernaut/after-fix.jsonl --workflow "CI" --event pull_request \
-     --base main --label ubuntu-latest [--job "test"]
+     --base main --label ubuntu-latest [--job "test"] [--ran "test"]
    ```
+
+   If the timed runs ran different sets of jobs within a side (a path
+   filter, an `if:`), it refuses a whole-run verdict and lists the before
+   side's sets: time the job the fix changes by its own duration with
+   `--job`, which gives the verdict as long as that job's eligibility is the
+   same on both sides (its `if:` and path filters unchanged, and the share
+   of runs that ran it about the same: `compare` prints the counts and
+   qualifies a change beyond chance) and the same kind of pushes reach the
+   measured runner (routing unchanged; issue #39 tracks a tool check);
+   otherwise report it as unverified. `--ran JOB` times whole runs that ran
+   that job, a descriptive reading only (`ran_descriptive`): which runs ran
+   it can change with the change itself. If each side ran one set but the sets differ, the verdict ends
+   in `_jobs_changed` and is never a plain one: it holds only if the
+   workflow's diff explains every difference and every removed job's work
+   still runs (step 3, the tests by name); otherwise the mix of work
+   changed, not the CI.
 
    It prints the medians, the slowest runs (below 20 runs a side, the
    smaller side's slowest run and the larger side's typical slowest of that
    many; the slowest 5% from 20; provisional below 100), the Hodges-Lehmann
    estimate of the change with its exact 95% interval, the runs it left out
-   and why, the failure rate and the runner-minutes per run on each side, and
+   and why, the failure rate and the runner-minutes per run on each side (unrounded, and
+   rounded up per job as GitHub bills its hosted runners; price another
+   provider's runners at its own rate and rounding), and
    one verdict with the run count: **median faster** (with ", but more runs
    failed after" when the failure rate rose within chance), **median slower**,
    **mixed** (the runs tend one way, the median went the other or nowhere),
@@ -170,11 +225,18 @@ If the change touched tests or test setup, run the break-it probe (step
    `references/measuring.md` says why this method holds at 5 runs a side, and
    how to measure again without fooling yourself. Report the verdict as
    printed, with the slowest runs beside it, since the median can improve
-   while the tail gets worse. If any run failed after the change,
+   while the tail gets worse, unless the timed runs didn't all do the same
+   work: where tests or steps run on some runs only (selection inside a job,
+   an `if:` on a step), and the timed runs didn't all run the same ones,
+   report the timings as unverified, never as the verdict
+   (`references/measuring.md`). If any run failed after the change,
    name the cause of each before reporting a speedup: at a few runs a side,
    only a large rise in failures counts as beyond chance. The failure rate
-   reads every finished run of the workflow and event; `--label`, `--job`
-   and `--cache` choose only the runs timed.
+   reads every finished run of the workflow and event; `--label` and
+   `--cache` choose only the runs timed. A job named with `--job` or `--ran`
+   also picks a workload, the runs where it ran, whose own failures and
+   cancellations are checked as well, so a verdict can be not valid on
+   those alone.
 3. Compare the tests, by name:
 
    ```sh

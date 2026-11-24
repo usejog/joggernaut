@@ -61,6 +61,10 @@ in `references/measuring.md`.
    in place of `.joggernaut/before.jsonl` below for the diagnosis and go to
    step 3. Before a fix, fetch the baseline it will be measured against as
    in step 2: a saved file can't show it was read with every run finished.
+   If the person's guard doesn't let you run the script's own GitHub calls,
+   save GitHub's answers with `gh api` yourself and read them with `split
+   --runs-dir` (`references/measuring.md`); the diagnosis is the same, and
+   the baseline for a fix still needs `fetch`.
    With no saved history, check access: `gh auth status`, then
    `gh api rate_limit`. Stop if fewer than 300 core requests are left (a
    reserve this skill chooses, so other tools sharing the token keep some);
@@ -109,6 +113,10 @@ in `references/measuring.md`.
 3. **Split the time.**
    `python3 scripts/measure.py split --in .joggernaut/before.jsonl`. It
    reports:
+   - first, how many runs passed, of the runs that passed or failed (and how
+     many of those passed on attempt 2 or later; cancelled runs left out). When under half
+     passed it says "MOST RUNS FAIL": the PR wait below describes only the
+     runs that passed, so the report opens with why runs fail (step 6);
    - the PR wait, at the median and the slowest 5% of successful runs (the
      slowest run, below 20; `split` says which), from
      the start of the run's final attempt to its last job done (time spent
@@ -151,7 +159,14 @@ in `references/measuring.md`.
      can be a runner shortage, a concurrency limit or an environment
      approval, and a long "before its first job" or "between its jobs" is
      time no job in the list explains (an approval, a concurrency group);
-     say which, from the workflow, before naming a cause;
+     say which, from the workflow, before naming a cause. At the path's
+     end, `split` marks candidate gates (trailing jobs whose steps, besides
+     the runner's own set-up and clean-up, ran under 5 s; confirm each in the
+     workflow), how much sooner a run would end without them with every other
+     job ending when it did (a median over every run, 0 where there were
+     none; a gate other jobs need can save more), and the last job that did work before them, with its steps
+     in order and their median seconds (causes 26 and 27). With a called
+     workflow, that is the job to look at, not the caller's gate;
    - every job's median split over the runs that ran it, called workflows'
      jobs included (`--json` lists every job, not only ten), and each called
      workflow's time, from its first job queued to its last done (read
@@ -159,7 +174,8 @@ in `references/measuring.md`.
    - pushes a day: distinct pull-request commits that started CI, over the
      days the file spans. A reopened pull request or a re-run of the same
      commit isn't counted again;
-   - runner-minutes, by runner label, and the share in runs that failed,
+   - runner-minutes, unrounded and rounded up per job (step 5 says which a
+     label is priced by), by runner label, and the share in runs that failed,
      timed out or were cancelled (by a concurrency group or by hand). Not
      all of it is waste: a failed run may have caught a real bug;
    - pushes per pull request, and catch-up runs: pushes whose commit message
@@ -220,7 +236,7 @@ in `references/measuring.md`.
    so give its cost per occurrence instead, observed: the runner-minutes of
    the failed attempt's jobs that ran again, and the extra wait (first
    attempt's start to the passing attempt's end, minus a typical passing
-   run; the subtraction is an estimate against the typical passing run, so show the actual interval too). Give a flake's daily cost as well, worked out on the push's last required finish as for the other causes (a flake in a workflow that doesn't finish last saves no wait, as long as its rerun doesn't hold a runner, a slot, or a shared resource such as a database lock that another required job waits for); if it is larger than fix #1's, it becomes fix #1, or the order is undecided where its estimate is too uncertain. Show it under Reliability either way. Never add savings of different causes up: their effects can overlap (less than the sum), combine (more, as with two equally long paths) or move the slowest path. Show the runs
+   run; the subtraction is an estimate against the typical passing run, so show the actual interval too). A test that fails on many pull requests but is rarely rerun shows up there only a few times: where CI keeps test reports, run `measure.py flaky` (as ci-flaky-tests step 1 says) and list the tests recurring on several pull requests as candidates, counting their failed runs' runner-minutes (observed) and leaving their wait cost unknown where no rerun followed. Give a flake's daily cost as well, worked out on the push's last required finish as for the other causes (a flake in a workflow that doesn't finish last saves no wait, as long as its rerun doesn't hold a runner, a slot, or a shared resource such as a database lock that another required job waits for); if it is larger than fix #1's, it becomes fix #1, or the order is undecided where its estimate is too uncertain. Show it under Reliability either way. Never add savings of different causes up: their effects can overlap (less than the sum), combine (more, as with two equally long paths) or move the slowest path. Show the runs
    and steps each number rests on.
 
    When the question is the bill, first name what is billed and rank within that: storage by stored volume over time, minutes by runner-minutes (hosted runner
@@ -230,17 +246,20 @@ in `references/measuring.md`.
    rank by dollars only where each label maps to its billing terms, with
    usage counted in their unit, and say where each price came from: for a
    GitHub-hosted label, GitHub's published rates or the person's own plan
-   (GitHub rounds each job up to a whole minute, as `measure.py`'s
+   (GitHub rounds each job up to a whole minute, as `measure.py`'s rounded
    runner-minutes do; minutes inside a plan's included minutes may not
    change the invoice); for a label a third-party runner provider serves,
    which GitHub counts as self-hosted and doesn't bill by the minute, that
    provider's published pricing or the person's contract with it, in its
    own unit (per second, per minute or per machine, where fewer minutes may
-   not change the bill). Where a label's terms are unknown, give its usage
+   not change the bill; `measure.py` prints unrounded runner-minutes beside
+   the rounded ones for terms that don't round, and `split --json` gives
+   `runner_seconds_by_label` for per-second terms). Where a label's terms are unknown, give its usage
    and leave its dollars open. (Joggernaut is made by the team behind Jog,
    which sells CI runners; no skill recommends a provider.)
 6. **Report**, in this shape (a made-up example; every number in yours
-   comes from the runs):
+   comes from the runs). When `split` says most runs fail, open with that
+   line and the Reliability section, before the PR wait:
 
    ```
    Joggernaut · OWNER/NAME · 150 PR runs over 3.75 days   read-only · no tracked file changed

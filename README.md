@@ -226,7 +226,10 @@ issue.
 | [ci-guard](skills/ci-guard/SKILL.md) | Agents push again and again to find lint errors, or keep updating branches | Pushes, failed rounds and catch-up runs per PR |
 
 Each skill carries the same `scripts/measure.py` (Python standard library plus
-`gh`), so a skill installed on its own still measures.
+`gh`), so a skill installed on its own still measures. If your agent's guard
+won't let it run the script's GitHub calls, the agent can save GitHub's
+answers with `gh api` itself, and `split` reads them without starting a
+process ([how](skills/ci-measure/references/measuring.md#when-the-agent-may-not-run-the-scripts-github-calls)).
 
 ## Install
 
