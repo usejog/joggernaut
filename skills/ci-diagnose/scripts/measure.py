@@ -512,19 +512,35 @@ def cmd_fetch(a):
 
 
 def pr_bases(a, r):
-    """The branch each pull request of a run targeted. GitHub lists a run's pull request
-    only while it is open, so for one from this repository ask for the pull requests
-    from the run's head branch in any state (open, merged or closed). A fork's run
-    records none: the measuring guide leaves fork runs out on both sides."""
+    """The branch each pull request of a run targeted, and the pull requests found for a run
+    GitHub no longer lists. GitHub lists a run's pull request only while it is open, so for
+    one from this repository ask for the pull requests from the run's head branch in any
+    state (open, merged or closed). The ones open when a pull_request or pull_request_target
+    run was created (with an hour's grace after a close) are saved as found: evidence for a
+    person, never an owner, since an event can come on a pull request long closed (a label
+    added after a merge). A fork's run records none: the measuring guide leaves fork runs out
+    on both sides."""
     listed = r.get("pull_requests") or []
     head_repo = (r.get("head_repository") or {}).get("full_name")
     if (listed or not (r.get("event") or "").startswith("pull_request") or not r.get("head_branch")
             or head_repo != a.repo):
-        return [(p.get("base") or {}).get("ref") for p in listed]
+        return [(p.get("base") or {}).get("ref") for p in listed], []
     owner = a.repo.split("/")[0]
     prs = gh_get("repos/%s/pulls?state=all&per_page=100&head=%s" % (
         a.repo, quote("%s:%s" % (owner, r["head_branch"]), safe="")), missing=True, keep_going=True) or []
-    return sorted({(p.get("base") or {}).get("ref") for p in prs})
+    made = ts(r.get("created_at"))
+    # Every pull request needs its open time and a closed_at field (null while open), and the
+    # page must hold them all (under 100), or which were open then can't be told.
+    whole = made is not None and len(prs) < 100 and all(
+        p.get("number") and p.get("created_at") and "closed_at" in p for p in prs)
+    # Candidates only, never an owner: pull_request and pull_request_target runs, and a pull
+    # request counts until an hour after it closed (a `closed` event's run comes just after).
+    whole = whole and r.get("event") in ("pull_request", "pull_request_target")
+    open_then = [p for p in prs if whole and ts(p["created_at"]) <= made
+                 and (p["closed_at"] is None or made <= ts(p["closed_at"]) + 3600)]
+    # The bases stay every base the branch's pull requests used, as before: a pull request's
+    # base can change after the run, so the one found now isn't the run's for certain.
+    return sorted({(p.get("base") or {}).get("ref") for p in prs}), sorted(p["number"] for p in open_then)
 
 
 def write_runs(a, runs, out, may_leave_out):
@@ -541,7 +557,7 @@ def write_runs(a, runs, out, may_leave_out):
             pages = gh_get("%s/runs/%d/jobs?filter=all&per_page=100" % ("repos/%s/actions" % a.repo, r["id"]),
                            paginate=True, keep_going=True)
             read = "pull requests"
-            bases = pr_bases(a, r)
+            bases, found = pr_bases(a, r)
         except Unread as e:
             left_out.append("run %d (%s), %s read failed %d times: %s"
                             % (r["id"], r.get("conclusion") or r.get("status"), read, TRIES, e.why))
@@ -553,11 +569,11 @@ def write_runs(a, runs, out, may_leave_out):
                     else "more than one run in 20 couldn't be read; fetch again later"))
             continue
         jobs = [j for p in pages for j in p.get("jobs", [])]
-        out.write(json.dumps(record(r, jobs, bases)) + "\n")
+        out.write(json.dumps(record(r, jobs, bases, found)) + "\n")
     return left_out
 
 
-def record(r, jobs, bases):
+def record(r, jobs, bases, found=()):
     """One run as fetch saves it, from GitHub's run and jobs answers: the same fields
     whether the answers came from fetch or from a folder of saved answers."""
     return {
@@ -570,6 +586,8 @@ def record(r, jobs, bases):
         "run_started_at": r.get("run_started_at"), "updated_at": r.get("updated_at"),
         "pull_requests": [p.get("number") for p in r.get("pull_requests") or []],
         "pull_request_bases": bases,
+        # Candidate pull requests for a run GitHub no longer lists (pr_bases): evidence, not an owner.
+        "pull_requests_found": list(found),
         "jobs": [{
             "id": j["id"], "name": j.get("name"), "run_attempt": j.get("run_attempt", 1),
             "conclusion": j.get("conclusion"), "created_at": j.get("created_at"),
@@ -2231,11 +2249,26 @@ def failed_tests(folder, short=None):
     and the report's file name are left out, so the same test matches across runs. With short
     (a dict), names are the leg and the test's name, and short records what each stood for."""
     failed, passed, skipped, found, txt, junit = set(), set(), [], False, set(), set()
+    attempts = {}  # attempt number: (failed, passed), for reports under attempt-N folders
     # A file's leg: its artifact folders, numbered and attempt folders left out and shard
     # numbers blanked, the same for JUnit reports and failed.txt.
     leg = lambda path: SHARD.sub(lambda m: m.group(1) + "#", "/".join(
         x for x in os.path.relpath(path, folder).split(os.sep)[:-1]
         if not re.match(r"^(?:\d+|attempt[-_ ]?\d+)$", x, re.I)))
+
+    # Only a folder right under the run's (RUN_ID/attempt-N/) says which attempt uploaded a
+    # report; a folder named so inside an artifact says nothing about the run's attempts.
+    def attempt_of(path):
+        top = os.path.relpath(path, folder).split(os.sep)[0]
+        m = re.match(r"^attempt[-_ ]?(\d+)$", top, re.I)
+        return int(m.group(1)) if m and top != os.path.basename(path) else None
+    try:
+        listed = os.listdir(folder)
+    except OSError:
+        listed = []  # unreadable: os.walk below reads nothing either, as before
+    dirs = {int(m.group(1)) for x in listed if os.path.isdir(os.path.join(folder, x))
+            for m in [re.match(r"^attempt[-_ ]?(\d+)$", x, re.I)] if m}
+
     for root, _, files in os.walk(folder):
         for f in sorted(files):
             path = os.path.join(root, f)
@@ -2246,6 +2279,8 @@ def failed_tests(folder, short=None):
                     names = {"::".join(x for x in (leg(path), l.strip()) if x) for l in fh if l.strip()}
                 failed.update(names)
                 txt.update(names)
+                if attempt_of(path) is not None:
+                    attempts.setdefault(attempt_of(path), (set(), set()))[0].update(names)
                 continue
             if not f.endswith(".xml"):
                 continue
@@ -2261,6 +2296,7 @@ def failed_tests(folder, short=None):
             found = True
             where = leg(path)
             res, errs, _ = junit_results(path)
+            att = attempts.setdefault(attempt_of(path), (set(), set())) if attempt_of(path) is not None else None
             def name(fields):
                 if short is not None:
                     # Shortened to the leg and the test's name, so it matches failed.txt lines
@@ -2275,15 +2311,22 @@ def failed_tests(folder, short=None):
                 junit.add(name(fields))  # every case's identity counts for --short, skipped ones too
                 if any(o in ("failed", "errored") for o in outs):
                     failed.add(name(fields))
+                    if att:
+                        att[0].add(name(fields))
                 elif "passed" in outs:
                     passed.add(name(fields))
+                    if att:
+                        att[1].add(name(fields))
             for k in errs:
                 fields = json.loads(k)
                 if fields[-1] == "(retried)":
                     failed.add(name(fields[:-1]))
+                    if att:
+                        att[0].add(name(fields[:-1]))
     if not found:
-        return None if not skipped else ([], [], skipped, set(), set())
-    return failed, passed - failed, skipped, txt, junit
+        return None if not skipped else ([], [], skipped, set(), set(), {}, dirs)
+    # Attempts with a report read (JUnit or failed.txt): a folder of coverage alone is no report.
+    return failed, passed - failed, skipped, txt, junit, {n: p - f for n, (f, p) in attempts.items()}, dirs
 
 
 def cmd_flaky(a):
@@ -2310,7 +2353,7 @@ def cmd_flaky(a):
         return wf, (ev,) + (tuple(r.get("pull_request_bases") or []) or ("base unknown",) + pr_of(r))
     if not os.path.isdir(a.reports):
         die("%s isn't a folder" % a.reports)
-    reports, empty, not_junit, txt_names, junit_names = {}, [], [], set(), set()
+    reports, empty, not_junit, txt_names, junit_names, attempt_info = {}, [], [], set(), set(), {}
     short_of = {} if a.short else None
     for d in sorted(os.listdir(a.reports)):
         folder = os.path.join(a.reports, d)
@@ -2323,11 +2366,14 @@ def cmd_flaky(a):
                 " too, or move its folder out, so its evidence isn't lost" % (folder, d, a.input))
         got = failed_tests(folder, None if short_of is None else short_of.setdefault(
             by_id[int(d)].get("path") or by_id[int(d)].get("name") or "", {}))
+        if got is not None:
+            # Attempts with a report read, and attempt folders, for the complete-rerun list.
+            attempt_info[int(d)] = (set(got[5]), got[6])
         if got is None or (not got[0] and not got[1] and got[2]):
             empty.append(d)
             not_junit += [os.path.join(d, x) for x in (got or ([], [], []))[2]]
             continue
-        reports[int(d)] = got[:2]
+        reports[int(d)] = got[:2] + (got[5],)
         not_junit += [os.path.join(d, x) for x in got[2]]
         wf_ = by_id[int(d)].get("path") or by_id[int(d)].get("name") or ""
         txt_names |= {(wf_, n) for n in got[3]}
@@ -2342,7 +2388,7 @@ def cmd_flaky(a):
             " suites (%s); leave --short off" % (k, w, "; ".join(
                 show_test(json.dumps([""] + json.loads(x))) for x in sorted(short_of[w][k])[:2])))
     tests = {}
-    for rid, (failed, _) in reports.items():
+    for rid, (failed, _, _) in reports.items():
         for t in failed:
             tests.setdefault((line_of(by_id[rid])[0], t), []).append(rid)
     lines = {}
@@ -2398,6 +2444,24 @@ def cmd_flaky(a):
                      "alone": [{"owner": list(k), "runs": sorted(v)} for k, v in sorted(alone.items(), key=str)]})
     rows.sort(key=lambda x: (-x["alone_on_pull_requests"], -x["failed_runs"], x["workflow"], x["test"]))
     unread = sum(1 for r in runs if r.get("conclusion") in FAILED and r["id"] not in reports)
+    # Branches whose unlisted runs fetch found open under more than one pull request over time:
+    # their pull requests count as one here (a closed pull request's run can't be tied to its
+    # own for certain), so a test may recur on more pull requests than shown.
+    reused = {}
+    for r in runs:
+        if (r.get("event") or "").startswith("pull_request") and not r.get("pull_requests"):
+            reused.setdefault("%s:%s" % (r.get("head_repo"), r.get("head_branch")), set()).update(
+                r.get("pull_requests_found") or [])
+    several = sorted((b, sorted(n)) for b, n in reused.items() if len(n) > 1)
+    # Reruns whose folder holds a report for every attempt: their passes aren't counted (a lost
+    # or merged report can't be told apart), but a person can read them.
+    # Listed as a rerun (so its pass isn't counted); its attempts are the latest its listing,
+    # its saved jobs or its attempt folders show, and each must have a report read.
+    last = lambda r, dirs: max([r.get("run_attempt") or 1] + [j.get("run_attempt") or 1 for j in r.get("jobs", [])]
+                               + list(dirs))
+    # (Checked by count first: a folder named like attempt-202611241200 is no attempt to list.)
+    complete = sorted(rid for rid, (got_, dirs) in attempt_info.items() if (by_id[rid].get("run_attempt") or 1) > 1
+                      and last(by_id[rid], dirs) <= len(got_) and set(range(1, last(by_id[rid], dirs) + 1)) <= got_)
     # A failed.txt name no JUnit report shows (a file at the run's root beside reports in a
     # leg's folder, a name spelled otherwise): its failures can't meet a pass of the same test.
     # Per workflow: a JUnit report of another workflow says nothing about these names.
@@ -2411,11 +2475,21 @@ def cmd_flaky(a):
                           "failed_txt_names_no_report_shows": lone, "workflows_with_no_junit_pass_evidence": no_pass,
                           "runs_without_base": sum(1 for r in runs if (r.get("event") or "").startswith("pull_request")
                                                    and not r.get("pull_request_bases")),
+                          "branches_with_several_pull_requests": [{"branch": b, "pull_requests": n} for b, n in several],
+                          "reruns_with_every_attempts_report": complete,
                           "xml_not_junit": not_junit}, indent=2))
         return
     print("reports read for %d runs; %d failed runs have none (unknown: never counted as a pass)"
           % (len(reports), unread))
     nobase = sum(1 for r in runs if (r.get("event") or "").startswith("pull_request") and not r.get("pull_request_bases"))
+    if several:
+        print("  %d branches' runs no longer listed with a pull request have several candidate pull requests"
+              " (%s): each branch counts as one pull request here, so a test may recur on more than shown"
+              % (len(several), "; ".join("%s: #%s" % (b, ", #".join(map(str, n))) for b, n in several[:3])))
+    if complete:
+        print("  %d reruns have a report for every attempt (attempt-1 to attempt-N): their passes aren't counted"
+              " (a lost or merged report can't be told apart); read them: %s"
+              % (len(complete), ", ".join(map(str, complete[:10]))))
     if nobase:
         print("  %d pull-request runs have no base recorded (a closed pull request read from saved answers, or"
               " a fork's): each is lined up with its own pull request's runs only, so it can't stand alone;"

@@ -71,6 +71,9 @@ chain() {
   [ "$mode" = push ] || return 0
   legacy="$(git rev-parse --git-common-dir)/hooks/pre-push"
   if [ -x "$legacy" ] && ! [ "$legacy" -ef "$0" ]; then
+    # A copy of this file there is still run (it could read files beside it), but say so.
+    ! cmp -s "$legacy" "$0" ||
+      say "WARNING: $legacy is a copy of this hook, so its checks run twice; delete it if it runs nothing this one doesn't"
     "$legacy" "$remote" "$url" <"$tmp/refs"
   fi
 }
@@ -115,7 +118,8 @@ if [ "$mode" = push ]; then
     rsha=${line##* } rest=${line% *}
     rref=${rest##* } rest=${rest% *}
     lsha=${rest##* }
-    if ! oid "$lsha" || ! oid "$rsha"; then
+    # Git never sends an empty ref name (a ref name can't be empty or hold a space).
+    if ! oid "$lsha" || ! oid "$rsha" || [ -z "$rref" ]; then
       unknown="unreadable input from git: $line"
       continue
     fi
