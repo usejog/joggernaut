@@ -881,6 +881,10 @@ def pr_pushes(runs):
 
 def cmd_split(a):
     every = read_runs(a.input)
+    # GitHub's run listing can give a file with its ref (".github/workflows/build.yml@main").
+    for r in every:
+        if r.get("path"):
+            r["path"] = re.sub(r"@[^/]*$", "", r["path"])
     # A run saved with no file but with its workflow's id takes the file another run of that
     # id names.
     id_path = {r["workflow_id"]: r["path"] for r in every if r.get("path") and r.get("workflow_id") is not None}
@@ -979,7 +983,8 @@ def cmd_split(a):
                 continue
             first = {}
             for x in rs:
-                first.setdefault(wf_key(x), x)
+                # One file on two events (pull_request and pull_request_target) is two checks.
+                first.setdefault((wf_key(x), x.get("event")), x)
             rs = list(first.values())
             if len(rs) > 1 and all(x.get("conclusion") == "success" for x in rs):
                 # From the push (creation), so a rerun's extra wait counts.
@@ -1010,7 +1015,9 @@ def cmd_split(a):
     # Pull-request runs: a pull_request or pull_request_target run's head_sha is the pull
     # request's head commit (GitHub's GITHUB_SHA for pull_request_target is the base's, but
     # the run records the head).
-    commits = {(pr, sha) for pr, by_head in pushes.items() for sha in by_head}
+    # Pushes a day are distinct head commits: a run keyed by number and one by branch (its pull
+    # request closed by the fetch) of the same commit are one push.
+    commits = {(rs[0].get("head_repo"), sha) for by_head in pushes.values() for sha, rs in by_head.items()}
     out["pr_commits"] = len(commits)
     out["pr_runs_keyed_by_branch"] = guessed
     out["runs_per_day"] = round(len(commits) / span_days, 1) if span_days >= 1 and commits else None

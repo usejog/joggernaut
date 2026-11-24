@@ -2578,6 +2578,21 @@ with tempfile.TemporaryDirectory() as t:
     got2 = json.loads(_split(t, rows + [old_ci], "--json").stdout or "{}")
     if got.get("job_sets") != 2 or got2.get("job_sets") != 2:
         bad.append("split: workflows told apart by id made one set of jobs: %r %r" % (got.get("job_sets"), got2.get("job_sets")))
+    # One file on two events is two checks: a passing pull_request_target run doesn't hide a failing
+    # pull_request run of the same file. One commit seen by number and by branch is one push.
+    # A path with its ref (build.yml@main) is still build.yml.
+    two_ev = []
+    for k, (ev, name, ok, path, prs) in enumerate((("pull_request_target", "Triage", True, "ci.yml@main", [42]),
+                                                   ("pull_request", "Tests", False, "ci.yml", [42]),
+                                                   ("pull_request", "Lint", True, "lint.yml", []))):
+        x = _run(k, [_job("test", 10 * k, 10 * k + 1, 10 * k + 10)], 10 * k, name=name)
+        x.update(event=ev, path=".github/workflows/" + path, conclusion="success" if ok else "failure",
+                 head_sha="%040d" % 42, pull_requests=prs, head_branch="b42")
+        two_ev.append(x)
+    got = json.loads(_split(t, two_ev, "--json").stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 0 or got.get("pr_commits") != 1:
+        bad.append("split: one file on two events, or one commit by number and branch: %r %r"
+                   % (got.get("wait_all_workflows_commits"), got.get("pr_commits")))
     # #14: a repository whose pull-request workflow runs on pull_request_target alone.
     rows = []
     for i in range(6):
