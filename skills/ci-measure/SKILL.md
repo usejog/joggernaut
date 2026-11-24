@@ -160,8 +160,9 @@ under a merge-commit policy, ask before adding them.
    a pull request, and leave
    out runs whose base lacks the fix, or whose checkout prints no such line
    (mark those unknown); a run's time alone doesn't show it. Keep a failed
-   run that stopped before that line (before checkout, or in it): it is
-   never timed, and its failure counts, as on the before side. `--base`
+   or cancelled run that stopped before that line (before checkout, or in
+   it): it is never timed, and its failure, or its cancellation, counts, as
+   on the before side. `--base`
    leaves out runs it can't place on the branch, fork runs included, on both
    sides and whether they passed or failed (`references/measuring.md`). An ancestor
    fix may have been reverted since: also check that no revert of it is an ancestor of that run's BASE. Leave out pull requests

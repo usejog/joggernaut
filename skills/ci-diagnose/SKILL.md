@@ -253,7 +253,8 @@ in `references/measuring.md`.
    provider's published pricing or the person's contract with it, in its
    own unit (per second, per minute or per machine, where fewer minutes may
    not change the bill; `measure.py` prints unrounded runner-minutes beside
-   the rounded ones for terms that don't round). Where a label's terms are unknown, give its usage
+   the rounded ones for terms that don't round, and `split --json` gives
+   `runner_seconds_by_label` for per-second terms). Where a label's terms are unknown, give its usage
    and leave its dollars open. (Joggernaut is made by the team behind Jog,
    which sells CI runners; no skill recommends a provider.)
 6. **Report**, in this shape (a made-up example; every number in yours

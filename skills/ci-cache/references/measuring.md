@@ -120,8 +120,9 @@ record the same way on both sides:
 - On the after side, also require the fix in that base or commit
   (`git merge-base --is-ancestor FIX_SHA BASE`), with no revert of it there.
 - On the after side, a run that passed but prints no such line is unknown:
-  leave it out. A failed run that stopped before that line (before
-  checkout, or in it) stays: it is never timed, and its failure counts.
+  leave it out. A failed or cancelled run that stopped before that line
+  (before checkout, or in it) stays: it is never timed, and its failure or
+  cancellation counts.
 
 Write the kept runs, one line each as `fetch` wrote them, to
 `before-fix.jsonl` and `after-fix.jsonl`, and compare those, with the
@@ -165,17 +166,25 @@ can vary inside a job, a speed verdict needs every timed run to have run the
 same tests: compare each run's report with one reference run's both ways
 (`--before A --after B`, then `--before B --after A`; both pass only when
 the names match), and time only those runs. Otherwise report the timings as
-unverified (issue #32 tracks a tool check). `compare` also counts each side's runs cancelled with no
+unverified (issue #32 tracks a tool check). The same holds for a step that
+runs on some runs only (an `if:` on a step, such as a site build on some
+paths): compare runs that ran the same steps (the run file records each
+step's conclusion; a skipped step shows `skipped`), or report the timings as
+unverified. A step a cache hit skips is the cache's effect: measure it with
+`--cache-state`. `compare` also counts each side's runs cancelled with no
 failure (a newer push, a concurrency group): they are in neither the
-timings nor the failure rate. When a larger share was cancelled after, a
-faster (or mixed) verdict ends in `_more_cancelled`: if the change makes slow
+timings nor the failure rate. When the share cancelled rose beyond chance
+(the failure check's one-sided exact test), a faster (or mixed) verdict ends
+in `_more_cancelled`: if the change makes slow
 runs get cancelled, the runs left are the fast ones. Equal shares can still
 hide which runs finished (issue #33): read the cancelled runs before calling
 it faster. `--job NAME --end` times that
 job from the run's start to its end, on the run's clock (its queue and the
 jobs before it count), not the job's own duration, so the same job-set rule
 applies to it over every job the runs ran (a job queued beside it can hold
-its runner), and every job's runner must match on both sides.
+its runner), and every job's runner must match on both sides. Its end also
+moves with which job got a runner first, so report it beside the job's own
+duration (`--job` alone) and the whole run's wait, never alone.
 
 `compare` needs at least 5 successful comparable runs a side. Those are the
 runs it times; `--label`, `--job` and `--cache` choose them. The failure rate

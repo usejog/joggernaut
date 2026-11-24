@@ -1632,8 +1632,9 @@ def cmd_compare(a):
             res["verdict_code"] = "no_change_yet"
             res["verdict"] = "no measurable change yet with %s; more runs can tighten this" % sides
     (cxb, nb_), (cxa, na_) = res["cancelled_before"], res["cancelled_after"]
-    if res["verdict_code"] in ("faster", "mixed") and na_ and nb_ and cxa * nb_ > cxb * na_:
-        # A larger share cancelled after: the runs that finished may be the fast ones.
+    if res["verdict_code"] in ("faster", "mixed") and fails_rose((cxb, nb_), (cxa, na_)):
+        # A larger share cancelled after, beyond chance (the failure check's exact test): the
+        # runs that finished may be the fast ones.
         res["verdict_code"] += "_more_cancelled"
         res["verdict"] += ("; but a larger share of runs was cancelled after (%d of %d) than before (%d of %d):"
                            " if the change makes slow runs get cancelled, the runs left are the fast ones"
@@ -1934,13 +1935,15 @@ def cmd_tests(a):
 CROSS_PRS = 3
 
 
-def failed_tests(folder, short=False):
+def failed_tests(folder, short=None):
     """One run's test evidence, from every file under its folder: JUnit XML, and any
     failed.txt, one failing test name a line, for a suite that keeps no report. Returns
     (failed names, names a JUnit report shows passed, XML files that aren't JUnit), or None
     when the folder holds no evidence at all. A test that passed only on a retry inside the
-    job (Surefire's flakyFailure and the like) failed. A test's name leaves out folders named
-    by number or attempt (artifact ids, attempts), so the same test matches across runs."""
+    job (Surefire's flakyFailure and the like) failed. A test's name is its artifact folders
+    (a matrix leg's) and its suites, class, file and name: folders named by number or attempt
+    and the report's file name are left out, so the same test matches across runs. With short
+    (a dict), names are the test's name alone, and short records what each stood for."""
     failed, passed, skipped, found = set(), set(), [], False
     for root, _, files in os.walk(folder):
         for f in sorted(files):
@@ -1964,18 +1967,19 @@ def failed_tests(folder, short=False):
             found = True
             parts = [x for x in os.path.relpath(path, folder).split(os.sep)[:-1]
                      if not re.match(r"^(?:\d+|attempt[-_ ]?\d+)$", x, re.I)]
-            where = SHARD.sub(lambda m: m.group(1) + "#", "/".join(parts + [f[:-4]]))
+            where = SHARD.sub(lambda m: m.group(1) + "#", "/".join(parts))
             res, errs, _ = junit_results(path)
             def name(fields):
-                full = show_test(json.dumps([where] + fields[1:]))
-                if short:
-                    # Shortened to the test's name, so it matches failed.txt lines; every full
-                    # name behind one short name, over every report read, must be the same.
-                    SHORT_OF.setdefault(fields[-1], set()).add(full)
+                if short is not None:
+                    # Shortened to the test's name, so it matches failed.txt lines; over every
+                    # report read, one short name must stand for one suite, class and file
+                    # (the same test in several matrix legs is fine).
+                    short.setdefault(fields[-1], set()).add(json.dumps(fields[1:]))
                     return fields[-1]
-                return full
+                return show_test(json.dumps([where] + fields[1:]))
             for t, outs in res.items():
                 fields = json.loads(t)
+                name(fields)  # every case's identity counts for --short, skipped ones too
                 if any(o in ("failed", "errored") for o in outs):
                     failed.add(name(fields))
                 elif "passed" in outs:
@@ -1987,9 +1991,6 @@ def failed_tests(folder, short=False):
     if not found:
         return None if not skipped else ([], [], skipped)
     return failed, passed - failed, skipped
-
-
-SHORT_OF = {}  # flaky --short: each short name and the full names it stood for
 
 
 def cmd_flaky(a):
@@ -2017,6 +2018,7 @@ def cmd_flaky(a):
     if not os.path.isdir(a.reports):
         die("%s isn't a folder" % a.reports)
     reports, empty, not_junit = {}, [], []
+    short_of = {} if a.short else None
     for d in sorted(os.listdir(a.reports)):
         folder = os.path.join(a.reports, d)
         if not os.path.isdir(folder):
@@ -2026,7 +2028,7 @@ def cmd_flaky(a):
         if int(d) not in by_id:
             die("%s holds reports of run %s, which isn't among the finished runs read from %s; read that run"
                 " too, or move its folder out, so its evidence isn't lost" % (folder, d, a.input))
-        got = failed_tests(folder, a.short)
+        got = failed_tests(folder, short_of)
         if got is None or (not got[0] and not got[1] and got[2]):
             empty.append(d)
             not_junit += [os.path.join(d, x) for x in (got or ([], [], []))[2]]
@@ -2035,10 +2037,11 @@ def cmd_flaky(a):
         not_junit += [os.path.join(d, x) for x in got[2]]
     if not reports:
         die("no report in %s for any run in %s" % (a.reports, a.input))
-    twice = sorted(k for k, v in SHORT_OF.items() if len(v) > 1)
+    twice = sorted(k for k, v in (short_of or {}).items() if len(v) > 1)
     if twice:
         die("--short can't tell apart the tests named %s: the reports hold each under several classes or"
-            " suites (%s); leave --short off" % (", ".join(twice[:3]), "; ".join(sorted(SHORT_OF[twice[0]])[:2])))
+            " suites (%s); leave --short off" % (", ".join(twice[:3]), "; ".join(
+                show_test(json.dumps([""] + json.loads(x))) for x in sorted(short_of[twice[0]])[:2])))
     tests = {}
     for rid, (failed, _) in reports.items():
         for t in failed:
@@ -2056,7 +2059,9 @@ def cmd_flaky(a):
             if r["id"] in fail_set:
                 return "fail"
             if r["id"] in reports:
-                if t in reports[r["id"]][1]:
+                # A pass separates only in a run with no failed attempt: in a run that was rerun
+                # after a failure, the report read may be the passing attempt's alone.
+                if t in reports[r["id"]][1] and not run_failed(r):
                     return "pass"
                 # A run with a failure whose reports don't show this test either way (another
                 # suite's report, an empty failed.txt) might have failed it: unknown.

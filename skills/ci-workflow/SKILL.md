@@ -170,7 +170,12 @@ in `references/measuring.md`.
    - **Run independent steps side by side** in the job that finishes last,
      when two or more long steps that aren't setup neither read what the
      other writes, nor write what the other uses (files, outputs,
-     `$GITHUB_ENV`, a database, services, ports), nor rely on its cleanup. First choice: native parallel steps in the same job (a
+     `$GITHUB_ENV`, a database, services, ports), nor rely on its cleanup,
+     nor run only because the other passed: in a job, a step runs only if
+     every step before it succeeded, so a step with an effect outside the
+     job (a publish, a deploy, a push, an upload others use) never goes in a
+     group with the checks it waits for; it stays after the group, which
+     waits for every step in it. First choice: native parallel steps in the same job (a
      `parallel:` group; each step in it runs in the background, with an
      implicit wait at the group's end, and a failed step fails the job
      there, GitHub docs). The job keeps its name, its check, its setup and
@@ -208,8 +213,11 @@ in `references/measuring.md`.
      stays enforces everything the removed one did (a gate can check that a
      leg ran or wasn't skipped, not only results: move that logic, don't
      drop it); no required check, ruleset or `merge_group` check names the
-     removed one; and no other caller of a changed reusable workflow relies
-     on it (search every workflow that calls it). Then check on the pull
+     removed one; no other caller of a changed reusable workflow relies on
+     it (search every workflow that calls it); and no other job that needs
+     the calling job (a publish, a deploy, on push or release too) relied on
+     the removed gate's checks: if one did, it must now need the gate that
+     stays, so it still stops when those checks fail. Then check on the pull
      request that a failed, a skipped and a cancelled leg each still block
      the merge. Make the gate that stays cheap: no checkout, no toolchain.
      Moving it to another runner type is for a person, as is changing which

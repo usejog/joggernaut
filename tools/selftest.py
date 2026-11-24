@@ -1703,14 +1703,17 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("compare --end: work that held the slot before the timed job was left out\n" + r.stdout)
 
     # A larger share cancelled after qualifies a faster verdict.
+    # A share cancelled after that rose beyond chance (0 of 10 before, 15 of 20 after) qualifies
+    # a faster verdict; one more cancelled run (1 of 11) doesn't.
     fast = [_work(300 + i, True, integ=10) for i in range(5)]
-    gone = [dict(_work(400 + i, True), conclusion="cancelled") for i in range(5)]
-    open(t + "/b3.jsonl", "w").write("".join(json.dumps(_work(200 + i, True)) + "\n" for i in range(5)))
-    open(t + "/a3.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in fast + gone))
-    r = run([M, "compare", "--before", t + "/b3.jsonl", "--after", t + "/a3.jsonl", "--json"])
-    got = json.loads(r.stdout) if r.returncode == 0 else {}
-    if got.get("verdict_code") != "faster_more_cancelled":
-        bad.append("compare: more runs cancelled after should qualify the verdict: %r\n%s" % (got.get("verdict_code"), r.stderr))
+    open(t + "/b3.jsonl", "w").write("".join(json.dumps(_work(200 + i, True)) + "\n" for i in range(10)))
+    for n_gone, want in ((15, "faster_more_cancelled"), (1, "faster")):
+        gone = [dict(_work(400 + i, True), conclusion="cancelled") for i in range(n_gone)]
+        open(t + "/a3.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in fast + gone))
+        r = run([M, "compare", "--before", t + "/b3.jsonl", "--after", t + "/a3.jsonl", "--json"])
+        got = json.loads(r.stdout) if r.returncode == 0 else {}
+        if got.get("verdict_code") != want:
+            bad.append("compare: %d cancelled after should give %s: %r\n%s" % (n_gone, want, got.get("verdict_code"), r.stderr))
 
 # Steps: a stamp past the job's end is clipped; a zero-length step overlaps nothing; a step of the
 # repository's named "Post results" is work, so its job is no gate.
@@ -1792,6 +1795,34 @@ reps = {x["id"]: {"u.xml": unit} if x["conclusion"] == "success" else {"i.xml": 
 got, r = _flaky_rows(rows, reps, "--short")
 if got is not None or "can't tell apart" not in r.stderr:
     bad.append("flaky --short: one short name over two classes in separate reports should stop it\n" + r.stdout)
+# --short accepts one test in several matrix legs and in per-run report file names.
+rows = [_fr(i, i + 1, i % 2 == 0) for i in range(7)]
+reps = {}
+for x in rows:
+    st = "p" if x["conclusion"] == "success" else "f"
+    reps[x["id"]] = {"junit-linux/results-%d.xml" % x["id"]: _rep(st), "junit-windows/results-%d.xml" % x["id"]: _rep("p")}
+got, r = _flaky_rows(rows, reps, "--short")
+if got is None:
+    bad.append("flaky --short: one test in two matrix legs was refused\n" + r.stderr)
+got, r = _flaky_rows(rows, reps)
+t_ = [x for x in (got or {"tests": []})["tests"] if "junit-linux" in x["test"]]
+if not t_ or t_[0]["alone_on_pull_requests"] != 3:
+    bad.append("flaky: per-run report file names should not split a test: %r" % (got or {}).get("tests"))
+# A rerun's passing report doesn't separate: the failed attempt's report may be missing.
+rows = [_fr(0, 1, True), _fr(1, 2, False), _fr(2, 3, True), _fr(3, 4, True)]
+rows[2]["run_attempt"] = 2
+reps = {rows[0]["id"]: {"r.xml": _rep("p")}, rows[1]["id"]: {"r.xml": _rep("f")},
+        rows[2]["id"]: {"attempt-2/r.xml": _rep("p")}, rows[3]["id"]: {"r.xml": _rep("p")}}
+got, r = _flaky_rows(rows, reps)
+if not got or got["tests"][0]["alone_on_pull_requests"] != 0:
+    bad.append("flaky: a rerun's passing report was taken as a pass around a failure: %r" % got)
+# --short counts a skipped namesake: Unit.T passed and Integration.T skipped in one report.
+rows = [_fr(0, 1, True), _fr(1, 2, False)]
+both = ('<testsuite name="s"><testcase classname="Unit" name="T"/>'
+        '<testcase classname="Integration" name="T"><skipped/></testcase></testsuite>')
+got, r = _flaky_rows(rows, {rows[0]["id"]: {"r.xml": both}, rows[1]["id"]: {"failed.txt": "T\n"}}, "--short")
+if got is not None or "can't tell apart" not in r.stderr:
+    bad.append("flaky --short: a skipped namesake should make the short name ambiguous\n" + r.stdout)
 # A run whose first attempt failed, rerun green, with no report: unknown, not a pass.
 rows = [_fr(0, 1, True), _fr(1, 2, False), _fr(2, 3, True), _fr(3, 4, True)]
 rows[2]["run_attempt"] = 2
