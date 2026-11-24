@@ -196,9 +196,10 @@ under a merge-commit policy, ask before adding them.
 
    If the timed runs ran different sets of jobs within a side (a path
    filter, an `if:`), it refuses a whole-run verdict and lists the before
-   side's sets: pass `--ran JOB` (runs that ran that job, named in the
-   baseline before you read the after side, leaving one set a side) or
-   `--job`. If each side ran one set but the sets differ, the verdict ends
+   side's sets: time the job the fix changes by its own duration with
+   `--job`, which gives the verdict. `--ran JOB` times whole runs that ran
+   that job, a descriptive reading only (`ran_descriptive`): which runs ran
+   it can change with the change itself. If each side ran one set but the sets differ, the verdict ends
    in `_jobs_changed` and is never a plain one: it holds only if the
    workflow's diff explains every difference and every removed job's work
    still runs (step 3, the tests by name); otherwise the mix of work

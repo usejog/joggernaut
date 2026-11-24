@@ -154,11 +154,13 @@ with counts, so matrix legs count):
   changed, not the CI;
 - several sets within a side (a path filter, an `if:`): `compare` refuses a
   whole-run verdict, since the median would move with the mix, and lists
-  the before side's sets. Name the workload with `--ran JOB` (only runs that
-  ran that job; write it into the baseline before reading the after side),
-  which must leave one set a side, or time one job's own duration with
-  `--job`. Either way the named job picks a workload, the runs where it
-  ran: failures and cancellations are checked among those runs as well as
+  the before side's sets. Time one job's own duration with `--job`: that
+  is the verdict. `--ran JOB` times whole runs that ran that job (it must
+  leave one set a side), a descriptive reading only (`ran_descriptive`,
+  the reading in `reading`): which runs ran a job can change with the
+  change itself (a path filter moved from slow pushes to fast ones keeps
+  every count), so it is never a verdict. Either way the named job picks a
+  workload, the runs where it ran: failures and cancellations are checked among those runs as well as
   over the whole workflow, so a job whose slow runs start failing or being
   cancelled can't leave only its fast ones to time.
 
@@ -191,7 +193,7 @@ jobs before it count), not the job's own duration, so the same job-set rule
 applies to it over every job the runs ran (a job queued beside it can hold
 its runner), and every job's runner must match on both sides. Its reading is
 descriptive only (`end_descriptive`; the reading itself is in `--json` as
-`end_reading`): a job's end moves with which runs reached it, their queue
+`reading`): a job's end moves with which runs reached it, their queue
 order and their runners, more than any check can pin down. Report it beside
 the job's own duration (`--job` alone) and the whole run's wait, which give
 the verdict.

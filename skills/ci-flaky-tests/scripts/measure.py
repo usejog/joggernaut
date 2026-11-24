@@ -1616,7 +1616,8 @@ def cmd_compare(a):
                                                    lambda r: not ran_all(r, [a.ran]))))
         # Missed it with a failure or cancellation somewhere in the run, the job listed or not
         # (a matrix whose planner failed lists no leg): seen together, not a claimed cause.
-        failed_too = lambda r: missed(r) and any(j.get("conclusion") in FAILED + ("cancelled",) for j in r.get("jobs", []))
+        failed_too = lambda r: missed(r) and (r.get("conclusion") in FAILED + ("cancelled",) or any(
+            j.get("conclusion") in FAILED + ("cancelled",) for j in r.get("jobs", [])))  # the run's own outcome too
         checks += [("stopped", lambda rs: count(finished(rs), upstream)),
                    ("missed with a failure", lambda rs: count(finished(rs), failed_too)),
                    ("all", lambda rs: count(finished(rs), missed))]
@@ -1627,7 +1628,9 @@ def cmd_compare(a):
         # Both ways: a workload that grew (a path filter widened, a matrix leg added) changes
         # which runs are timed as much as one that shrank.
         hit = lambda c: (c[1] - c[0], c[1])
-        grew = [x for x in res["reach_checks"] if fails_rose(hit(x["missed_before"]), hit(x["missed_after"]))]
+        # Only counts whose complement is "ran it": a run that didn't fail is no run that reached it.
+        grew = [x for x in res["reach_checks"] if x["check"] not in ("stopped", "missed with a failure")
+                and fails_rose(hit(x["missed_before"]), hit(x["missed_after"]))]
         res["more_reached_by"] = grew[0]["check"] if grew else None
     # Runs cancelled with no failure (a newer push, a concurrency group) are in neither the
     # timings nor the failure rate. A change that gets slow runs cancelled can look faster.
@@ -1733,8 +1736,8 @@ def cmd_compare(a):
                                                     "listed by name": "of the runs that list it by name",
                                                     "ran": "of the runs where %s ran" % a.ran,
                                                     "job": "of the runs where %s ran, missing %s" % (a.job, a.ran),
-                                                    "stopped": "of all runs, those that list it and had a job fail or be cancelled",
-                                                    "missed with a failure": "of all runs, those with a job that failed or was cancelled",
+                                                    "stopped": "counting runs that list it, missed it and had a job fail or be cancelled, of all runs",
+                                                    "missed with a failure": "counting runs that missed it and had a failure or cancellation, not necessarily before it, of all runs",
                                                     "all": "of all runs"}[x["check"]])
                               + tuple(x["missed_after"]) + tuple(x["missed_before"])))
     if work and res["verdict_code"] in qualify + tuple(q + "_more_cancelled" for q in qualify) + tuple(
@@ -1753,15 +1756,19 @@ def cmd_compare(a):
         res["verdict"] += ("; but the sides ran different jobs: a speed verdict holds only if the workflow's"
                            " diff explains every difference and every removed job's work still runs"
                            " (compare the tests by name); otherwise the mix of work changed")
-    if a.end and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
+    if (a.end or a.ran) and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
         # A job's end on the run's clock moves with which runs reached it, their queue order
-        # and the runners of every job before it, none of which the jobs list pins down. It is
-        # reported, never a verdict: the job's own duration (--job) and the whole run's wait are.
-        res["end_reading"], res["end_reading_code"] = res["verdict"], res["verdict_code"]
-        res["verdict_code"] = "end_descriptive"
-        res["verdict"] = ("descriptive only (%s): a job's end on the run's clock moves with which runs reached it,"
-                          " their queue order and their runners; give the job's own duration (--job) and the whole"
-                          " run's wait for a verdict" % res["end_reading"])
+        # and the runners of every job before it; the runs where a job ran (--ran) change with
+        # the change itself (a path filter moved from slow pushes to fast ones keeps every
+        # count). Neither is pinned down by the jobs list, so both are readings, never a
+        # verdict: whole runs with one job set a side, and a job's own duration (--job), are.
+        res["reading"], res["reading_code"] = res["verdict"], res["verdict_code"]
+        res["verdict_code"] = "end_descriptive" if a.end else "ran_descriptive"
+        res["verdict"] = ("descriptive only (%s): %s; a verdict comes from whole runs that ran one set of jobs a"
+                          " side, or a job's own duration (--job)" % (res["reading"], (
+                              "a job's end on the run's clock moves with which runs reached it, their queue order"
+                              " and their runners") if a.end else (
+                              "the runs where %s ran can change with the change itself (a path filter, a matrix)" % a.ran)))
     hidden = res["verdict_code"] == "not_enough_runs"
     if hidden:
         # No timings until there are enough runs, so a longer window is chosen without
@@ -2450,8 +2457,8 @@ def main(argv=None):
     c.add_argument("--end", action="store_true", help="with --job: time from the run's start to the job's"
                    " end (its end on the run's clock), not the job's own duration; a descriptive reading,"
                    " never a verdict")
-    c.add_argument("--ran", help="time only whole runs that ran this job (a workload named before the after"
-                   " side is read); needed when runs ran different sets of jobs")
+    c.add_argument("--ran", help="time only whole runs that ran this job: a descriptive reading, never a verdict,"
+                   " since which runs ran it can change with the change itself")
     c.add_argument("--event", default="pull_request")
     c.add_argument("--base", help="keep only runs for this branch: pull requests into it (as fetch"
                    " recorded) or pushes to it; unplaced runs are left out, passed or failed")
