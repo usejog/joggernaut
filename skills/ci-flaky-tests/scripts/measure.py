@@ -1475,7 +1475,8 @@ def cmd_compare(a):
     if a.min_runs < MIN_RUNS:
         die("--min-runs can't go below %d: with fewer runs a side, a 95%% interval can"
             " hardly or never rule out no change" % MIN_RUNS)
-    ran_job = (lambda r: any(j.get("name") == a.ran for j in latest_jobs(r) if executed(j))) if a.ran else None
+    # --ran's workload: runs where that job got a runner (a job cancelled in the queue didn't run).
+    ran_job = (lambda r: any(j.get("name") == a.ran for j in latest_jobs(r) if on_a_runner(j))) if a.ran else None
     excluded = []
     # The timed runs, chosen once: the job sets, the runner checks over the timed runs and
     # the timings read this; the failure, cancellation and reach checks read every run.
@@ -1509,7 +1510,8 @@ def cmd_compare(a):
     # from 0.4 on) count only when every job that got a runner, in every run these checks
     # read, has a known one: partial evidence can't say a group is the same or different.
     # Otherwise the runners compare by labels alone, and the output says so.
-    read = [j for r in selected(rb) + selected(ra) + routed(rb) + routed(ra) for j in latest_jobs(r) if on_a_runner(j)]
+    read = list({j.get("id", id(j)): j for r in selected(rb) + selected(ra) + routed(rb) + routed(ra)
+                 for j in latest_jobs(r) if on_a_runner(j)}.values())
     unknown = sum(1 for j in read if j.get("runner_group_id") is None)
     groups = bool(read) and not unknown
     # Labels as before, every job that asked for a runner; groups only for jobs that got one.
@@ -1526,7 +1528,7 @@ def cmd_compare(a):
         labels = lambda rs: {key(j) for r in selected(rs) for j in latest_jobs(r) if named(j)}
         if groups:
             labels = (lambda base: lambda rs: base(rs) | {gkey(j) for r in selected(rs) for j in latest_jobs(r)
-                                                         if named(j) and on_a_runner(j)})(labels)
+                                                         if (not a.job or j.get("name") == a.job) and on_a_runner(j)})(labels)
         lb, la = labels(rb), labels(ra)
         if lb != la:
             die("runner labels differ between before and after (%s before; %s after); pass --label (and"
@@ -1542,9 +1544,10 @@ def cmd_compare(a):
             for j in latest_jobs(r):
                 if a.job and not a.end and j.get("name") != a.job:
                     continue
-                if not j.get("labels") or (a.label and not a.end and a.label not in j["labels"]):
-                    continue  # no labels: skipped, never on a runner
-                for k in [key(j)] + ([gkey(j)] if groups and on_a_runner(j) else []):
+                placed_ = groups and on_a_runner(j)
+                if (not j.get("labels") and not placed_) or (a.label and not a.end and a.label not in (j.get("labels") or [])):
+                    continue  # no labels and no runner: skipped
+                for k in ([key(j)] if j.get("labels") else []) + ([gkey(j)] if placed_ else []):
                     seen.setdefault((j.get("name"), k[1] is None), set()).add(k)
                     first.setdefault((j.get("name"), k), r)
         return seen, first
@@ -1569,8 +1572,12 @@ def cmd_compare(a):
         # (under differently named jobs) could pass for a speedup.
         sets = {}
         for r in routed(rb) + routed(ra):
-            sets.setdefault(frozenset(gkey(j) if groups and on_a_runner(j) else key(j)
-                                      for j in latest_jobs(r) if executed(j)), r)
+            ran = [j for j in latest_jobs(r) if executed(j)]
+            got = {gkey(j) if groups and on_a_runner(j) else key(j) for j in ran}
+            # A job that asked for a runner it never got adds its labels only where no job that
+            # ran shows them (with the same labels, it says nothing new).
+            shown = {k[0] for k in got if k[1] is not None}
+            sets.setdefault(frozenset(k for k in got if k[1] is not None or k[0] not in shown), r)
         if len(sets) > 1:
             die("the runs ran on %d different sets of runners (first seen in %s), so a shift in the mix could"
                 " pass for a speedup; pass --job to time one job, or --label with a label only one set has"
@@ -1603,15 +1610,15 @@ def cmd_compare(a):
     mixed = comparable and (not a.job or a.end) and (len(mcb) > 1 or len(mca) > 1)
     if mixed:
         # Only the before side's sets are shown, so the workload is chosen without the after times.
-        show = "; ".join("%d runs ran %s" % (n, ", ".join(k) or "no job") for k, n in mb_[:4]) + (
-            "; and %d more sets" % (len(mb_) - 4) if len(mb_) > 4 else "")
+        show = "; ".join("%d runs ran %s" % (n, ", ".join(k) or "no job") for k, n in mcb[:4]) + (
+            "; and %d more sets" % (len(mcb) - 4) if len(mcb) > 4 else "")
         die("the timed runs%s ran different sets of jobs (a path filter or an `if:`), so a median %s"
             " moves with the mix (before: %d sets, after: %d). Before: %s. Time one job's own duration with"
             " --job for a verdict, if that job's eligibility (its if: and path filters) is the same on both"
             " sides and the same pushes reach the measured runner; --ran JOB (runs that ran that job, leaving"
             " one set a side) gives a descriptive reading only"
             % (" that ran %s" % a.ran if a.ran else "", "of a job's end on the run's clock" if a.end
-               else "over the whole runs", len(mb_), len(ma_), show))
+               else "over the whole runs", len(mcb), len(mca), show))
     graph_changed = (not a.job or a.end) and len(mb_) == 1 and len(ma_) == 1 and mb_[0][0] != ma_[0][0]
 
     # The failure check and the cost read every run of the workflow and event: the

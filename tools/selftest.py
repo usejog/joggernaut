@@ -2843,6 +2843,37 @@ with tempfile.TemporaryDirectory() as t:
     if "_routing_changed" in (v.get("reading_code") or ""):
         bad.append("compare --ran: runs outside the workload moved the routing count: %r %r"
                    % (v.get("off_runner_before"), v.get("off_runner_after")))
+    # Round 7. --ran gate: pushes whose gate was cancelled in the queue are no part of the
+    # workload, timed or checked.
+    def gate_q(base_id, q_secs, fail_pool):
+        rows = [_cr(base_id + i, [_J("gate", 0, 1, labels=("L",)), _J("test", 1, 70, labels=("L",))]) for i in range(6)]
+        for i in range(12):
+            x = _cr(base_id + 100 + i, [_J("gate", 0, 1, labels=("L",), conclusion="cancelled"), _J("test", 1, q_secs, labels=("L",))])
+            x["jobs"][0]["runner_name"] = None
+            rows.append(x)
+        x = _cr(base_id + 200, [_J("gate", 0, 1, labels=("L",), conclusion="cancelled"),
+                                _J("test", 1, 5, labels=(fail_pool,), conclusion="failure")], conclusion="failure")
+        x["jobs"][0]["runner_name"] = None
+        rows.append(x)
+        return rows
+    v, r = _cmp(t, gate_q(68000, 100, "M"), gate_q(69000, 10, "N"), "--ran", "gate", "--job", "test")
+    if (v.get("reading_code") or "").startswith("faster"):
+        bad.append("compare --ran: pushes outside the workload were timed: %r" % v.get("reading"))
+    # A canary that asked for L and was cancelled before getting a runner adds no runner set.
+    def q_canary(base_id, secs):
+        rows = [_cr(base_id + i, [_J("test", 0, secs + i, labels=("L",), group=1),
+                                  _J("canary", 0, 1, labels=("L",), group=1)]) for i in range(6)]
+        c = _cr(base_id + 6, [_J("test", 0, secs, labels=("L",), group=1), _J("canary", 0, 1, labels=("L",), conclusion="cancelled")])
+        c["jobs"][1]["runner_name"] = None
+        return rows + [c]
+    v, r = _cmp(t, q_canary(70000, 100), q_canary(71000, 50), "--label", "L")
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare: a canary cancelled in the queue made a runner set: %r" % (v.get("verdict") or v))
+    # A job with no labels that ran in group 1 before and group 2 after: refused.
+    v, r = _cmp(t, [_cr(72000 + i, [_J("test", 0, 100 + i, labels=(), group=1)]) for i in range(6)],
+                [_cr(73000 + i, [_J("test", 0, 10 + i, labels=(), group=2)]) for i in range(6)], "--job", "test")
+    if "error" not in v:
+        bad.append("compare #12: a label-less job's group change passed: %r" % v.get("verdict"))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))
