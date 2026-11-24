@@ -2538,6 +2538,17 @@ for body, want, what in ((WRITTEN, True, "each lint written out"), (LOOP_OK, Tru
                           "pnpm run --no-bail (a failing lint exits 0)"),
                          ('for t in ts css md yaml json spell licenses; do pnpm run "lint:$t --fix"; done', False,
                           "a script name with an argument inside its quotes"),
+                         ('for s in $SCRIPTS; do pnpm run "$s"; done', False, "a step env of the workflow's own named SCRIPTS"),
+                         ('for t in ts css md yaml json spell licenses; do pnpm --filter-prod=acme-site run "lint:$t"; done', False,
+                          "pnpm --filter-prod on a package that isn't there"),
+                         ('for t in ts css md yaml json spell licenses; do pnpm -C frontend run "lint:$t"; done', False,
+                          "pnpm -C into a folder that isn't there"),
+                         ('for t in ts css md yaml json spell licenses; do pnpm run --help "lint:$t"; done', False,
+                          "pnpm run --help (prints help, runs nothing)"),
+                         ('printf "LINTS<<END\\nts css md yaml json spell licenses\\n" >> "$GITHUB_ENV"', False,
+                          "$GITHUB_ENV heredoc with no closing line"),
+                         ('echo "LINTS=ts css md yaml json spell licenses" >> "$GITHUB_ENV"', False,
+                          "$GITHUB_ENV overridden by the next step's own env"),
                          ('echo "LINTS=ts css md yaml json spell" >> "$GITHUB_ENV"', False,
                           "$GITHUB_ENV leaving one lint out for the next step"),
                          ('echo "LINTS=ts css md yaml json spell licenses" >> "$GITHUB_ENV"', True,
@@ -2574,10 +2585,16 @@ for body, want, what in ((WRITTEN, True, "each lint written out"), (LOOP_OK, Tru
                 "jobs:\n", "defaults:\n  run:\n    shell: bash {0}\njobs:\n", 1).replace(
                 "      - run: pnpm test\n", "      - run: pnpm test\n        shell: bash\n", 1)
             open(work + "/.github/workflows/ci.yml", "w").write(text)
+        if what == "a step env of the workflow's own named SCRIPTS":
+            text = open(work + "/.github/workflows/ci.yml").read().replace(
+                "      - name: Lint\n", "      - name: Lint\n        env:\n          SCRIPTS: lint:ts lint:css lint:md lint:yaml"
+                " lint:json lint:spell\n", 1)
+            open(work + "/.github/workflows/ci.yml", "w").write(text)
         if what.startswith("$GITHUB_ENV"):
+            own = ("        env:\n          LINTS: ts css md yaml json spell\n" if "own env" in what else "")
             text = open(work + "/.github/workflows/ci.yml").read().replace(
                 "  test:\n", "      - run: |\n          status=0\n          for t in ${LINTS:-ts css md yaml json spell licenses};"
-                " do pnpm run \"lint:$t\" || status=1; done\n          exit $status\n  test:\n", 1)
+                " do pnpm run \"lint:$t\" || status=1; done\n          exit $status\n" + own + "  test:\n", 1)
             open(work + "/.github/workflows/ci.yml", "w").write(text)
         if what == "mkdir reports in both jobs (each job's own machine)":
             text = open(work + "/.github/workflows/ci.yml").read().replace(

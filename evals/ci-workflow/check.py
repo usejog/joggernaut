@@ -135,10 +135,12 @@ def run_steps():
                 if not isinstance(step, dict) or "run" not in step:
                     continue
                 pick = lambda k: step.get(k) or run_of(job).get(k) or run_of(doc).get(k)
-                env = {}
-                for e in (doc.get("env"), job.get("env"), step.get("env")):
+                env, own = {}, {}
+                for e in (doc.get("env"), job.get("env")):
                     env.update({str(k): str(v) for k, v in (e or {}).items()} if isinstance(e, dict) else {})
-                out.append((str(step["run"] or ""), pick("shell"), pick("working-directory"), env,
+                e = step.get("env")
+                own.update({str(k): str(v) for k, v in e.items()} if isinstance(e, dict) else {})
+                out.append((str(step["run"] or ""), pick("shell"), pick("working-directory"), (env, own),
                             "%s: %s, step %d" % (f, job_id, n)))
     return out
 
@@ -159,9 +161,12 @@ nobail=
 opts() {
   while [ $# -gt 0 ]; do
     case $1 in
-      --filter|-F) case ${2:-} in .|./|"*"|"$PKG") ;; *) echo NOPKG; return ;; esac; shift 2 ;;
-      --filter=*) case ${1#--filter=} in .|./|"*"|"$PKG") ;; *) echo NOPKG; return ;; esac; shift ;;
-      -C|--dir|--workspace) shift 2 ;;
+      --filter|-F|--filter-prod) case ${2:-} in .|./|"*"|"$PKG") ;; *) echo NOPKG; return ;; esac; shift 2 ;;
+      --filter=*|--filter-prod=*) case ${1#*=} in .|./|"*"|"$PKG") ;; *) echo NOPKG; return ;; esac; shift ;;
+      -C|--dir|--prefix) case ${2:-} in .|./) ;; *) echo NODIR; return ;; esac; shift 2 ;;
+      -C*|--dir=*|--prefix=*) case ${1#-C} in .|./|=.|=./) ;; *) case ${1#*=} in .|./) ;; *) echo NODIR; return ;; esac ;; esac; shift ;;
+      --help|-h|--version|-v) echo HELP; return ;;
+      --workspace) shift 2 ;;
       --no-bail) echo NOBAIL; shift ;;
       -*) shift ;;
       *) echo "$#"; return ;;
@@ -171,7 +176,7 @@ opts() {
 }
 take() {
   for r in $(opts "$@"); do
-    case $r in NOPKG) exit 0 ;; NOBAIL) nobail=1 ;; *) left=$r ;; esac
+    case $r in NOPKG|HELP) exit 0 ;; NODIR) exit 1 ;; NOBAIL) nobail=1 ;; *) left=$r ;; esac
   done
 }
 take "$@"; shift $(($# - left))
@@ -181,7 +186,7 @@ case ${1:-} in
   *) [ "$(basename "$0")" != npm ] || exit 0 ;;
 esac
 [ -n "${1:-}" ] || exit 0
-case $1 in lint:*) printf '%s\n' "$SCRIPTS" | grep -qxF -- "$1" || exit 1 ;; esac
+case $1 in lint:*) printf '%s\n' "$JOGGERNAUT_EVAL_SCRIPTS" | grep -qxF -- "$1" || exit 1 ;; esac
 printf '%s\n' "$1" >>"$LOG"
 [ "$1" != "${FAIL_SCRIPT:-}" ] || [ -n "$nobail" ]
 """
@@ -220,9 +225,12 @@ with tempfile.TemporaryDirectory() as t:
             script = "%s/step%d.sh" % (t, k)
             open(script, "w").write(re.sub(r"\$\{\{[^}]*\}\}", "", step) + "\n")
             log = "%s/log%d" % (t, k)
-            env = dict(extra, **carried)
+            # As GitHub merges them: the workflow's and job's env, then what earlier steps wrote to
+            # $GITHUB_ENV, then the step's own env.
+            env = dict(extra[0], **carried)
+            env.update(extra[1])
             env.update(PATH=":".join(added + [t + "/bin", "/usr/bin", "/bin"]), HOME=home, LOG=log,
-                       FAIL_SCRIPT=fail_script, PKG=PKG, SCRIPTS=SCRIPTS, CI="true", GITHUB_ACTIONS="true", **files)
+                       FAIL_SCRIPT=fail_script, PKG=PKG, JOGGERNAUT_EVAL_SCRIPTS=SCRIPTS, CI="true", GITHUB_ACTIONS="true", **files)
             for f_ in files.values():
                 open(f_, "w").close()
             try:
@@ -238,7 +246,10 @@ with tempfile.TemporaryDirectory() as t:
             while i_ < len(lines_):
                 m_ = re.match(r"^([^=<]+)<<(.+)$", lines_[i_])
                 if m_:
-                    j_ = lines_.index(m_.group(2), i_ + 1) if m_.group(2) in lines_[i_ + 1:] else len(lines_)
+                    if m_.group(2) not in lines_[i_ + 1:]:
+                        rc = rc or "an unterminated $GITHUB_ENV value"  # GitHub fails the step
+                        break
+                    j_ = lines_.index(m_.group(2), i_ + 1)
                     carried[m_.group(1)] = "\n".join(lines_[i_ + 1:j_])
                     i_ = j_ + 1
                     continue
