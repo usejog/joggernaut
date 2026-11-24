@@ -148,7 +148,10 @@ in `references/measuring.md`.
    runs `go build` or `go run` on the module's own commands, or runs a
    script), the clock, a network service, a database, or files outside the
    module. Before relying on `(cached)` results on the merge gate, search
-   the `_test.go` files for `os/exec`, network and database clients, and
+   each package's `_test.go` files, and every package from this module
+   that its tests import (`go list -test -deps -f '{{.ImportPath}}
+   {{.Dir}}' ./<pkg>` lists them; skip the standard library and other
+   modules), for `os/exec`, network and database clients, `time.Now`, and
    paths outside the module. If a package has such tests, run that package
    with `-count=1` on the gate, keeping the command's other package
    arguments, and name it in the pull request. Add `-count=1` nowhere else:
