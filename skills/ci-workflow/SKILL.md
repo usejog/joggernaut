@@ -168,7 +168,10 @@ in `references/measuring.md`.
      minutes on failed runs; a required check that relied on B being skipped
      must still fail: check it on a run where A fails.
    - **Run independent steps side by side** in the job that finishes last,
-     when two or more long steps that aren't setup neither read what the
+     when two or more long steps that aren't setup, next to each other with
+     no step between them (a step between, such as one that writes
+     `$GITHUB_ENV` or starts a service, can change what the later one tests),
+     neither read what the
      other writes, nor write what the other uses (files, outputs,
      `$GITHUB_ENV`, a database, services, ports), nor rely on its cleanup,
      nor run only because the other passed: in a job, a step runs only if

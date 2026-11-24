@@ -1572,14 +1572,27 @@ def cmd_compare(a):
     # A named job (--ran, or --job) picks a workload: the runs where that job ran, in any
     # attempt. Its failures and cancellations are checked among those runs too, so slow runs
     # that start failing or being cancelled there can't leave only the fast ones to time.
-    # Both named, the workload is the runs where both ran.
-    names = [n for n in (a.ran, a.job) if n]
-    work = " and ".join(dict.fromkeys(names))
-    started = lambda rs: [r for r in rs if all(any(j.get("name") == n and executed(j) for j in r.get("jobs", []))
-                                               for n in names)]
-    wfb, wfa = (fail_rate(started(rb)), fail_rate(started(ra))) if work else ((0, 0), (0, 0))
+    # Both named: each one's runs, and the runs where both ran, are checked, and the worst
+    # counts. (Failures in one job can stop runs before the other starts.)
+    names = list(dict.fromkeys(n for n in (a.ran, a.job) if n))
+    ran_all = lambda r, ns: all(any(j.get("name") == n and executed(j) for j in r.get("jobs", [])) for n in ns)
+    workloads = [[n] for n in names] + ([names] if len(names) > 1 else [])
+    rate_ = lambda f: f[0] / float(f[1]) if f[1] else 0.0
+    work, wfb, wfa, started = None, (0, 0), (0, 0), (lambda rs: [])
+    for ns in workloads:
+        sel = (lambda ns_: lambda rs: [r for r in rs if ran_all(r, ns_)])(ns)
+        fb_, fa_ = fail_rate(sel(rb)), fail_rate(sel(ra))
+        worse = (fails_rose(fb_, fa_), rate_(fa_) - rate_(fb_))
+        if work is None or worse > (fails_rose(wfb, wfa), rate_(wfa) - rate_(wfb)):
+            work, wfb, wfa, started = " and ".join(ns), fb_, fa_, sel
     if work:
         res["failed_before_job"], res["failed_after_job"] = wfb, wfa
+        # How many runs reached the named job(s): fewer after, beyond chance, means runs
+        # stopped before it (failures, cancellations upstream) or the mix of work changed,
+        # so the runs timed aren't like for like.
+        reach = lambda rs: (lambda w: (sum(1 for r in w if not ran_all(r, names)), len(w)))(
+            [r for r in rs if in_workflow(r) and r.get("conclusion") not in (None, "skipped", "neutral")])
+        res["not_reaching_before"], res["not_reaching_after"] = reach(rb), reach(ra)
     # Runs cancelled with no failure (a newer push, a concurrency group) are in neither the
     # timings nor the failure rate. A change that gets slow runs cancelled can look faster.
     cancelled = lambda rs: (sum(1 for r in rs if in_workflow(r) and r.get("conclusion") == "cancelled"
@@ -1665,6 +1678,14 @@ def cmd_compare(a):
         res["verdict"] += ("; but a larger share of runs was cancelled after (%d of %d) than before (%d of %d):"
                            " if the change makes slow runs get cancelled, the runs left are the fast ones"
                            % (cxa, na_, cxb, nb_))
+    if work and res["verdict_code"] in qualify + tuple(q + "_more_cancelled" for q in qualify) \
+            and fails_rose(res["not_reaching_before"], res["not_reaching_after"]):
+        nb2, na2 = res["not_reaching_before"], res["not_reaching_after"]
+        res["verdict_code"] += "_fewer_reached"
+        res["verdict"] += ("; but fewer runs reached %s after (%d of %d) than before (%d of %d): runs that"
+                           " stopped earlier (failed or cancelled upstream) or did other work aren't timed,"
+                           " so name why before calling it faster"
+                           % (" and ".join(names), na2[1] - na2[0], na2[1], nb2[1] - nb2[0], nb2[1]))
     if graph_changed and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
         # One set a side, different sets: the change altered the jobs, or the mix of pull
         # requests did. Never a plain verdict: only the workflow's diff can say which.

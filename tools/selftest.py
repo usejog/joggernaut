@@ -332,7 +332,8 @@ with tempfile.TemporaryDirectory() as t:
         r = run([M, "compare", "--before", t + "/sbw", "--after", t + "/" + name, "--json",
                  "--label", "windows-latest", "--job", "test"])
         v = json.loads(r.stdout) if r.returncode == 0 else {}
-        if (v.get("failed_after") or [0])[0] != 7 or v.get("verdict_code") not in ("not_valid", "faster_more_failures"):
+        if (v.get("failed_after") or [0])[0] != 7 or not (v.get("verdict_code") == "not_valid" or (
+                v.get("verdict_code") or "").startswith("faster_more_failures")):
             bad.append("compare: %s case hid the failures under --job --label: %r" % (name, v.get("verdict")))
     # Same-name matrix legs: the leg on the asked runner is timed, whichever is listed first.
     def legs(src, dst, ubuntu_secs, first_ubuntu):
@@ -1569,7 +1570,8 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "compare", "--before", t + "/b2.jsonl", "--after", t + "/a2.jsonl", "--ran", "integration", "--json"])
     got = json.loads(r.stdout) if r.returncode == 0 else {}
     if (not (got.get("verdict_code") or "").endswith("_more_cancelled")
-            or got.get("cancelled_before")[0] != got.get("cancelled_after")[0]):
+            or got.get("cancelled_before")[0] != got.get("cancelled_after")[0]
+            or got.get("cancelled_after_job") != [25, 100] or got.get("cancelled_before_job") != [0, 100]):
         bad.append("compare --ran: cancellations among the workload's runs should qualify: %r %r"
                    % (got.get("verdict_code"), got.get("cancelled_after_job")))
     # A small rise in failures doesn't hide a rise in cancellations: both are reported.
@@ -1594,6 +1596,45 @@ with tempfile.TemporaryDirectory() as t:
     if got.get("verdict_code") != "faster_more_failures":
         bad.append("compare --ran: a rise in the workload's failures within chance should be reported: %r %r %r"
                    % (got.get("verdict_code"), got.get("failed_after_job"), r.stderr[-300:]))
+
+# backend -> integration: after the change, slow backend runs fail before integration starts.
+# The runs where both ran show no failure, the backend's runs do (not valid); with --job alone,
+# fewer runs reached integration, which qualifies the verdict.
+with tempfile.TemporaryDirectory() as t:
+    def chain(i, outcome, fast=False):
+        t0 = i * 4000
+        be = _job("backend", t0, t0 + 1, t0 + (20 if fast else 170))
+        jobs = [be]
+        if outcome == "ok":
+            end = mm.ts(be["completed_at"]) - 1793000000
+            jobs.append(_job("integration", end, end + 1, end + 11))
+            conc = "success"
+        else:
+            be["conclusion"], conc = outcome, outcome
+        x = _run(i, jobs, t0)
+        x["conclusion"] = conc
+        return x
+    def other(i, ok=True):
+        x = _run(i, [_job("docs", i * 4000, i * 4000 + 1, i * 4000 + 30)], i * 4000)
+        if not ok:
+            x["jobs"][0]["conclusion"], x["conclusion"] = "failure", "failure"
+        return x
+    before = [chain(i, "ok") for i in range(40)] + [other(100 + i) for i in range(55)] + [other(200 + i, False) for i in range(35)]
+    after = ([chain(1000 + i, "ok", fast=True) for i in range(5)] + [chain(1100 + i, "failure") for i in range(35)]
+             + [other(1200 + i) for i in range(90)])
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json",
+             "--ran", "backend", "--job", "integration", "--end"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("verdict_code") != "not_valid" or got.get("failed_after_job") != [35, 40]:
+        bad.append("compare --ran backend --job integration: the backend's own failures should count: %r %r"
+                   % (got.get("verdict_code"), got.get("failed_after_job")))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--job", "integration", "--end"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if not (got.get("verdict_code") or "").endswith("_fewer_reached"):
+        bad.append("compare --job --end: fewer runs reaching the job should qualify the verdict: %r %r"
+                   % (got.get("verdict_code"), got.get("not_reaching_after")))
 
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
@@ -2052,7 +2093,29 @@ jobs:
     steps:
       - run: pnpm test
 """
-for tasks, want in (("ts css md yaml json spell licenses", 0), ("ts css md yaml json spell", 1)):
+TWO_LOOPS = """name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for t in ts css; do pnpm run "lint:$t"; done
+          for t in md yaml json spell licenses; do pnpm run "format:$t"; done
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm test
+"""
+ECHO_LOOP = TWO_LOOPS.replace('for t in ts css; do pnpm run "lint:$t"; done',
+                              'for t in ts css md yaml json spell; do pnpm run "lint:$t"; done').replace(
+    'for t in md yaml json spell licenses; do pnpm run "format:$t"; done',
+    'for t in ts css md yaml json spell licenses; do echo "lint:$t done"; done')
+assert ECHO_LOOP != TWO_LOOPS
+for tasks, want in (("ts css md yaml json spell licenses", 0), ("ts css md yaml json spell", 1), (None, 1), ("ECHO", 1), ('"ts" "css" "md" "yaml" "json" "spell" "licenses"', 0)):
     work = tempfile.mkdtemp(prefix="joggernaut-loop-")
     try:
         shutil.copytree(E + "/ci-workflow/repo", work, dirs_exist_ok=True)
@@ -2063,10 +2126,12 @@ for tasks, want in (("ts css md yaml json spell licenses", 0), ("ts css md yaml 
         wfdir = os.path.join(work, ".github/workflows")
         for f in os.listdir(wfdir):
             os.remove(os.path.join(wfdir, f))
-        open(os.path.join(wfdir, "ci.yml"), "w").write(LOOP_FOLD % tasks)
+        open(os.path.join(wfdir, "ci.yml"), "w").write(ECHO_LOOP if tasks == "ECHO" else
+                                                        LOOP_FOLD % tasks if tasks else TWO_LOOPS)
         open(os.path.join(work, "PR.md"), "w").write("Folded the lints.")
         r = run([E + "/ci-workflow/check.py", work])
-        if (r.returncode != 0) != bool(want) or (want and "lint:licenses no longer runs" not in r.stdout):
+        if (r.returncode != 0) != bool(want) or (want and "lint:licenses no longer runs" not in r.stdout) \
+                or (tasks is None and "lint:md no longer runs" not in r.stdout):
             bad.append("ci-workflow check misread a loop fold of %r\n%s" % (tasks, r.stdout))
     finally:
         shutil.rmtree(work)

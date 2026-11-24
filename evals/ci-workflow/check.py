@@ -20,13 +20,17 @@ run_text = "\n".join(re.findall(r"run:\s*(.*(?:\n\s{8,}.*)*)", wf))
 # A fold may run the lints from a loop over literal words: `for t in ts css ...`, or an array
 # `tasks=(ts css ...)` with `for t in "${tasks[@]}"`, then `pnpm run "lint:$t"`. Expand such a
 # loop's words where its variable follows `lint:`, so only the tasks it names count (#34).
-arrays = {m.group(1): m.group(2).split() for m in re.finditer(r"\b([A-Za-z_]\w*)=\(([^)$`]*)\)", run_text)}
-for m in re.finditer(r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^;\n]+)", run_text):
-    var, items = m.group(1), m.group(2).strip()
+arrays = {m.group(1): [w.strip("'\"") for w in m.group(2).split()]
+          for m in re.finditer(r"\b([A-Za-z_]\w*)=\(([^)$`]*)\)", run_text)}
+expanded = []
+for m in re.finditer(r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^;\n]+?)\s*(?:;|\n)\s*do\b(.*?)\bdone\b", run_text, re.S):
+    var, items, body = m.group(1), m.group(2).strip(), m.group(3)
     ref = re.fullmatch(r'"?\$\{([A-Za-z_]\w*)\[@\]\}"?', items)
     words = arrays.get(ref.group(1), []) if ref else [w for w in items.split() if re.fullmatch(r"[\w.-]+", w)]
-    if re.search(r"lint:\$\{?%s\b" % var, run_text):
-        run_text += "\n" + " ".join("lint:%s" % w for w in words)
+    # This loop's own body runs the lint (an echo of its name doesn't count).
+    if re.search(r"""pnpm\s+(?:run\s+)?["']?lint:\$\{?%s\b""" % var, body):
+        expanded += ["lint:%s" % w for w in words]
+run_text += "\n" + " ".join(expanded)
 for j in ["ts", "css", "md", "yaml", "json", "spell", "licenses"]:
     if not re.search(r"lint:%s\b" % j, run_text):
         fail.append("lint:%s no longer runs" % j)
