@@ -794,10 +794,31 @@ for before, after, what in (
          "a declared error moving between same-name suites in two files"),
         ('<testsuite name="s"><error type="CleanupError"/><testcase classname="k" name="x"/></testsuite>',
          '<testsuite name="s"><error type="SetupError"/><testcase classname="k" name="x"/></testsuite>',
-         "one kind of suite error replacing another")):
+         "one kind of suite error replacing another"),
+        # #6: the same type, another message: a cleanup error replaced by a collection error.
+        ('<testsuite name="s"><error type="RuntimeError" message="cleanup failed"/><testcase classname="k" name="x"/>'
+         '</testsuite>',
+         '<testsuite name="s"><error type="RuntimeError" message="collection failed"/><testcase classname="k" name="x"/>'
+         '</testsuite>',
+         "a suite error of the same type with another message"),
+        # #6: a declared error moving between same-name child suites under parents naming other files.
+        ('<testsuites><testsuite name="p" file="a.py"><testsuite name="c" errors="1"><testcase classname="k" name="x"/>'
+         '</testsuite></testsuite><testsuite name="p" file="b.py"><testsuite name="c" errors="0">'
+         '<testcase classname="k" name="y"/></testsuite></testsuite></testsuites>',
+         '<testsuites><testsuite name="p" file="a.py"><testsuite name="c" errors="0"><testcase classname="k" name="x"/>'
+         '</testsuite></testsuite><testsuite name="p" file="b.py"><testsuite name="c" errors="1">'
+         '<testcase classname="k" name="y"/></testsuite></testsuite></testsuites>',
+         "a declared error moving between same-name suites under parents in two files")):
     r = two_reports(before, after)
     if r.returncode == 0:
         bad.append("tests: %s passed\n%s" % (what, r.stdout))
+# #6: the same suite error, its message differing only in numbers (a time, a pid), is no change.
+r = two_reports('<testsuite name="s"><error type="RuntimeError" message="worker 12 died after 3.2s"/>'
+                '<testcase classname="k" name="x"/></testsuite>',
+                '<testsuite name="s"><error type="RuntimeError" message="worker 7 died after 4.9s"/>'
+                '<testcase classname="k" name="x"/></testsuite>')
+if r.returncode != 0:
+    bad.append("tests: a suite error whose message differs only in numbers counted as new\n" + r.stdout + r.stderr)
 # cachelog: messages match from the line's start, so text inside a key can't pass for one
 code = ("import importlib.util,sys;s=importlib.util.spec_from_file_location('m',sys.argv[1]);m=importlib.util.module_from_spec(s);"
         "s.loader.exec_module(m);f=lambda l:[x for r,x in m.CACHE_OUTCOMES if r.search(l)][:1];"
@@ -2439,6 +2460,62 @@ with tempfile.TemporaryDirectory() as t:
     got = json.loads(r.stdout) if r.returncode == 0 else {"tests": [{}]}
     if got["tests"][0].get("alone_on_pull_requests") != 0:
         bad.append("flaky --runs-dir: a run with no jobs page dropped out of the line: %r\n%s" % (got, r.stderr))
+
+
+
+# #34: the ci-workflow check runs each step against a stub pnpm: a fold written out or as
+# a loop that keeps exit codes passes; a loop whose bare `wait` drops them, a missing lint
+# and a step that only echoes the names fail.
+FOLD = """name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: |
+%s
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm test
+"""
+LOOP_OK = """tasks=(ts css md yaml json spell licenses)
+pids=()
+for t in "${tasks[@]}"; do pnpm run "lint:$t" & pids+=($!); done
+status=0
+for p in "${pids[@]}"; do wait "$p" || status=1; done
+exit $status"""
+LOOP_DROPS = """for t in ts css md yaml json spell licenses; do pnpm run "lint:$t" & done
+wait"""
+WRITTEN = "\n".join("pnpm run lint:%s" % x for x in ["ts", "css", "md", "yaml", "json", "spell", "licenses"])
+for body, want, what in ((WRITTEN, True, "each lint written out"), (LOOP_OK, True, "a loop that keeps exit codes"),
+                         (LOOP_DROPS, False, "a loop whose bare wait drops exit codes"),
+                         (WRITTEN.replace("pnpm run lint:licenses", ""), False, "a fold without licenses"),
+                         ("\n".join("echo lint:%s" % x for x in ["ts", "css", "md", "yaml", "json", "spell", "licenses"]),
+                          False, "a step that only echoes the lints")):
+    work = tempfile.mkdtemp(prefix="joggernaut-selftest-")
+    try:
+        shutil.copytree(E + "/ci-workflow/repo", work, dirs_exist_ok=True)
+        subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "s"],
+                       cwd=work, check=True)
+        subprocess.run(["git", "tag", "sample"], cwd=work, check=True)
+        open(work + "/.github/workflows/ci.yml", "w").write(
+            FOLD % "\n".join("          " + l if l else "" for l in body.split("\n")))
+        open(work + "/PR.md", "w").write("fold\n")
+        r = run([E + "/ci-workflow/check.py", work])
+        if (r.returncode == 0) != want:
+            bad.append("ci-workflow check: %s should %s\n%s%s" % (what, "pass" if want else "fail", r.stdout, r.stderr[-800:]))
+    finally:
+        shutil.rmtree(work)
 
 
 # every check.py fails on its untouched sample (the planted cause is there)
