@@ -2512,6 +2512,7 @@ for folders, listed in (({"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _
                         ({"attempt-1/a/r.xml": _rep("p"), "attempt-2/coverage.xml": "<coverage/>"}, False),
                         ({"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _rep("p"), "attempt-4/a/r.xml": _rep("p")}, False),
                         ({"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _rep("p"), "attempt-2/coverage.xml": "<coverage/>"}, True),
+                        ({"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _rep("p"), "attempt-202611241200/a/r.xml": _rep("p")}, False),
                         ({"attempt-2/a/r.xml": _rep("p")}, False),
                         ({"a/attempt-1/r.xml": _rep("p"), "a/attempt-2/r.xml": _rep("p")}, False)):
     reps = {rows[0]["id"]: {"a/r.xml": _rep("p")}, rows[1]["id"]: {"a/r.xml": _rep("f")},

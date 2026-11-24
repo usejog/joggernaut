@@ -84,9 +84,10 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    each attempt's under `RUN_ID/attempt-N/ARTIFACT_NAME/`, or a passing
    attempt's report replaces the failed one's: an artifact belongs to the
    attempt whose jobs (`run_attempt` in the jobs listing) ran when it was
-   created. A rerun's pass separates nothing (a lost or merged report can't
-   be told apart from a pass); `flaky` names the reruns that have a report
-   for every attempt, for a person to read. Where one artifact holds two projects' reports whose
+   created. A run whose saved listing says it is a rerun (`run_attempt`
+   above 1) shows no pass (a lost or merged report can't be told apart from
+   one); `flaky` names those that have a report for every attempt, for a
+   person to read. Where one artifact holds two projects' reports whose
    cases share suite, class and name, save each project's under a folder of
    its own (`linux/api/`, `linux/web/`): the folders are part of a test's name,
    the report's file name isn't. Folders named by a number or

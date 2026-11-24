@@ -2325,8 +2325,9 @@ def cmd_flaky(a):
     # its saved jobs or its attempt folders show, and each must have a report read.
     last = lambda r, dirs: max([r.get("run_attempt") or 1] + [j.get("run_attempt") or 1 for j in r.get("jobs", [])]
                                + list(dirs))
+    # (Checked by count first: a folder named like attempt-202611241200 is no attempt to list.)
     complete = sorted(rid for rid, (got_, dirs) in attempt_info.items() if (by_id[rid].get("run_attempt") or 1) > 1
-                      and set(range(1, last(by_id[rid], dirs) + 1)) <= got_)
+                      and last(by_id[rid], dirs) <= len(got_) and set(range(1, last(by_id[rid], dirs) + 1)) <= got_)
     # A failed.txt name no JUnit report shows (a file at the run's root beside reports in a
     # leg's folder, a name spelled otherwise): its failures can't meet a pass of the same test.
     # Per workflow: a JUnit report of another workflow says nothing about these names.
