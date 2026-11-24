@@ -1587,17 +1587,18 @@ def cmd_compare(a):
             work, wfb, wfa, started = " and ".join(ns), fb_, fa_, sel
     if work:
         res["failed_before_job"], res["failed_after_job"] = wfb, wfa
-        # Runs stopped before the named job(s): they list it but didn't run it, and some job
-        # of theirs failed or was cancelled. More of them after, beyond chance, means the runs that
-        # reached it may be the fast ones. A run that skipped it with nothing failing (a path
-        # filter, an `if:`) isn't one, so other work can't dilute or fake the count.
+        # Of the runs whose jobs list the named job(s), how many didn't run them: stopped by a
+        # failure or cancellation before them, or skipped by a condition. More after, beyond
+        # chance, means the runs that reached them may not be like the runs before, whatever the
+        # cause. Runs that never list them (other workflows' work) don't enter the count. A
+        # called workflow's job ("CALLER / JOB") counts as listed when its caller is, since
+        # GitHub lists a skipped caller as one job.
         finished = lambda rs: [r for r in rs if in_workflow(r) and r.get("conclusion") not in (None, "skipped", "neutral")]
-        # GitHub lists a job whose need failed as skipped, so a stopped run lists it.
-        listed = lambda r: all(any(j.get("name") == n for j in r.get("jobs", [])) for n in names)
-        stopped = lambda r: listed(r) and not ran_all(r, names) and any(
-            j.get("conclusion") in FAILED + ("cancelled",) for j in r.get("jobs", []))
-        stops = lambda rs: (sum(1 for r in finished(rs) if stopped(r)), len(finished(rs)))
-        res["stopped_before_job_before"], res["stopped_before_job_after"] = stops(rb), stops(ra)
+        lists = lambda r, n: any(j.get("name") in (n, caller_of(n)) for j in r.get("jobs", []))
+        listed = lambda r: all(lists(r, n) for n in names)
+        reach = lambda rs: (lambda w: (sum(1 for r in w if not ran_all(r, names)), len(w)))(
+            [r for r in finished(rs) if listed(r)])
+        res["not_reaching_before"], res["not_reaching_after"] = reach(rb), reach(ra)
     # Runs cancelled with no failure (a newer push, a concurrency group) are in neither the
     # timings nor the failure rate. A change that gets slow runs cancelled can look faster.
     cancelled = lambda rs: (sum(1 for r in rs if in_workflow(r) and r.get("conclusion") == "cancelled"
@@ -1692,12 +1693,12 @@ def cmd_compare(a):
                            " if the change makes slow runs get cancelled, the runs left are the fast ones"
                            % (cxa, na_, cxb, nb_))
     if work and res["verdict_code"] in qualify + tuple(q + "_more_cancelled" for q in qualify) \
-            and fails_rose(res["stopped_before_job_before"], res["stopped_before_job_after"]):
-        nb2, na2 = res["stopped_before_job_before"], res["stopped_before_job_after"]
+            and fails_rose(res["not_reaching_before"], res["not_reaching_after"]):
+        nb2, na2 = res["not_reaching_before"], res["not_reaching_after"]
         res["verdict_code"] += "_fewer_reached"
-        res["verdict"] += ("; but more runs stopped before %s after (%d of %d) than before (%d of %d), failed or"
-                           " cancelled upstream: the runs that reached it may be the fast ones, so name why"
-                           " before calling it faster" % ((" and ".join(names),) + na2 + nb2))
+        res["verdict"] += ("; but of the runs that list %s, more didn't run it after (%d of %d) than before (%d of %d):"
+                           " stopped upstream or skipped by a condition, so the runs that reached it may be the"
+                           " fast ones; name why before calling it faster" % ((" and ".join(names),) + na2 + nb2))
     if graph_changed and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
         # One set a side, different sets: the change altered the jobs, or the mix of pull
         # requests did. Never a plain verdict: only the workflow's diff can say which.
@@ -1740,8 +1741,8 @@ def cmd_compare(a):
     if work:
         print("runs where %s ran: failed before %d of %d, after %d of %d" % ((work,) + wfb + wfa))
         print("runs where %s ran: cancelled before %d of %d, after %d of %d" % ((cwork,) + wcb + wca))
-        print("runs stopped before %s (failed or cancelled upstream): before %d of %d, after %d of %d"
-              % ((" and ".join(names),) + res["stopped_before_job_before"] + res["stopped_before_job_after"]))
+        print("runs that list %s but didn't run it: before %d of %d, after %d of %d"
+              % ((" and ".join(names),) + res["not_reaching_before"] + res["not_reaching_after"]))
     print("cancelled runs, in neither the timings nor the failure rate: before %d of %d, after %d of %d%s"
           % (res["cancelled_before"] + res["cancelled_after"] + (
               " (a larger share after: slow runs being cancelled can pass for a speedup; say so)"

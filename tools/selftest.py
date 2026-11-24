@@ -1637,7 +1637,7 @@ with tempfile.TemporaryDirectory() as t:
     got = json.loads(r.stdout) if r.returncode == 0 else {}
     if not (got.get("verdict_code") or "").endswith("_fewer_reached"):
         bad.append("compare --job --end: fewer runs reaching the job should qualify the verdict: %r %r"
-                   % (got.get("verdict_code"), got.get("stopped_before_job_after")))
+                   % (got.get("verdict_code"), got.get("not_reaching_after")))
 
 # Only the runs where both named jobs ran show the rise: each job's own runs hold 35 failures of
 # 80 on both sides, and among runs where both ran it goes 0/40 -> 35/40.
@@ -1683,9 +1683,14 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "compare", "--before", t + "/b2.jsonl", "--after", t + "/a2.jsonl", "--json",
              "--ran", "backend", "--job", "integration", "--end"])
     got = json.loads(r.stdout) if r.returncode == 0 else {}
-    if "_more_cancelled" not in (got.get("verdict_code") or "") and got.get("verdict_code") != "not_valid":
-        bad.append("compare: cancellations where integration ran should qualify: %r %r"
-                   % (got.get("verdict_code"), got.get("cancelled_after_job")))
+    if (("_more_cancelled" not in (got.get("verdict_code") or "") and got.get("verdict_code") != "not_valid")
+            or got.get("cancelled_job_workload") != "integration" or got.get("cancelled_after_job") != [35, 40]):
+        bad.append("compare: cancellations where integration ran should qualify, named as integration's: %r %r %r"
+                   % (got.get("verdict_code"), got.get("cancelled_job_workload"), got.get("cancelled_after_job")))
+    text = run([M, "compare", "--before", t + "/b2.jsonl", "--after", t + "/a2.jsonl",
+                "--ran", "backend", "--job", "integration", "--end"]).stdout
+    if "runs where integration ran: cancelled before 0 of 40, after 35 of 40" not in text:
+        bad.append("compare: the cancelled counts should be printed under their own workload\n" + text)
 
 # Reach among the runs that list the job: docs-only runs can't dilute it. Before, 36 runs ran
 # backend then integration (6 fast, 30 slow); after, the 30 slow ones were cancelled in
@@ -1717,9 +1722,34 @@ with tempfile.TemporaryDirectory() as t:
         r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--job", "integration", "--end"])
         got = json.loads(r.stdout) if r.returncode == 0 else {}
         if (not (got.get("verdict_code") or "").startswith("faster") or not (got.get("verdict_code") or "").endswith("_fewer_reached")
-                or got.get("stopped_before_job_after") != [30, 130] or got.get("stopped_before_job_before") != [0, 130]):
+                or got.get("not_reaching_after") != [30 + 94 * lists, 36 + 94 * lists] or got.get("not_reaching_before") != [94 * lists, 36 + 94 * lists]):
             bad.append("compare --job --end: runs stopped before the job should qualify (docs list it: %s): %r %r"
-                       % (lists, got.get("verdict_code"), got.get("stopped_before_job_after")))
+                       % (lists, got.get("verdict_code"), got.get("not_reaching_after")))
+
+# All green: a condition skips integration on the slow runs after. Of the runs that list it,
+# more didn't run it, which qualifies the verdict. The same with a called workflow's job,
+# where GitHub lists the skipped caller as one job.
+with tempfile.TemporaryDirectory() as t:
+    def cond(i, slow, skip, name="integration", caller=None):
+        t0 = i * 4000
+        be = _job("build", t0, t0 + 1, t0 + (100 if slow else 10))
+        end = mm.ts(be["completed_at"]) - 1793000000
+        if skip:
+            it = dict(_job(caller or name, end, end, end), conclusion="skipped", steps=[], started_at=None)
+        else:
+            it = _job(name, end, end + 1, end + 11)
+        return _run(i, [be, it], t0)
+    for name, caller in (("integration", None), ("Python / integration", "Python")):
+        before = [cond(i, i >= 6, False, name) for i in range(36)]
+        after = [cond(1000 + i, False, False, name) for i in range(6)] + [
+            cond(1100 + i, True, True, name, caller) for i in range(30)]
+        open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+        open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+        r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--job", name, "--end"])
+        got = json.loads(r.stdout) if r.returncode == 0 else {}
+        if not (got.get("verdict_code") or "").endswith("_fewer_reached") or got.get("not_reaching_after") != [30, 36]:
+            bad.append("compare --job %s --end: a condition skipping it on the slow runs should qualify: %r %r"
+                       % (name, got.get("verdict_code"), got.get("not_reaching_after")))
 
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
