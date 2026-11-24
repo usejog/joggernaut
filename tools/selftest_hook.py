@@ -17,7 +17,9 @@ HOOK = os.path.join(ROOT, "skills/ci-guard/scripts/pre-push")
 PNPM = ('#!/bin/sh\nn=${2%%:*}\n[ -e .git ] || n="$n-not-at-the-root"\n'
         'echo "$n" >>"$LOG"\ntest ! -e "FAIL_$n"\n')
 # A git too old for --no-lazy-fetch (as on Ubuntu 24.04's git 2.43).
-OLD_GIT = '#!/bin/sh\n[ "$1" != --no-lazy-fetch ] || exit 129\nexec %s "$@"\n'
+# Every call is recorded in $GITLOG, so a test can see which lookups ran.
+OLD_GIT = ('#!/bin/sh\nprintf "%%s\\037" "$@" >>"$GITLOG"\necho >>"$GITLOG"\n'
+           '[ "$1" != --no-lazy-fetch ] || exit 129\nexec \'%s\' "$@"\n')
 ALL = ["format", "lint", "typecheck"]
 LIMIT = 'limit() { echo limiter >>"$LOG"; "$@"; }'
 
@@ -38,6 +40,14 @@ def hook_text(shell, limiter=False):
         text, n = re.subn(r'(?m)^limit\(\) \{ "\$@"; \}$', lambda m: LIMIT, text, count=1)
         assert n == 1, "the template has no default limit()"
     return "#!%s\n" % shell + text.split("\n", 1)[1]
+
+
+def stop_example():
+    """The Stop hook command in ci-guard's SKILL.md step 5, as written there."""
+    text = open(os.path.join(ROOT, "skills/ci-guard/SKILL.md")).read()
+    m = re.search(r"offer a Stop hook.*?```sh\n(.*?)\n *```", text, re.S)
+    assert m, "no Stop hook example in ci-guard's SKILL.md"
+    return "\n".join(l[3:] if l.startswith("   ") else l for l in m.group(1).split("\n"))
 
 
 def selftest(bad):
@@ -198,6 +208,9 @@ def _cases(bad, sh, t):
     expect("source with spaces", hook([line("refs/heads/code", code, Z, src="HEAD@{1 day ago}")]),
            0, ALL, err_lacks=["unreadable"])
     expect("unreadable line", hook(["garbage"]), 0, ALL, ["unreadable input"])
+    # Two spaces before the remote's object name leave an empty remote ref: unreadable, not unchecked.
+    expect("empty remote ref", hook(["refs/heads/docs %s  %s" % (docs, Z)]), 0, ALL,
+           ["unreadable input"], err_lacks=["not checked"])
     expect("a bare object name", hook([main]), 0, ALL, ["unreadable input"])
 
     # Deletes only (either hash length), nothing to push, and tags: nothing runs.
@@ -262,6 +275,17 @@ def _cases(bad, sh, t):
     env["LEGACY_EXIT"] = "1"
     expect("legacy hook fails", hook([line("refs/heads/code", code, Z)]), 1, ALL)
     env["LEGACY_EXIT"] = "0"
+    # A copy of the template there still runs (it could read files beside it), with a
+    # warning that the checks run twice; a copy with a line added gets no warning (and,
+    # as SKILL.md says, a line added there gets no input: git-lfs needs a file of its own).
+    legacy_text = open(legacy).read()
+    open(legacy, "w").write(hook_text(sh))
+    expect("template copy in .git/hooks", hook([line("refs/heads/code", code, Z)]), 0, ALL + ALL,
+           ["is a copy of this hook, so its checks run twice"])
+    open(legacy, "a").write('echo lfs >>"$LOG"\n')
+    expect("template copy with a line added", hook([line("refs/heads/code", code, Z)]), 0, ALL + ALL + ["lfs"],
+           err_lacks=["is a copy of this hook"])
+    open(legacy, "w").write(legacy_text)
 
     # Real pushes through a relative core.hooksPath, from a linked worktree, two branches
     # at once: the worktree runs its own checkout's hook, then the legacy hook.
@@ -292,6 +316,150 @@ def _cases(bad, sh, t):
         bad.append("pre-push (%s): real README-only push: exit %d, ran %s\n%s"
                    % (sh, r.returncode, ran, r.stderr))
 
+    # ci-guard's Stop hook example, as SKILL.md gives it.
+    stop_cmd = stop_example()
+
+    def stop(data, cwd=work):
+        r = subprocess.run([sh, "-c", stop_cmd], cwd=cwd, env=env, capture_output=True, text=True, input=data)
+        return r.returncode, r.stderr, log()
+    legacy_got()
+    on, off = '{"stop_hook_active":true}', '{"session_id":"s","stop_hook_active":false}'
+    expect("Stop hook, active", stop(on), 0, [])
+    expect("Stop hook, active over two lines", stop('{"stop_hook_active":\n true}'), 0, [])
+    for data in ('{"stop_hook_active":false,"stop_hook_ active":true}',
+                 '{"x\\"stop_hook_active":true,"stop_hook_active":false}',
+                 '{"stop_hook_active":false,"extra":{"stop_hook_active":true}}',
+                 '{"stop_hook_active":"true"}', '{"stop_hook_active":1}',
+                 '{"stop_hook_active":true,"n":NaN}', '[true]', 'not json', ''):
+        expect("Stop hook, not active: %r" % data, stop(data), 0, ALL)
+    # A json.py in the working tree isn't imported, and a non-ASCII path decodes in an ASCII
+    # locale (where the system has one; elsewhere Python reads UTF-8 anyway).
+    write("json.py", "load = None\n")
+    env["LC_ALL"] = "en_US.US-ASCII"
+    expect("Stop hook, active, json.py and an ASCII locale", stop('{"cwd":"/tmp/caf\u00e9","stop_hook_active":true}'),
+           0, [])
+    del env["LC_ALL"]
+    os.remove(os.path.join(work, "json.py"))
+    expect("Stop hook from a worktree's subfolder", stop(off, cwd=os.path.join(wt, "src")), 0, ALL)
+    write("FAIL_lint", "")
+    expect("Stop hook, a check fails", stop(off), 2, ALL, ["FAILED: lint."])
+    os.remove(os.path.join(work, "FAIL_lint"))
+    if legacy_got() is not None:
+        bad.append("pre-push (%s): the Stop hook ran the legacy hook" % sh)
+    # As git 2.30 answers rev-parse --path-format (it prints the unknown flag first), and
+    # as git 2.9 does that and answers --git-path ignoring core.hooksPath (hooks are in the
+    # common folder, as git's path.c has it for every linked worktree). Each with
+    # core.hooksPath set, then unset (the shared .git/hooks, from a linked worktree).
+    real_git = shutil.which("git", path=env["PATH"])
+    gits = os.path.join(t, "gits")
+    old_rev_parse = ('if [ "${1:-}" = rev-parse ]; then\n  case ${2:-} in --path-format=*)\n'
+                     '    printf "%%s\\n" "$2"; shift 2; set -- rev-parse "$@" ;;\n  esac\n%s'
+                     'fi\nexec \'%s\' "$@"\n')
+    ignore_hooks_path = ('  if [ "${2:-}" = --git-path ]; then echo "$(\'%s\' rev-parse --git-common-dir)/$3"; exit 0; fi\n'
+                         % real_git)
+    for v, extra in (("2.30", ""), ("2.9", ignore_hooks_path)):
+        os.makedirs(os.path.join(gits, v))
+        open(os.path.join(gits, v, "git"), "w").write("#!/bin/sh\n" + old_rev_parse % (extra, real_git))
+        os.chmod(os.path.join(gits, v, "git"), 0o755)
+        saved = env["PATH"]
+        env["PATH"] = os.path.join(gits, v) + os.pathsep + saved
+        expect("Stop hook on git %s" % v, stop(off, cwd=os.path.join(work, "src")), 0, ALL)
+        if legacy_got() is not None:
+            bad.append("pre-push (%s): the Stop hook on git %s ran .git/hooks, not core.hooksPath" % (sh, v))
+        git("config", "--unset", "core.hooksPath")
+        expect("Stop hook on git %s, .git/hooks from a worktree" % v, stop(off, cwd=wt), 0, [])
+        args = open(env["LOG"] + ".args").read() if os.path.exists(env["LOG"] + ".args") else ""
+        if legacy_got() is None or args != "--all \n":
+            bad.append("pre-push (%s): the Stop hook on git %s didn't run .git/hooks/pre-push --all: %r"
+                       % (sh, v, args))
+        # An empty core.hooksPath: git looks for /pre-push, so no hook runs (2.9's --git-path
+        # would give .git/hooks).
+        git("config", "core.hooksPath", "")
+        expect("Stop hook on git %s, empty core.hooksPath" % v, stop(off), 0, [])
+        if legacy_got() is not None:
+            bad.append("pre-push (%s): the Stop hook on git %s ran .git/hooks with an empty core.hooksPath"
+                       % (sh, v))
+        git("config", "core.hooksPath", ".githooks")
+        env["PATH"] = saved
+    # No core.hooksPath: the shared .git/hooks, from a linked worktree.
+    git("config", "--unset", "core.hooksPath")
+    expect("Stop hook, .git/hooks from a worktree", stop(off, cwd=wt), 0, [])
+    args = open(env["LOG"] + ".args").read() if os.path.exists(env["LOG"] + ".args") else ""
+    if legacy_got() is None or args != "--all \n":
+        bad.append("pre-push (%s): the Stop hook didn't run .git/hooks/pre-push from a worktree: %r" % (sh, args))
+    # An empty core.hooksPath: git runs no hook (it looks for /pre-push), and nor does the Stop hook.
+    git("config", "core.hooksPath", "")
+    expect("Stop hook, empty core.hooksPath", stop(off), 0, [])
+    if legacy_got() is not None:
+        bad.append("pre-push (%s): the Stop hook ran .git/hooks with an empty core.hooksPath" % sh)
+    # core.hooksPath = . : a hook at the root runs by its path.
+    git("config", "core.hooksPath", ".")
+    shutil.copy(hp, os.path.join(work, "pre-push"))
+    expect("Stop hook, core.hooksPath = .", stop(off, cwd=os.path.join(work, "src")), 0, ALL)
+    os.remove(os.path.join(work, "pre-push"))
+    git("config", "core.hooksPath", ".githooks")
+
+    # A stub git that fails one command, or, when asked for a merge-base, turns the hook's
+    # ranges file into a folder so its next write fails.
+    stubs = os.path.join(t, "stubs")
+    os.makedirs(stubs)
+    open(os.path.join(stubs, "git"), "w").write(
+        '#!/bin/sh\nsub=${1:-}\n[ "$sub" != --no-lazy-fetch ] || sub=${2:-}\n'
+        '[ "$sub" != "${FAIL_GIT:-}" ] || exit 128\n'
+        'if [ "$sub" = merge-base ] && [ -n "${RANGES_DIR:-}" ]; then\n'
+        '  for f in "$TMPDIR"/pre-push.*/ranges; do rm -f "$f"; mkdir "$f"; done\nfi\n'
+        'exec \'%s\' "$@"\n' % shutil.which("git", path=env["PATH"]))
+    os.chmod(os.path.join(stubs, "git"), 0o755)
+    saved = env["PATH"]
+    env["PATH"] = stubs + os.pathsep + saved
+    # diff-tree failing: the check runs (README-only, so typecheck would otherwise skip).
+    env["FAIL_GIT"] = "diff-tree"
+    expect("diff-tree error", hook([line("refs/heads/docs", docs, Z)]), 0, ALL,
+           ["typecheck: couldn't compare"])
+    env["FAIL_GIT"] = ""
+    # A failed write of the ranges stops the push, before any check.
+    legacy_got()
+    env["RANGES_DIR"] = "1"
+    expect("ranges not saved", hook([line("refs/heads/code", code, Z)]), 1, [], ["couldn't save the ranges"])
+    if legacy_got() is not None:
+        bad.append("pre-push (%s): the legacy hook ran after the ranges couldn't be saved" % sh)
+    del env["RANGES_DIR"]
+    env["PATH"] = saved
+
+    # A criss-cross history: two merge-bases with the default branch, so every check runs.
+    cc = os.path.join(t, "cc")
+    git("init", "-q", "-b", "main", cc, cwd=t)
+    write("README.md", "x\n", cwd=cc); git("add", "-A", cwd=cc); git("commit", "-qm", "root", cwd=cc)
+    git("checkout", "-qb", "a", cwd=cc); write("a.md", "a\n", cwd=cc)
+    git("add", "-A", cwd=cc); git("commit", "-qm", "a1", cwd=cc)
+    git("checkout", "-qb", "b", "main", cwd=cc); write("b.md", "b\n", cwd=cc)
+    git("add", "-A", cwd=cc); git("commit", "-qm", "b1", cwd=cc)
+    git("checkout", "-q", "a", cwd=cc); git("merge", "-q", "--no-edit", "b~0", cwd=cc)
+    a2 = git("rev-parse", "HEAD", cwd=cc)
+    git("checkout", "-q", "b", cwd=cc); git("merge", "-q", "--no-edit", "a~1", cwd=cc)
+    b2 = git("rev-parse", "HEAD", cwd=cc)
+    git("update-ref", "refs/remotes/origin/main", a2, cwd=cc)
+    if len(git("merge-base", "--all", a2, b2, cwd=cc).split()) != 2:
+        bad.append("pre-push (%s): the criss-cross history has no two merge-bases" % sh)
+    expect("criss-cross merge-bases", hook([line("refs/heads/b", b2, Z)], cwd=cc), 0, ALL,
+           ["no single merge-base"])
+
+    # A push from a bare repository: no working tree, so no checks; its own hook still
+    # gets git's exact input.
+    bare = os.path.join(t, "bare.git")
+    git("clone", "-q", "--bare", remote, bare, cwd=t)
+    open(os.path.join(bare, "hooks/pre-push"), "w").write(open(legacy).read())
+    os.chmod(os.path.join(bare, "hooks/pre-push"), 0o755)
+    data = line("refs/heads/main", main, Z) + "\n"
+    expect("bare repository", hook([], raw=data, cwd=bare), 0, [], ["no working tree"])
+    args = open(env["LOG"] + ".args").read() if os.path.exists(env["LOG"] + ".args") else ""
+    if legacy_got() != data or args != "origin %s\n" % remote:
+        bad.append("pre-push (%s): from a bare repository the legacy hook got args %r, not git's input" % (sh, args))
+    env["LEGACY_EXIT"] = "1"
+    expect("bare repository, legacy hook fails", hook([], raw=data, cwd=bare), 1, [], ["no working tree"])
+    env["LEGACY_EXIT"] = "0"
+    legacy_got()
+
     # A partial clone on a git without --no-lazy-fetch: nothing is compared (it
     # could fetch), so branches run every check; a delete alone still runs none.
     old = os.path.join(t, "oldgit")
@@ -300,20 +468,54 @@ def _cases(bad, sh, t):
     os.chmod(os.path.join(old, "git"), 0o755)
     saved = env["PATH"]
     env["PATH"] = old + os.pathsep + saved
+    env["GITLOG"] = os.path.join(t, "gitlog")
+
+    def git_calls():
+        calls = []
+        if os.path.exists(env["GITLOG"]):
+            calls = [c.split("\037")[:-1] for c in open(env["GITLOG"]).read().splitlines()]
+            os.remove(env["GITLOG"])
+        return calls
+
+    def could_fetch(calls, local):
+        """Calls other than the version probe, config, and rev-parse of local names only."""
+        flags = ("-q", "--verify", "--is-inside-work-tree", "--show-toplevel", "--git-common-dir")
+        config = lambda c: (c == ["config", "--get", "extensions.partialClone"]
+                            or c == ["config", "--name-only", "--get-regexp",
+                                     r"^remote\..*\.(promisor|partialclonefilter)$"]
+                            or len(c) == 4 and c[:3] == ["config", "--type=bool", "--get-all"]
+                            and re.match(r"^remote\.origin\.promisor$", c[3]))
+        ok = lambda c: (c == ["--no-lazy-fetch", "version"] or config(c)
+                        or c[:1] == ["rev-parse"] and all(x in flags or x in local for x in c[1:]))
+        return [c for c in calls if not ok(c)] if calls else ["no git call recorded"]
     for key, value in (("remote.origin.promisor", "true"), ("remote.origin.partialclonefilter", "blob:none")):
         git("config", key, value)
-        # An unfetched remote tip is never looked up (that lookup could fetch).
+        git_calls()
+        # An unfetched remote tip is never looked up (that lookup could fetch), nor is
+        # anything else: only config and rev-parse of local names run.
         expect("old git, partial clone (%s)" % key, hook([line("refs/heads/docs", docs, unseen)], cwd=wt),
                0, ALL, ["running every check", "partial clone"], err_lacks=["doesn't have"])
+        fetching = could_fetch(git_calls(), ("HEAD^{commit}", docs + "^{commit}"))
+        if fetching:
+            bad.append("pre-push (%s): old git, partial clone (%s): git calls that could fetch: %r"
+                       % (sh, key, fetching))
         expect("old git, partial clone, delete only",
                hook([line("refs/heads/gone", Z, main, src="(delete)")], cwd=wt), 0, [])
+        fetching = could_fetch(git_calls(), ("HEAD^{commit}",))
+        if fetching:
+            bad.append("pre-push (%s): old git, partial clone, delete only (%s): git calls that could fetch: %r"
+                       % (sh, key, fetching))
         git("config", "--unset", key)
     # Set twice, true then false: git keeps the remote as a promisor.
     git("config", "--add", "remote.origin.promisor", "true")
     git("config", "--add", "remote.origin.promisor", "false")
     write("untracked.ts", "x\n")
+    git_calls()
     expect("old git, promisor true then false", hook([line("refs/heads/docs", docs, unseen)]),
            0, ALL, ["partial clone", "untracked files not looked for"], err_lacks=["doesn't have", "untracked.ts"])
+    fetching = could_fetch(git_calls(), ("HEAD^{commit}", docs + "^{commit}"))
+    if fetching:
+        bad.append("pre-push (%s): old git, promisor true then false: git calls that could fetch: %r" % (sh, fetching))
     os.remove(os.path.join(work, "untracked.ts"))
     git("config", "--unset-all", "remote.origin.promisor")
     git("config", "remote.origin.promisor", "false")

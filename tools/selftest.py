@@ -574,6 +574,35 @@ with tempfile.TemporaryDirectory() as t:
     got = [json.loads(l)["pull_request_bases"] for l in open(out)] if os.path.exists(out) else []
     if r.returncode != 0 or not got or got[0] != ["main"] or got[1] != []:
         bad.append("fetch: a closed pull request's branch wasn't found, or a fork's was: %r\n%s" % (got[:2], r.stderr))
+    # #37: two pull requests reused one branch (the first closed, the second open): each run
+    # finds the one open when it was created; the bases stay every base the branch used; a
+    # pulls listing with no closed_at field finds none.
+    reused = [dict(r, status="completed", pull_requests=[], head_repository={"full_name": "o/r"}, head_branch="reused")
+              for r in rows[:3]]
+    reused[2]["event"] = "pull_request_review"  # can come on a closed pull request: never matched
+    json.dump(reused, open(t + "/reused.json", "w"))
+    c0, c1 = reused[0]["created_at"], reused[1]["created_at"]
+    for pulls, want in (({"o:reused": [{"number": 5, "base": {"ref": "main"}, "created_at": "2026-01-01T00:00:00Z",
+                                        "closed_at": min(c0, c1)},
+                                       {"number": 9, "base": {"ref": "release"}, "created_at": max(c0, c1),
+                                        "closed_at": None}]}, "two"),
+                        ({"o:reused": [{"number": 5, "base": {"ref": "main"}, "created_at": "2026-01-01T00:00:00Z"}]},
+                         "none")):
+        out = t + "/out/reused-%s.jsonl" % want
+        r = subprocess.run([sys.executable, M, "fetch", "--repo", "o/r", "--workflow", "ci.yml", "--out", out] + list(window),
+                           cwd=t, env=dict(env, FAKE_RUNS=t + "/reused.json", FAKE_PULLS=json.dumps(pulls)),
+                           capture_output=True, text=True)
+        got = sorted((x["created_at"], x.get("pull_requests_found"), x["pull_request_bases"])
+                     for x in (json.loads(l) for l in open(out)) if x["event"] == "pull_request") \
+            if os.path.exists(out) else []
+        review = [x.get("pull_requests_found") for x in (json.loads(l) for l in open(out))
+                  if x["event"] == "pull_request_review"] if os.path.exists(out) else []
+        if review != [[]]:
+            bad.append("fetch #37: a review event's run was matched to a pull request: %r" % review)
+        expect = ([(min(c0, c1), [5], ["main", "release"]), (max(c0, c1), [9], ["main", "release"])]
+                  if want == "two" else [(min(c0, c1), [], ["main"]), (max(c0, c1), [], ["main"])])
+        if r.returncode != 0 or got != expect:
+            bad.append("fetch #37: closed pull requests on one branch (%s): %r\n%s" % (want, got, r.stderr))
     r, n = fetch(["completed"] * 5 + ["queued"])
     if r.returncode != 0 or n != 5:
         bad.append("fetch: without a window, the finished runs should be written (%r runs)\n%s" % (n, r.stderr))
@@ -818,6 +847,23 @@ ra = json.loads(run([M, "split", "--in", plain, "--json"]).stdout)
 rb = json.loads(run([M, "split", "--in", mixed, "--json"]).stdout)
 if ra.get("pushes_per_pr_max") != rb.get("pushes_per_pr_max"):
     bad.append("split: a scheduled run changed pushes per pull request")
+# #9: the daily rate too, exactly, on both: 40 pull-request commits over 4.875 days.
+for got_ in (ra, rb):
+    if got_.get("pr_commits") != base or base != 40 or got_.get("runs_per_day") != 8.2:
+        bad.append("split: pull-request commits or pushes a day wrong: %r %r (want 40, 8.2)"
+                   % (got_.get("pr_commits"), got_.get("runs_per_day")))
+# #9: two jobs named test on two runners, each failing then passing on a rerun: two flakes, once each.
+two_legs = dict(mix[0], id=2, run_attempt=2, jobs=[
+    dict(mix[0]["jobs"][0], id=91, name="test", labels=["ubuntu-latest"], run_attempt=1, conclusion="failure"),
+    dict(mix[0]["jobs"][0], id=92, name="test", labels=["windows-latest"], run_attempt=1, conclusion="failure"),
+    dict(mix[0]["jobs"][0], id=93, name="test", labels=["ubuntu-latest"], run_attempt=2, conclusion="success"),
+    dict(mix[0]["jobs"][0], id=94, name="test", labels=["windows-latest"], run_attempt=2, conclusion="success")])
+legs_file = tempfile.mktemp(suffix=".jsonl")
+open(legs_file, "w").write(json.dumps(two_legs) + "\n")
+fl = json.loads(run([M, "split", "--in", legs_file, "--json"]).stdout or "{}").get("rerun_flakes") or []
+if sorted(n for _, n in fl) != [1, 1] or not any("ubuntu-latest" in k for k, _ in fl) \
+        or not any("windows-latest" in k for k, _ in fl):
+    bad.append("split: same-name flaky jobs on two runners: %r" % fl)
 
 for before, after, what in (
         ('<testsuite name="s"><testcase classname="k" name="y"/><testcase classname="k" name="x"><error type="ZeroDivisionError"/></testcase></testsuite>',
@@ -3032,6 +3078,48 @@ with tempfile.TemporaryDirectory() as t:
     if sum(x["runs"] for x in v.get("job_sets", {}).get("before", [])) != v.get("before_runs") \
             or v.get("before_runs") != 5 or not any("can't tell which" in x[2] for x in v.get("excluded", [])):
         bad.append("compare #35: job_sets and timings count different runs: %r %r" % (v.get("job_sets"), v.get("before_runs")))
+
+
+# #37: closed pull requests that reused one branch still count as one (a run can't be tied
+# to its own pull request for certain), and flaky says which branches and pull requests.
+def _closed(i, branch, found, st):
+    x = _fr(i, 0, st == "p")
+    x.update(pull_requests=[], head_branch=branch, pull_requests_found=found)
+    return x
+seq = [(100, "b-0", [100], "p"), (1, "reused", [5], "f"), (101, "b-1", [101], "p"), (2, "reused", [9], "f"),
+       (102, "b-2", [102], "p"), (3, "c", [7], "f"), (103, "b-3", [103], "p")]
+rows = [_closed(i, b, f, st) for i, (_, b, f, st) in enumerate(seq)]
+reps = {x["id"]: {"r.xml": _rep(st)} for x, (_, _, _, st) in zip(rows, seq)}
+got, r = _flaky_rows(rows, reps)
+if not got or got["tests"][0]["alone_on_pull_requests"] != 2 \
+        or got.get("branches_with_several_pull_requests") != [{"branch": "o/r:reused", "pull_requests": [5, 9]}]:
+    bad.append("flaky #37: a reused branch should count once and be named: %r" % (got or r.stderr))
+
+# #38: a rerun's pass still separates nothing, but a rerun with every attempt's report is named.
+def _rr(i, pr, st, attempt=1):
+    x = _fr(i, pr, st == "p")
+    x["run_attempt"] = attempt
+    return x
+rows = [_rr(0, 1, "p"), _rr(1, 2, "f"), _rr(2, 3, "p", attempt=2), _rr(3, 4, "f"), _rr(4, 5, "p")]
+for folders, listed in (({"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _rep("p")}, True),
+                        ({"attempt-1/a/r.xml": _rep("p"), "attempt-2/coverage.xml": "<coverage/>"}, False),
+                        ({"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _rep("p"), "attempt-4/a/r.xml": _rep("p")}, False),
+                        ({"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _rep("p"), "attempt-2/coverage.xml": "<coverage/>"}, True),
+                        ({"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _rep("p"), "attempt-202611241200/a/r.xml": _rep("p")}, False),
+                        ({"attempt-2/a/r.xml": _rep("p")}, False),
+                        ({"a/attempt-1/r.xml": _rep("p"), "a/attempt-2/r.xml": _rep("p")}, False)):
+    reps = {rows[0]["id"]: {"a/r.xml": _rep("p")}, rows[1]["id"]: {"a/r.xml": _rep("f")},
+            rows[2]["id"]: folders, rows[3]["id"]: {"a/r.xml": _rep("f")}, rows[4]["id"]: {"a/r.xml": _rep("p")}}
+    got, r = _flaky_rows(rows, reps)
+    if not got or got["tests"][0]["alone_on_pull_requests"] != 0 \
+            or (got.get("reruns_with_every_attempts_report") == [rows[2]["id"]]) != listed:
+        bad.append("flaky #38: a rerun with attempt folders %s: %r" % (sorted(folders), got or r.stderr))
+
+# #35: two projects in one artifact, kept apart by a folder each, are two tests.
+rows = [_fr(0, 1, False)]
+got, r = _flaky_rows(rows, {rows[0]["id"]: {"linux/api/r.xml": _rep("f"), "linux/web/r.xml": _rep("f")}})
+if not got or len(got["tests"]) != 2:
+    bad.append("flaky #35: two projects' folders in one artifact read as one test: %r" % (got or r.stderr))
 
 
 # every check.py fails on its untouched sample (the planted cause is there)
