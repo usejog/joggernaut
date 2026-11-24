@@ -65,21 +65,22 @@ in `references/measuring.md`.
    step names with `gh run view RUN_ID --json jobs`). Count how many failed
    runs died on format, lint or type checks.
 2. **Add a fast pre-push check.** Find the repository's own format, lint and
-   type-check commands (package scripts, Makefile, CI workflow). Copy
-   `scripts/pre-push` from this skill to `.githooks/pre-push` in the
-   repository and edit only its settings block: the default branch, and one
+   type-check commands (package scripts, Makefile, CI workflow). First look
+   at what hooks run now (`git config --show-origin --get-all core.hooksPath`,
+   the executable files in `.git/hooks`, and any `.githooks/pre-push`). If
+   `core.hooksPath` is already set, by a hook tool (lefthook, husky,
+   pre-commit) or by hand, keep it: add the checks to the tool's config or
+   to the pre-push already in that folder, with the same rules, so both can
+   still stop a push; use the template there only if that folder has no
+   pre-push. Otherwise copy `scripts/pre-push` from this skill to
+   `.githooks/pre-push` (if that file exists, add the checks to it
+   instead) and edit only its settings block: the default branch, and one
    `check` line per command with the files it reads as git pathspecs. It
    reads every pushed branch, compares each with what the remote has (a new
    branch with its merge-base with the default branch), skips a check only
    when no pushed change touches its files, and runs everything when it
    can't tell. It streams each check's output and time, and warns when the
-   working tree isn't what is pushed. Before installing, look at what hooks
-   run now (`git config --show-origin --get-all core.hooksPath`, and the
-   executable files in `.git/hooks`). If `core.hooksPath` is already set, by
-   a hook tool (lefthook, husky, pre-commit) or by hand, keep it: add the
-   checks to the tool's config or to the pre-push already in that folder,
-   with the same rules, so both can still stop a push; put the template
-   there only if that folder has no pre-push. Otherwise install it with `git config core.hooksPath .githooks`,
+   working tree isn't what is pushed. Install it with `git config core.hooksPath .githooks`,
    a one-line setup step in the README or the repository's setup script
    (see "Hooks and worktrees" below). Time it, and report two
    numbers from step 1 apart: runner-minutes it can save (the minutes of
@@ -105,16 +106,27 @@ in `references/measuring.md`.
      branch protection requires it;
    - merge only when the person you work for asks, or when the agent
      instructions on the target branch already let agents merge and name
-     the command, and then only through it, once the required checks and a
-     review by someone other than the agent have passed.
+     the command, and then only through it, once the required checks have
+     passed and the review the branch requires, by someone other than the
+     agent, approved the current head.
 5. **For Claude Code users, offer a Stop hook** in `.claude/settings.json`
-   that runs the pre-push checks when the agent finishes (with the
-   template, `"$(git rev-parse --show-toplevel)/.githooks/pre-push" --all >&2 || exit 2`,
-   since the hook's folder is wherever Claude last changed to; `--all`
-   checks the working tree from its root and ignores the hook's JSON input;
-   with a hook tool, its own command for the same checks). Let the agent
-   stop when the input's `stop_hook_active` is true, so a failure it can't
-   fix doesn't hold it forever. On a failure, it
+   that runs the pre-push checks when the agent finishes. With the template
+   installed at `<hooks folder>/pre-push` (the folder from step 2), the
+   command is this; with a hook tool, its own command for the same checks:
+
+   ```sh
+   input=$(cat)
+   case $input in *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;; esac
+   hook="$(git rev-parse --show-toplevel 2>/dev/null)/<hooks folder>/pre-push"
+   [ -x "$hook" ] || exit 0
+   "$hook" --all >&2 || exit 2
+   ```
+
+   It finds the hook from the repository's root, since the hook runs
+   wherever Claude last changed to; `--all` checks the working tree from
+   its root. It lets the agent stop when `stop_hook_active` is true, so a
+   failure it can't fix doesn't hold it forever, and outside a repository
+   or without the hook file. On a failure, it
    exits 2 with the failed check's output on stderr: Claude Code's hook docs
    say that keeps Claude working and shows it the message. Offer; don't add
    unasked.
@@ -150,7 +162,9 @@ generated type, a `.vue` file or a submodule pointer then still runs it.
 Formatters and linters can read prose too (Markdown code blocks), so the
 template gives them no exclusions, and the saving is the type check's on
 prose-only pushes. Checks that read commits rather than files (commit
-messages, changesets) need none either. The hook prints each skip by name.
+messages) don't belong in this hook: a push whose commits change no file
+skips every check, so put them in a commit-msg hook. The hook prints each
+skip by name.
 Commands run under `sh` (dash on Ubuntu) from the root of the working tree,
 so a bash-only command line from a CI workflow goes in a script.
 

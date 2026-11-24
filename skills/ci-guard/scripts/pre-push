@@ -95,7 +95,7 @@ else
   for k in $(git config --name-only --get-regexp '^remote\..*\.(promisor|partialclonefilter)$'); do
     case $k in
       *.partialclonefilter) fetches=1 ;;
-      *) [ "$(git config --type=bool --get "$k")" != true ] || fetches=1 ;;
+      *) ! git config --type=bool --get-all "$k" | grep -qx true || fetches=1 ;;
     esac
   done
 fi
@@ -159,8 +159,11 @@ if [ "$mode" = push ]; then
   elif [ -n "$(g status --porcelain --untracked-files=no 2>/dev/null)" ]; then
     say "WARNING: uncommitted changes: the checks read them, but they aren't pushed"
   fi
-  u=$(git ls-files -z --others --exclude-standard 2>/dev/null | tr '\0' '\n' | head -n 5 | tr '\n' ' ')
+  u=''   # ls-files reads .gitignore files, which a partial clone could fetch
+  [ -n "$fetches" ] ||
+    u=$(g ls-files -z --others --exclude-standard 2>/dev/null | tr '\0' '\n' | head -n 5 | tr '\n' ' ')
   [ -z "$u" ] || say "WARNING: untracked files the checks may read, which aren't pushed: $u"
+  [ -z "$fetches" ] || say "a partial clone on this git: uncommitted and untracked files not looked for"
 fi
 
 failed=''

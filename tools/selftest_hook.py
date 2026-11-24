@@ -308,6 +308,14 @@ def _cases(bad, sh, t):
         expect("old git, partial clone, delete only",
                hook([line("refs/heads/gone", Z, main, src="(delete)")], cwd=wt), 0, [])
         git("config", "--unset", key)
+    # Set twice, true then false: git keeps the remote as a promisor.
+    git("config", "--add", "remote.origin.promisor", "true")
+    git("config", "--add", "remote.origin.promisor", "false")
+    write("untracked.ts", "x\n")
+    expect("old git, promisor true then false", hook([line("refs/heads/docs", docs, unseen)]),
+           0, ALL, ["partial clone", "untracked files not looked for"], err_lacks=["doesn't have", "untracked.ts"])
+    os.remove(os.path.join(work, "untracked.ts"))
+    git("config", "--unset-all", "remote.origin.promisor")
     git("config", "remote.origin.promisor", "false")
     expect("old git, promisor = false", hook([line("refs/heads/docs", docs, Z)]), 0, ["format", "lint"])
     git("config", "--unset", "remote.origin.promisor")
