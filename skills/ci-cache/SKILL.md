@@ -142,14 +142,18 @@ in `references/measuring.md`.
    otherwise do (no "skip tests on cache hit"). Some caches replay test
    results, and whether that's sound depends on the key. Go's test cache
    reuses a result only for the same test binary and cacheable flags, and
-   only if the files within the module and the environment variables the
-   test consulted are unchanged (Go's docs). So a `(cached)` result is the
-   result the test would give, unless the test depends on something
-   outside the module: a network service, a database, files elsewhere on
-   the runner. Don't add `-count=1` by default: for tests that depend only on
-   the module and their environment, it reruns unchanged tests and makes CI
-   slower without making it more correct. If you find tests that depend on outside state, name them and
-   leave the choice to a person. The same holds for any tool whose task cache is keyed on all of
+   only if the files the test process itself opened within the module, and
+   the environment variables it read, are unchanged (Go's docs). Go doesn't
+   see what a test's subprocesses read, even inside the module (a test that
+   runs `go build` or `go run` on the module's own commands, or runs a
+   script), the clock, a network service, a database, or files outside the
+   module. Before relying on `(cached)` results on the merge gate, search
+   the `_test.go` files for `os/exec`, network and database clients, and
+   paths outside the module. If a package has such tests, run that package
+   with `-count=1` on the gate, keeping the command's other package
+   arguments, and name it in the pull request. Add `-count=1` nowhere else:
+   for other tests it reruns unchanged work without catching anything more.
+   The same holds for any tool whose task cache is keyed on all of
    a task's inputs; check its docs. What breaks a check is a cache whose key
    misses inputs: tests skipped on a hit keyed on a branch or a lockfile
    alone, or a Docker layer whose `RUN` runs tests that read anything
