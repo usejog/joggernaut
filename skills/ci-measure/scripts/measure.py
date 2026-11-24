@@ -869,7 +869,8 @@ def cmd_split(a):
         for x in out["on_slowest_path"][:5]))
     print("job that finishes last: " + ", ".join("%s (%d runs)" % kv for kv in out["slowest_path_jobs"][:3]))
     if out["called_workflows"]:
-        print("called workflows (jobs named \"CALLER / JOB\"), first job queued to last done, successful runs:")
+        print("called workflows (jobs named \"CALLER / JOB\"; a job whose own name holds \" / \" is grouped too),"
+              " first job queued to last done, successful runs:")
         for x in out["called_workflows"][:10]:
             print("  %-48s n=%-4d median %-8s %s %s" % (x["caller"][:48], x["runs"], fmt(x["median"]),
                                                        x["tail"][0], fmt(x["tail"][1])))

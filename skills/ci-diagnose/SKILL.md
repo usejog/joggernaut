@@ -118,7 +118,7 @@ in `references/measuring.md`.
      none of them. So `split` groups the successful runs by the longest job
      each one ran (longest by that job's median running time over the file)
      and prints each group's run count, median, slowest 5% and share of the
-     total wait. The headline is the group with the most of the wait
+     total wait (the six groups with the most wait; `--json` lists all). The headline is the group with the most of the wait
      among those of 5 runs or more (`--cohort JOB` picks another; with no
      group that big, the headline is the blend, and says so); the slowest path below describes that
      group. Report the headline as the PR wait, naming its group, with the
@@ -135,10 +135,13 @@ in `references/measuring.md`.
      the job that finished last just before it was queued: GitHub queues a
      job when the last job it `needs` ends, and the jobs list has no
      `needs:`, so `split` reads each link from the times and prints the
-     most common chains; check them against the workflow. A
+     most common chains; check them against the workflow. A link with a
+     long gap ("between its jobs") may not be a `needs:` edge: the job was
+     queued late for a reason the list doesn't show, and the job before it
+     is only the last one to end. A
      called (reusable, `workflow_call`) workflow's jobs are in the caller's
      run, named `CALLER / JOB`, so the chain runs through them like any
-     other job, and a short gate job at the end no longer hides the time
+     other job, and a short gate job at the end doesn't hide the time
      before it. The path's time is split into parts that add up to the run's
      wait: before its first job was queued, between its jobs (one ended, the
      next was queued), and its jobs' waiting for a machine, setup
@@ -151,7 +154,8 @@ in `references/measuring.md`.
      say which, from the workflow, before naming a cause;
    - every job's median split over the runs that ran it, called workflows'
      jobs included (`--json` lists every job, not only ten), and each called
-     workflow's time, from its first job queued to its last done;
+     workflow's time, from its first job queued to its last done (read
+     from the name, so a job whose own name holds " / " is grouped too);
    - pushes a day: distinct pull-request commits that started CI, over the
      days the file spans. A reopened pull request or a re-run of the same
      commit isn't counted again;

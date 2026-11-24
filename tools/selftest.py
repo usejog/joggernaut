@@ -1013,7 +1013,8 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("split: cohorts wrong: headline %r, groups %r" % (head, sorted(groups)))
     text = run([M, "split", "--in", out]).stdout
     if ("PR wait, runs whose longest job was CI / Python / unit (3.12) (6 successful runs" not in text
-            or "blended, all 20 successful runs" not in text or "14 runs" not in text):
+            or "blended, all 20 successful runs" not in text
+            or not re.search(r"^ +14 runs .* CI / E2E / smoke$", text, re.M)):
         bad.append("split: the headline should name its group and the blend\n" + text)
     if "Python / unit (3.12)" not in text.split("slowest path of the runs in that headline")[-1].split("job that")[0]:
         bad.append("split: the slowest path should describe the headline group\n" + text)
@@ -1129,13 +1130,15 @@ with tempfile.TemporaryDirectory() as t:
               {"id": 13, "status": "completed", "conclusion": "success", "event": "push", "created_at": _at(20)}]
     jobs = json.dumps([{"jobs": [_job("test", 0, 1, 60)]}])
 
-    def fetch_with(created, calls=None):
+    outs = itertools.count()
+
+    def fetch_with(created, calls=None, failing="/runs/12/jobs"):
         script = [("rate_limit", ['{"resources": {"core": {"remaining": 5000, "reset": 0}}}']),
-                  ("/runs/12/jobs", [E502]), ("/jobs", [jobs]),
+                  (failing, [E502]), ("/jobs", [jobs]),
                   ("/runs?", [json.dumps({"total_count": 3, "workflow_runs": listed}),
                               json.dumps({"total_count": 3, "workflow_runs": []})])]
         a = types.SimpleNamespace(repo="o/r", workflow="ci.yml", event="push", branch=None, limit=10,
-                                  created=created, out=t + "/runs-%d.jsonl" % len(_slept))
+                                  created=created, out=t + "/runs-%d.jsonl" % next(outs))
         cwd = os.getcwd()
         os.chdir(t)
         try:
@@ -1156,8 +1159,8 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("fetch: a window read whole was written with a run left out\n" + so + err)
     if any("/runs/13/" in c for c in seen):
         bad.append("fetch: a window read whole kept reading after a run it must refuse")
-    listed[0]["id"], listed[2]["id"] = 12, 12  # every run unreadable: more than one in 20
-    path, (_, so, err, ex) = fetch_with("<=" + _at(100))
+    # Every run unreadable: more than one in 20.
+    path, (_, so, err, ex) = fetch_with("<=" + _at(100), failing="/jobs")
     if ex is None or os.path.exists(path) or "more than one run in 20" not in err:
         bad.append("fetch: a baseline with most runs unreadable was written\n" + so + err)
 mm.sleep = mm.time.sleep
