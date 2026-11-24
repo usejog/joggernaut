@@ -183,39 +183,25 @@ in `references/measuring.md`.
      longer; it saves up to the shorter group's time, less where the steps compete for the runner's cores,
      memory or disk (check worker counts against the cores). On a
      self-hosted or third-party runner, check with one run that it supports
-     the syntax. Second choice, when the runner has no room: a new job with
-     the same `needs`, which adds a runner, setup and minutes, and saves
-     min(moved, kept − d) a run, where d is how much longer the new job waits,
-     sets up and cleans up than the old; it is a slowdown when d exceeds the
-     kept time, so work it out on each run. On a pool with no free runner
-     the kept job can queue behind the new one: compare both new finishes
-     with the old one, not the formula. Its minutes change by both jobs'
-     new billed durations against the old job's. If the moved steps need something the kept
-     ones build, the new job depends on it and this arithmetic doesn't hold.
-     A job output a moved step produces (`outputs: ref: ${{ steps.X.outputs.ref }}`)
-     moves with it: the new job declares it, and every job that read it
-     from the old job (`needs.verify.outputs.ref`) reads it from the new one;
-     otherwise it resolves empty and a consumer can silently fall back to a
-     default (another ref, another target). Keep the producer in the old job
-     when that is simpler.
-     A job with a step after the moved ones that has an effect outside the
-     job (a publish, a deploy, a push) stays whole: in a new job the moved
-     checks would no longer hold that step back. Native parallel steps keep
-     such a step after the group.
-     The old job can pass its required check while the new job fails, and
-     every job that `needs` the old job (a publish, a deploy, on push or
-     release too) would no longer wait for the moved steps: add the new job
-     to each of those `needs`, and to every condition that reads the old
-     job's result (`needs.verify.result == 'success'`, `if: always()` with a
-     check), so each of them does on success, failure, skip and cancellation
-     of the moved steps what it did before: a publish still stops, and a
-     rollback or failure notice still runs. Show it on a run of each. Then find the required checks (`rules/branches/BRANCH`, branch protection,
-     and the `merge_group` checks), make the new job's result reach one
-     through a gate that already exists and fails unless every job it needs
-     ended `success`, and check on the pull request that a failure, a skip
-     and a cancellation of the new job each block the merge. Where no such
-     gate exists, making a job required is a repository setting: list it
-     for a person instead. Either way, compare the tests that ran, by name.
+     the syntax. Compare the tests that ran, by name, and show on the pull
+     request that a failing step in the group still fails the job.
+
+     When the runner has no room for them side by side, moving the steps to
+     a new job is for a person: it adds a runner and minutes, and it changes
+     the job graph. List it with its arithmetic: it saves min(moved, kept −
+     d) a run, where d is how much longer the new job waits, sets up and
+     cleans up than the old (a slowdown when d exceeds the kept time; on a
+     pool with no free runner, compare both new finishes with the old), and
+     its minutes change by both jobs' billed durations against the old
+     one's. Name what the person must keep, all of which the old job gave
+     for free: every job that `needs` the old one, and every condition on its
+     result, waits for the new one too (on push and release as well); a job
+     output a moved step produces, and any `on.workflow_call.outputs` that
+     exports it, moves with it; the job's `defaults` (its shell, and with it
+     `pipefail`), `env`, `permissions`, container and services come along;
+     a step with an effect outside the job after the moved ones keeps the
+     job whole; and the new job's result reaches a required check through a
+     gate that fails unless every job it needs ended `success`.
    - **Remove a redundant gate job.** A chain of gate jobs at the end of the
      slowest path (a called workflow's last check job, then the caller's)
      pays queue, setup and a gap per gate. Keep the one a required check

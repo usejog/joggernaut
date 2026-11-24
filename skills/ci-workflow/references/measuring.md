@@ -180,8 +180,9 @@ effect: time hits and misses apart, each with both options
 (`--cache-state STATE.json --cache hit`, then `--cache-state STATE.json --cache miss`). `compare` also counts each side's runs cancelled with no
 failure (a newer push, a concurrency group): they are in neither the
 timings nor the failure rate. When the share cancelled rose beyond chance
-(the failure check's one-sided exact test), a faster (or mixed) verdict ends
-in `_more_cancelled`: if the change makes slow
+(the failure check's one-sided exact test), over the workflow or among a
+named job's runs, a faster (also with more failures) or mixed verdict ends in
+`_more_cancelled`: if the change makes slow
 runs get cancelled, the runs left are the fast ones. Equal shares can still
 hide which runs finished (issue #33): read the cancelled runs before calling
 it faster. `--job NAME --end` times that
@@ -195,7 +196,9 @@ duration (`--job` alone) and the whole run's wait, never alone.
 `compare` needs at least 5 successful comparable runs a side. Those are the
 runs it times; `--label`, `--job` and `--cache` choose them. The failure rate
 it reports reads every finished run of the workflow and event in each file,
-whatever those filters say, so a filter can't hide or dilute a failure. If
+whatever those filters say, so a filter can't hide or dilute a failure; a job
+named with `--job` or `--ran` (both: the runs where both ran) is checked
+among its own runs as well. If
 more runs fail after than chance explains (a one-sided test at 5%), the
 result is not valid. If more fail after but within chance, the verdict says
 "median faster …, but more runs failed after": at a few runs a side the test

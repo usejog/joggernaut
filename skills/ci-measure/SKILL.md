@@ -225,8 +225,11 @@ under a merge-commit policy, ask before adding them.
    (`references/measuring.md`). If any run failed after the change,
    name the cause of each before reporting a speedup: at a few runs a side,
    only a large rise in failures counts as beyond chance. The failure rate
-   reads every finished run of the workflow and event; `--label`, `--job`
-   and `--cache` choose only the runs timed.
+   reads every finished run of the workflow and event; `--label` and
+   `--cache` choose only the runs timed. A job named with `--job` or `--ran`
+   also picks a workload, the runs where it ran, whose own failures and
+   cancellations are checked as well, so a verdict can be not valid on
+   those alone.
 3. Compare the tests, by name:
 
    ```sh

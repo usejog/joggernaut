@@ -1572,8 +1572,11 @@ def cmd_compare(a):
     # A named job (--ran, or --job) picks a workload: the runs where that job ran, in any
     # attempt. Its failures and cancellations are checked among those runs too, so slow runs
     # that start failing or being cancelled there can't leave only the fast ones to time.
-    work = a.ran or a.job
-    started = lambda rs: [r for r in rs if any(j.get("name") == work and executed(j) for j in r.get("jobs", []))]
+    # Both named, the workload is the runs where both ran.
+    names = [n for n in (a.ran, a.job) if n]
+    work = " and ".join(dict.fromkeys(names))
+    started = lambda rs: [r for r in rs if all(any(j.get("name") == n and executed(j) for j in r.get("jobs", []))
+                                               for n in names)]
     wfb, wfa = (fail_rate(started(rb)), fail_rate(started(ra))) if work else ((0, 0), (0, 0))
     if work:
         res["failed_before_job"], res["failed_after_job"] = wfb, wfa
@@ -1651,10 +1654,11 @@ def cmd_compare(a):
             res["verdict_code"] = "no_change_yet"
             res["verdict"] = "no measurable change yet with %s; more runs can tighten this" % sides
     (cxb, nb_), (cxa, na_) = res["cancelled_before"], res["cancelled_after"]
-    if res["verdict_code"] in ("faster", "mixed") and work and not fails_rose((cxb, nb_), (cxa, na_)) \
+    qualify = ("faster", "faster_more_failures", "mixed")
+    if res["verdict_code"] in qualify and work and not fails_rose((cxb, nb_), (cxa, na_)) \
             and fails_rose(wcb, wca):
         (cxb, nb_), (cxa, na_) = wcb, wca  # the workload's own share rose: report that one
-    if res["verdict_code"] in ("faster", "mixed") and fails_rose((cxb, nb_), (cxa, na_)):
+    if res["verdict_code"] in qualify and fails_rose((cxb, nb_), (cxa, na_)):
         # A larger share cancelled after, beyond chance (the failure check's exact test): the
         # runs that finished may be the fast ones.
         res["verdict_code"] += "_more_cancelled"
@@ -2060,7 +2064,8 @@ def cmd_flaky(a):
         if int(d) not in by_id:
             die("%s holds reports of run %s, which isn't among the finished runs read from %s; read that run"
                 " too, or move its folder out, so its evidence isn't lost" % (folder, d, a.input))
-        got = failed_tests(folder, short_of)
+        got = failed_tests(folder, None if short_of is None else short_of.setdefault(
+            by_id[int(d)].get("path") or by_id[int(d)].get("name") or "", {}))
         if got is None or (not got[0] and not got[1] and got[2]):
             empty.append(d)
             not_junit += [os.path.join(d, x) for x in (got or ([], [], []))[2]]
@@ -2072,11 +2077,13 @@ def cmd_flaky(a):
         junit_names |= {(wf_, n) for n in got[4]}
     if not reports:
         die("no report in %s for any run in %s" % (a.reports, a.input))
-    twice = sorted(k for k, v in (short_of or {}).items() if len(v) > 1)
+    # Per workflow: tests are reported per workflow, so one name in two workflows is fine.
+    twice = sorted((w, k) for w, m in (short_of or {}).items() for k, v in m.items() if len(v) > 1)
     if twice:
-        die("--short can't tell apart the tests named %s: the reports hold each under several classes or"
-            " suites (%s); leave --short off" % (", ".join(twice[:3]), "; ".join(
-                show_test(json.dumps([""] + json.loads(x))) for x in sorted(short_of[twice[0]])[:2])))
+        w, k = twice[0]
+        die("--short can't tell apart the tests named %s in %s: the reports hold each under several classes or"
+            " suites (%s); leave --short off" % (k, w, "; ".join(
+                show_test(json.dumps([""] + json.loads(x))) for x in sorted(short_of[w][k])[:2])))
     tests = {}
     for rid, (failed, _) in reports.items():
         for t in failed:

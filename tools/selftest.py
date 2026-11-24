@@ -1534,27 +1534,55 @@ with tempfile.TemporaryDirectory() as t:
         elif outcome == "cancelled":
             x["jobs"][-1]["conclusion"], x["conclusion"] = "cancelled", "cancelled"
         return x
-    before = [wl(i, True, "ok") for i in range(40)] + [wl(100 + i, False, "ok") for i in range(90)]
+    def other_fail(i):
+        x = wl(i, False, "ok")
+        x["jobs"][0]["conclusion"], x["conclusion"] = "failure", "failure"
+        return x
+    # Workflow-wide 35 of 130 failed on both sides; among runs where integration ran, 0/40 -> 35/40.
+    before = ([wl(i, True, "ok") for i in range(40)] + [wl(100 + i, False, "ok") for i in range(55)]
+              + [other_fail(300 + i) for i in range(35)])
     after = ([wl(1000 + i, True, "ok", integ=10) for i in range(5)] + [wl(1100 + i, True, "timed_out") for i in range(35)]
              + [wl(1200 + i, False, "ok") for i in range(90)])
-    # workflow-wide the skipped rows dilute the rise; among runs where integration ran it is 0/40 -> 35/40
     open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
     open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
     for extra in (["--ran", "integration"], ["--job", "integration", "--end"], ["--job", "integration"]):
         r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json"] + extra)
         got = json.loads(r.stdout) if r.returncode == 0 else {}
-        if got.get("verdict_code") != "not_valid":
-            bad.append("compare %s: failures where the job ran rose 0/40 -> 35/40: %r" % (extra, got.get("verdict_code")))
+        if (got.get("verdict_code") != "not_valid" or got.get("failed_before") != got.get("failed_after")
+                or got.get("failed_before_job") != [0, 40] or got.get("failed_after_job") != [35, 40]):
+            bad.append("compare %s: failures where the job ran rose 0/40 -> 35/40, the workflow's didn't: %r"
+                       % (extra, {k: got.get(k) for k in ("verdict_code", "failed_before", "failed_after",
+                                                          "failed_before_job", "failed_after_job")}))
+    # Both named: the workload is the runs where both ran.
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--ran", "build",
+             "--job", "integration", "--end"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("verdict_code") != "not_valid" or got.get("failed_after_job") != [35, 40]:
+        bad.append("compare --ran with --job: the workload is the runs where both ran: %r" % got.get("verdict_code"))
     after = ([wl(2000 + i, True, "ok") for i in range(75)] + [wl(2100 + i, True, "cancelled") for i in range(25)]
              + [wl(2200 + i, False, "ok") for i in range(115)])
-    before = [wl(3000 + i, True, "ok", integ=95) for i in range(100)] + [wl(3100 + i, False, "ok") for i in range(115)]
+    # Workflow-wide 25 cancelled on both sides; among runs where integration ran, 0 -> 25.
+    before = ([wl(3000 + i, True, "ok", integ=95) for i in range(100)] + [wl(3100 + i, False, "ok") for i in range(90)]
+              + [dict(wl(3300 + i, False, "ok"), conclusion="cancelled") for i in range(25)])
     open(t + "/b2.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
     open(t + "/a2.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
     r = run([M, "compare", "--before", t + "/b2.jsonl", "--after", t + "/a2.jsonl", "--ran", "integration", "--json"])
     got = json.loads(r.stdout) if r.returncode == 0 else {}
-    if not (got.get("verdict_code") or "").endswith("_more_cancelled"):
+    if (not (got.get("verdict_code") or "").endswith("_more_cancelled")
+            or got.get("cancelled_before")[0] != got.get("cancelled_after")[0]):
         bad.append("compare --ran: cancellations among the workload's runs should qualify: %r %r"
                    % (got.get("verdict_code"), got.get("cancelled_after_job")))
+    # A small rise in failures doesn't hide a rise in cancellations: both are reported.
+    before = ([wl(6000 + i, True, "ok", integ=95) for i in range(99)] + [wl(6100, True, "timed_out")]
+              + [wl(6200 + i, False, "ok") for i in range(115)])
+    after = ([wl(7000 + i, True, "ok") for i in range(74)] + [wl(7100, True, "timed_out")]
+             + [wl(7200 + i, True, "cancelled") for i in range(25)] + [wl(7300 + i, False, "ok") for i in range(115)])
+    open(t + "/b4.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a4.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    r = run([M, "compare", "--before", t + "/b4.jsonl", "--after", t + "/a4.jsonl", "--ran", "integration", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("verdict_code") != "faster_more_failures_more_cancelled":
+        bad.append("compare --ran: more failures and more cancellations should both show: %r" % got.get("verdict_code"))
     before = [wl(4000 + i, True, "ok") for i in range(5)] + [wl(4100 + i, False, "ok") for i in range(24)] + [
         dict(wl(4200, False, "ok"), conclusion="failure")]
     after = [wl(5000 + i, True, "ok", integ=10) for i in range(5)] + [wl(5100, True, "timed_out")] + [
@@ -1957,6 +1985,13 @@ reps = {rows[0]["id"]: {"linux/r.xml": '<testsuite name="s"><testcase classname=
 got, r = _flaky_rows(rows, reps, "--short")
 if got is None:
     bad.append("flaky --short: tests in two legs with one name were refused\n" + r.stderr)
+# --short is per workflow: c.T in a.yml and other.T in b.yml are fine.
+rows = [_fr(0, 1, True, path="a.yml"), _fr(1, 2, True, path="b.yml")]
+got, r = _flaky_rows(rows, {rows[0]["id"]: {"r.xml": '<testsuite name="s"><testcase classname="c" name="T"/></testsuite>'},
+                            rows[1]["id"]: {"r.xml": '<testsuite name="s"><testcase classname="other" name="T"/></testsuite>'}},
+                     "--short")
+if got is None:
+    bad.append("flaky --short: one name in two workflows was refused\n" + r.stderr)
 # A workflow with failed.txt and no JUnit is named: it shows no pass to stand failures between.
 rows = [_fr(0, 1, True, path="a.yml"), _fr(1, 2, False, path="b.yml")]
 got, r = _flaky_rows(rows, {rows[0]["id"]: {"r.xml": _rep("p")}, rows[1]["id"]: {"failed.txt": "T\n"}})
