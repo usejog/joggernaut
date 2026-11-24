@@ -2190,9 +2190,9 @@ def failed_tests(folder, short=None):
                     if att:
                         att[0].add(name(fields[:-1]))
     if not found:
-        return None if not skipped else ([], [], skipped, set(), set(), {})
+        return None if not skipped else ([], [], skipped, set(), set(), {}, dirs)
     # Attempts with a report read (JUnit or failed.txt): a folder of coverage alone is no report.
-    return failed, passed - failed, skipped, txt, junit, {n: p - f for n, (f, p) in attempts.items()}
+    return failed, passed - failed, skipped, txt, junit, {n: p - f for n, (f, p) in attempts.items()}, dirs
 
 
 def cmd_flaky(a):
@@ -2219,7 +2219,7 @@ def cmd_flaky(a):
         return wf, (ev,) + (tuple(r.get("pull_request_bases") or []) or ("base unknown",) + pr_of(r))
     if not os.path.isdir(a.reports):
         die("%s isn't a folder" % a.reports)
-    reports, empty, not_junit, txt_names, junit_names = {}, [], [], set(), set()
+    reports, empty, not_junit, txt_names, junit_names, attempt_info = {}, [], [], set(), set(), {}
     short_of = {} if a.short else None
     for d in sorted(os.listdir(a.reports)):
         folder = os.path.join(a.reports, d)
@@ -2232,6 +2232,9 @@ def cmd_flaky(a):
                 " too, or move its folder out, so its evidence isn't lost" % (folder, d, a.input))
         got = failed_tests(folder, None if short_of is None else short_of.setdefault(
             by_id[int(d)].get("path") or by_id[int(d)].get("name") or "", {}))
+        if got is not None:
+            # Attempts with a report read, and attempt folders, for the complete-rerun list.
+            attempt_info[int(d)] = (set(got[5]), got[6])
         if got is None or (not got[0] and not got[1] and got[2]):
             empty.append(d)
             not_junit += [os.path.join(d, x) for x in (got or ([], [], []))[2]]
@@ -2318,10 +2321,12 @@ def cmd_flaky(a):
     several = sorted((b, sorted(n)) for b, n in reused.items() if len(n) > 1)
     # Reruns whose folder holds a report for every attempt: their passes aren't counted (a lost
     # or merged report can't be told apart), but a person can read them.
-    # The run's attempts: its listing's, or a later one its saved jobs show.
-    last = lambda r: max([r.get("run_attempt") or 1] + [j.get("run_attempt") or 1 for j in r.get("jobs", [])])
-    complete = sorted(rid for rid, rep_ in reports.items() if last(by_id[rid]) > 1
-                      and set(range(1, last(by_id[rid]) + 1)) <= set(rep_[2]))
+    # Listed as a rerun (so its pass isn't counted); its attempts are the latest its listing,
+    # its saved jobs or its attempt folders show, and each must have a report read.
+    last = lambda r, dirs: max([r.get("run_attempt") or 1] + [j.get("run_attempt") or 1 for j in r.get("jobs", [])]
+                               + list(dirs))
+    complete = sorted(rid for rid, (got_, dirs) in attempt_info.items() if (by_id[rid].get("run_attempt") or 1) > 1
+                      and set(range(1, last(by_id[rid], dirs) + 1)) <= got_)
     # A failed.txt name no JUnit report shows (a file at the run's root beside reports in a
     # leg's folder, a name spelled otherwise): its failures can't meet a pass of the same test.
     # Per workflow: a JUnit report of another workflow says nothing about these names.
