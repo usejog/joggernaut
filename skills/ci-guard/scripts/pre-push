@@ -1,0 +1,219 @@
+#!/bin/sh
+# pre-push: run the fast checks CI runs, before a push.
+# From Joggernaut's ci-guard skill (MIT): https://github.com/usejog/joggernaut
+#
+#   git config core.hooksPath .githooks   install it, once per clone
+#   .githooks/pre-push --all              every check on the working tree,
+#                                         by hand or from an agent's stop hook
+#
+# With core.hooksPath set, git stops running hooks in .git/hooks; this script
+# runs .git/hooks/pre-push itself if there is one (git-lfs installs one).
+#
+# The checks read the working tree, not the pushed commits: commit first and
+# push the branch you have checked out. CI keeps every check as a required
+# check. This hook is a shortcut, never the gate: never push with --no-verify.
+set -u
+
+# ---- Settings: edit these ------------------------------------------------
+# The branch a new branch is compared with, on the remote you push to.
+DEFAULT_BRANCH=main
+
+# The pushed refs to check, a shell pattern on the remote ref name. Other
+# refs (tags, notes) go through unchecked.
+CHECK_REFS='refs/heads/*'
+
+# On a machine many agents share, run each check through the machine's job
+# limiter or a lock, for example:  limit() { flock /tmp/checks.lock "$@"; }
+limit() { "$@"; }
+
+# One line per check: check NAME COMMAND [PATHSPEC...]. Use the commands CI
+# runs. The PATHSPECs are git pathspecs for the files the check reads; with
+# none, any change runs it. A check is skipped only when no pushed change
+# touches its PATHSPECs, so name what it can't read (here, prose) rather than
+# what it can: a generated type, a .vue file or a submodule then still runs it.
+# Formatters and linters can read prose too (Markdown code blocks), so they
+# get no exclusions here. Commands run under sh (dash on Ubuntu), from the
+# root of the working tree.
+checks() {
+  check format    'pnpm -s format:check'
+  check lint      'pnpm -s lint'
+  check typecheck 'pnpm -s typecheck' . ':(exclude)*.md' ':(exclude)*.mdx' ':(exclude)*.txt'
+}
+# ---- End of settings -----------------------------------------------------
+
+say() { printf 'pre-push: %s\n' "$*" >&2; }
+zero() { case $1 in *[!0]*) return 1 ;; esac; }
+oid() {
+  case $1 in '' | *[!0-9a-f]*) return 1 ;; esac
+  [ ${#1} -eq 40 ] || [ ${#1} -eq 64 ]
+}
+now() { date +%s; }
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/pre-push.XXXXXX") || exit 1
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 130' HUP INT TERM
+: >"$tmp/refs"
+: >"$tmp/ranges"
+
+# Git passes two arguments and the refs on stdin. Anything else (--all, a
+# stop hook's JSON) checks the working tree.
+if [ $# -ge 2 ] && [ "$1" != --all ]; then
+  mode=push remote=$1 url=$2
+  # All of stdin, once, kept for the chained hook. A failed write stops the
+  # push rather than passing it on a partial copy.
+  cat >"$tmp/refs" || { say "couldn't save git's input in $tmp"; exit 1; }
+else
+  mode=all remote='' url=''
+fi
+
+# Run the pre-push hook core.hooksPath turned off, with git's exact input.
+chain() {
+  [ "$mode" = push ] || return 0
+  legacy="$(git rev-parse --git-common-dir)/hooks/pre-push"
+  if [ -x "$legacy" ] && ! [ "$legacy" -ef "$0" ]; then
+    "$legacy" "$remote" "$url" <"$tmp/refs"
+  fi
+}
+
+if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then
+  say "no working tree here, so no checks; CI still checks the push"
+  chain
+  exit
+fi
+# Git runs the hook from the root of the working tree; --all may start anywhere.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+# Look objects up without fetching them. A partial clone fetches missing
+# objects on demand; a git too old for --no-lazy-fetch can't be stopped, so
+# in a partial clone it compares nothing and runs every check.
+fetches=''
+if git --no-lazy-fetch version >/dev/null 2>&1; then
+  g() { git --no-lazy-fetch "$@" </dev/null; }
+else
+  g() { git "$@" </dev/null; }
+  [ -z "$(git config --get extensions.partialClone)" ] || fetches=1
+  for k in $(git config --name-only --get-regexp '^remote\..*\.(promisor|partialclonefilter)$'); do
+    case $k in
+      *.partialclonefilter) fetches=1 ;;
+      *) ! git config --type=bool --get-all "$k" | grep -qx true || fetches=1 ;;
+    esac
+  done
+fi
+
+unknown=''     # a reason; once set it stays set, so one unknown ref runs all
+[ "$mode" = push ] || unknown='asked to check the working tree'
+head=$(g rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=''
+
+if [ "$mode" = push ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    case $line in
+      *' '*' '*' '*) ;;
+      *) unknown="unreadable input from git: $line"; continue ;;
+    esac
+    # The three rightmost fields: the local source can hold spaces (HEAD@{1 day ago}).
+    rsha=${line##* } rest=${line% *}
+    rref=${rest##* } rest=${rest% *}
+    lsha=${rest##* }
+    if ! oid "$lsha" || ! oid "$rsha"; then
+      unknown="unreadable input from git: $line"
+      continue
+    fi
+    zero "$lsha" && continue   # a delete: nothing to check
+    # shellcheck disable=SC2254 # CHECK_REFS is a pattern on purpose
+    case $rref in
+      $CHECK_REFS) ;;
+      *) say "not checked: $rref"; continue ;;
+    esac
+    if ! tip=$(g rev-parse -q --verify "$lsha^{commit}" 2>/dev/null); then
+      unknown="$rref: $lsha is not a commit"
+      continue
+    fi
+    [ "$tip" = "$head" ] ||
+      say "WARNING: the checks read the working tree at HEAD ${head:-(none)}; $rref gets $tip, which they don't check"
+    if [ -n "$fetches" ]; then
+      unknown="a partial clone, and this git would fetch to compare $rref"
+      continue
+    elif zero "$rsha"; then
+      # A new branch: compare with where it left the default branch.
+      bases=$(g merge-base --all "refs/remotes/$remote/$DEFAULT_BRANCH" "$tip" 2>/dev/null)
+      case $bases in
+        '' | *[!0-9a-f]*)
+          unknown="$rref is new and has no single merge-base with $remote/$DEFAULT_BRANCH"
+          continue ;;
+      esac
+      base=$bases
+    elif g cat-file -e "$rsha^{commit}" 2>/dev/null; then
+      base=$rsha   # what the remote has now, whatever its history
+    else
+      unknown="the remote's $rref is at $rsha, which this clone doesn't have (fetch first)"
+      continue
+    fi
+    printf '%s %s\n' "$base" "$tip" >>"$tmp/ranges" ||
+      { say "couldn't save the ranges in $tmp"; exit 1; }
+  done <"$tmp/refs"
+
+  [ -z "$unknown" ] || say "running every check: $unknown"
+  if [ -n "$fetches" ]; then
+    : # git status could fetch here too
+  elif [ -n "$(g status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    say "WARNING: uncommitted changes: the checks read them, but they aren't pushed"
+  fi
+  u=''   # ls-files reads .gitignore files, which a partial clone could fetch
+  [ -n "$fetches" ] ||
+    u=$(g ls-files -z --others --exclude-standard 2>/dev/null | tr '\0' '\n' | head -n 5 | tr '\n' ' ')
+  [ -z "$u" ] || say "WARNING: untracked files the checks may read, which aren't pushed: $u"
+  [ -z "$fetches" ] || say "a partial clone on this git: uncommitted and untracked files not looked for"
+fi
+
+failed=''
+check() {
+  name=$1 cmd=$2
+  shift 2
+  [ $# -gt 0 ] || set -- .
+  if [ -z "$unknown" ]; then
+    need=''
+    while read -r base tip; do
+      # --ignore-submodules=none: a gitlink counts even with ignore = all in .gitmodules
+      g diff-tree -r --quiet --no-renames --ignore-submodules=none "$base" "$tip" -- "$@"
+      case $? in
+        0) ;;
+        1) need=1; break ;;
+        *) need=1; say "$name: couldn't compare $base..$tip, so it runs"; break ;;
+      esac
+    done <"$tmp/ranges"
+    if [ -z "$need" ]; then
+      say "skip $name: the pushed commits change none of its files"
+      return 0
+    fi
+  fi
+  say "$name: queued"
+  rm -f "$tmp/started"
+  t0=$(now)
+  # shellcheck disable=SC2016 # expanded by the inner sh
+  if limit sh -c 'date +%s >"$1"; printf "pre-push: %s: running: %s\n" "$2" "$3" >&2; eval "$3"' \
+      sh "$tmp/started" "$name" "$cmd" </dev/null; then
+    result=ok
+  else
+    result=FAILED
+    failed="$failed $name"
+  fi
+  t1=$(now)
+  t=$(cat "$tmp/started" 2>/dev/null) || t=$t0
+  msg="$name: $result in $((t1 - t))s"
+  # date +%s counts whole seconds, so a 1s gap can be no wait at all
+  [ $((t - t0)) -lt 2 ] || msg="$msg, after $((t - t0))s waiting for a slot"
+  say "$msg"
+}
+
+if [ -z "$unknown" ] && ! [ -s "$tmp/ranges" ]; then
+  : # nothing pushed that needs a check
+else
+  checks
+fi
+
+if [ -n "$failed" ]; then
+  say "FAILED:$failed. Fix, commit and push again; never --no-verify."
+  exit 1
+fi
+chain

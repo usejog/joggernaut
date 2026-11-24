@@ -1187,6 +1187,10 @@ for case in sorted(glob.glob(E + "/ci-*/")):
     finally:
         shutil.rmtree(work)
 
+# ci-guard's pre-push template, in scratch git repositories under each shell present
+import selftest_hook  # noqa: E402
+selftest_hook.selftest(bad)
+
 for b in bad:
     print("FAIL " + b)
 print("selftest: %d problem(s)" % len(bad))
