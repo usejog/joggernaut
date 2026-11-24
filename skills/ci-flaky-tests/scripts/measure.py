@@ -1587,18 +1587,29 @@ def cmd_compare(a):
             work, wfb, wfa, started = " and ".join(ns), fb_, fa_, sel
     if work:
         res["failed_before_job"], res["failed_after_job"] = wfb, wfa
-        # Of the runs whose jobs list the named job(s), how many didn't run them: stopped by a
-        # failure or cancellation before them, or skipped by a condition. More after, beyond
-        # chance, means the runs that reached them may not be like the runs before, whatever the
-        # cause. Runs that never list them (other workflows' work) don't enter the count. A
-        # called workflow's job ("CALLER / JOB") counts as listed when its caller is, since
-        # GitHub lists a skipped caller as one job.
+        # Did fewer runs reach the named job(s) after? No one count catches every way runs can
+        # stop short (a failure or cancellation upstream, a condition, a missing matrix leg, a
+        # skipped caller) without other traffic diluting it, so four are kept, and a rise
+        # beyond chance in any of them qualifies the verdict:
+        #   listed: of the runs that list the job (or any caller of it), those that didn't run it;
+        #   ran:    of the runs where the --ran job ran, those that didn't run the --job one;
+        #   stopped: of all finished runs, those that didn't run it and had a job fail or cancelled;
+        #   all:    of all finished runs, those that didn't run it.
         finished = lambda rs: [r for r in rs if in_workflow(r) and r.get("conclusion") not in (None, "skipped", "neutral")]
-        lists = lambda r, n: any(j.get("name") in (n, caller_of(n)) for j in r.get("jobs", []))
-        listed = lambda r: all(lists(r, n) for n in names)
-        reach = lambda rs: (lambda w: (sum(1 for r in w if not ran_all(r, names)), len(w)))(
-            [r for r in finished(rs) if listed(r)])
-        res["not_reaching_before"], res["not_reaching_after"] = reach(rb), reach(ra)
+        prefixes = lambda n: [" / ".join(n.split(" / ")[:k]) for k in range(len(n.split(" / ")), 0, -1)]
+        lists = lambda r, n: any(j.get("name") in prefixes(n) for j in r.get("jobs", []) if j.get("name"))
+        missed = lambda r: not ran_all(r, names)
+        upstream = lambda r: missed(r) and any(j.get("conclusion") in FAILED + ("cancelled",) for j in r.get("jobs", []))
+        count = lambda w, f: (sum(1 for r in w if f(r)), len(w))
+        checks = [("listed", lambda rs: count([r for r in finished(rs) if all(lists(r, n) for n in names)], missed))]
+        if a.ran and a.job and a.ran != a.job:
+            checks.append(("ran", lambda rs: count([r for r in finished(rs) if ran_all(r, [a.ran])],
+                                                   lambda r: not ran_all(r, [a.job]))))
+        checks += [("stopped", lambda rs: count(finished(rs), upstream)), ("all", lambda rs: count(finished(rs), missed))]
+        res["reach_checks"] = [{"check": c, "missed_before": list(f(rb)), "missed_after": list(f(ra))} for c, f in checks]
+        res["not_reaching_before"], res["not_reaching_after"] = checks[0][1](rb), checks[0][1](ra)
+        rose = [x for x in res["reach_checks"] if fails_rose(tuple(x["missed_before"]), tuple(x["missed_after"]))]
+        res["fewer_reached_by"] = rose[0]["check"] if rose else None
     # Runs cancelled with no failure (a newer push, a concurrency group) are in neither the
     # timings nor the failure rate. A change that gets slow runs cancelled can look faster.
     cancelled = lambda rs: (sum(1 for r in rs if in_workflow(r) and r.get("conclusion") == "cancelled"
@@ -1693,12 +1704,15 @@ def cmd_compare(a):
                            " if the change makes slow runs get cancelled, the runs left are the fast ones"
                            % (cxa, na_, cxb, nb_))
     if work and res["verdict_code"] in qualify + tuple(q + "_more_cancelled" for q in qualify) \
-            and fails_rose(res["not_reaching_before"], res["not_reaching_after"]):
-        nb2, na2 = res["not_reaching_before"], res["not_reaching_after"]
+            and res["fewer_reached_by"]:
+        x = next(c for c in res["reach_checks"] if c["check"] == res["fewer_reached_by"])
         res["verdict_code"] += "_fewer_reached"
-        res["verdict"] += ("; but of the runs that list %s, more didn't run it after (%d of %d) than before (%d of %d):"
-                           " stopped upstream or skipped by a condition, so the runs that reached it may be the"
-                           " fast ones; name why before calling it faster" % ((" and ".join(names),) + na2 + nb2))
+        res["verdict"] += ("; but fewer runs reached %s after (%s: %d of %d missed it, against %d of %d before):"
+                           " stopped upstream, skipped by a condition or left out of a matrix, so the runs that"
+                           " reached it may be the fast ones; name why before calling it faster"
+                           % ((" and ".join(names), {"listed": "of the runs that list it", "ran": "of the runs where %s ran" % a.ran,
+                                                    "stopped": "stopped upstream, of all runs", "all": "of all runs"}[x["check"]])
+                              + tuple(x["missed_after"]) + tuple(x["missed_before"])))
     if graph_changed and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
         # One set a side, different sets: the change altered the jobs, or the mix of pull
         # requests did. Never a plain verdict: only the workflow's diff can say which.
@@ -1741,8 +1755,9 @@ def cmd_compare(a):
     if work:
         print("runs where %s ran: failed before %d of %d, after %d of %d" % ((work,) + wfb + wfa))
         print("runs where %s ran: cancelled before %d of %d, after %d of %d" % ((cwork,) + wcb + wca))
-        print("runs that list %s but didn't run it: before %d of %d, after %d of %d"
-              % ((" and ".join(names),) + res["not_reaching_before"] + res["not_reaching_after"]))
+        for x in res["reach_checks"]:
+            print("runs that missed %s (%s): before %d of %d, after %d of %d" % (
+                (" and ".join(names), x["check"]) + tuple(x["missed_before"]) + tuple(x["missed_after"])))
     print("cancelled runs, in neither the timings nor the failure rate: before %d of %d, after %d of %d%s"
           % (res["cancelled_before"] + res["cancelled_after"] + (
               " (a larger share after: slow runs being cancelled can pass for a speedup; say so)"

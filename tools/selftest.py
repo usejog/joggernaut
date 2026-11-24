@@ -1751,6 +1751,55 @@ with tempfile.TemporaryDirectory() as t:
             bad.append("compare --job %s --end: a condition skipping it on the slow runs should qualify: %r %r"
                        % (name, got.get("verdict_code"), got.get("not_reaching_after")))
 
+# Four ways runs miss the timed job after the change; each must qualify a faster verdict.
+#   moved:   12 failures a side, after rather than before the job (workflow failures unchanged);
+#   leg:     a dynamic matrix leaves the postgres leg out of the slow runs (--ran backend);
+#   nested:  a nested caller "CI / Python" is skipped, listed as one job;
+#   docs:    94 docs runs list the job as skipped on both sides, and slow runs are cancelled upstream.
+with tempfile.TemporaryDirectory() as t:
+    def shaped(i, slow, miss, shape):
+        t0 = i * 4000
+        be = _job("backend", t0, t0 + 1, t0 + (100 if slow else 10))
+        end = mm.ts(be["completed_at"]) - 1793000000
+        target = {"leg": "integration (postgres)", "nested": "CI / Python / integration"}.get(shape, "integration")
+        jobs = [be]
+        if shape == "leg":
+            jobs.append(_job("integration (sqlite)", end, end + 1, end + 11))
+        if not miss:
+            jobs.append(_job(target, end, end + 1, end + 11))
+        elif shape == "nested":
+            jobs.append(dict(_job("CI / Python", end, end, end), conclusion="skipped", steps=[], started_at=None))
+        elif shape in ("moved", "docs"):
+            be["conclusion"] = "failure" if shape == "moved" else "cancelled"
+            jobs.append(dict(_job(target, end, end, end), conclusion="skipped", steps=[], started_at=None))
+        x = _run(i, jobs, t0)
+        if shape == "moved" and not miss and slow and i % 1000 < 12:
+            jobs.append(dict(_job("report", end + 12, end + 13, end + 14), conclusion="failure"))
+            x["conclusion"] = "failure"
+        if miss and shape in ("moved", "docs"):
+            x["conclusion"] = be["conclusion"]
+        return x
+    def docs_run(i):
+        jobs = [_job("docs", i * 4000, i * 4000 + 1, i * 4000 + 5),
+                dict(_job("integration", i * 4000, i * 4000, i * 4000), conclusion="skipped", steps=[], started_at=None)]
+        return _run(i, jobs, i * 4000)
+    for shape, extra in (("moved", []), ("leg", ["--ran", "backend"]), ("nested", []), ("docs", [])):
+        target = {"leg": "integration (postgres)", "nested": "CI / Python / integration"}.get(shape, "integration")
+        before = [shaped(i, i >= 6, False, shape) for i in range(36)]
+        after = [shaped(1000 + i, False, False, shape) for i in range(6)] + [
+            shaped(1100 + i, True, True, shape) for i in range(30)]
+        if shape == "docs":
+            before += [docs_run(5000 + i) for i in range(94)]
+            after += [docs_run(6000 + i) for i in range(94)]
+        open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+        open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+        r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--job", target, "--end"] + extra)
+        got = json.loads(r.stdout) if r.returncode == 0 else {}
+        code = got.get("verdict_code") or ""
+        if code != "not_valid" and not code.endswith("_fewer_reached") and "_fewer_reached_" not in code:
+            bad.append("compare --job --end (%s): runs missing the job after should qualify: %r %r\n%s"
+                       % (shape, code, got.get("reach_checks"), r.stderr[-300:]))
+
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
 if mm.run_minutes(two) != 2 or abs(mm.run_minutes(two, True) - 2.0) > 1e-9:

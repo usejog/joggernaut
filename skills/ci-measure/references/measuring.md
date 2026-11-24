@@ -198,12 +198,15 @@ runs it times; `--label`, `--job` and `--cache` choose them. The failure rate
 it reports reads every finished run of the workflow and event in each file,
 whatever those filters say, so a filter can't hide or dilute a failure; a job
 named with `--job` or `--ran` is checked among its own runs as well (both
-named: each one's runs and the runs where both ran, the worst counting). Of the
-runs whose jobs list the named job (a called workflow's job: or its caller),
-when more didn't run it after than chance explains (stopped by a failure or
-cancellation before it, or skipped by a condition), a faster or mixed verdict
-ends in `_fewer_reached`: the runs that reached it may not be like the runs
-before, so say why. Runs that never list it don't enter the count. If
+named: each one's runs and the runs where both ran, the worst counting). When fewer
+runs reached the named job after than chance explains, a faster or mixed
+verdict ends in `_fewer_reached`: the runs that reached it may be the fast
+ones, so say why. Runs can miss a job in several ways (a failure or
+cancellation before it, a condition, a matrix leg left out, a skipped
+caller), and no one count sees them all without other traffic diluting it,
+so four are checked and any rise counts: of the runs that list the job (or
+a caller of it), of the runs where the `--ran` job ran, the runs stopped
+upstream of all runs, and of all runs. `--json` lists each (`reach_checks`). If
 more runs fail after than chance explains (a one-sided test at 5%), the
 result is not valid. If more fail after but within chance, the verdict says
 "median faster …, but more runs failed after": at a few runs a side the test
