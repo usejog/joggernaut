@@ -60,7 +60,11 @@ before it starts and every 50 runs, and stops when fewer than 300 requests
 are left (a default reserve, so other tools sharing the token keep some);
 it checks every 50 runs, not every request, so it can end under 300. Run it with `python3 scripts/measure.py <command> --help`.
 If Python isn't available, follow the same method by hand with `gh api`; the
-steps below say what each command computes.
+steps below say what each command computes. If the person's guard doesn't let
+an agent run the script's own GitHub calls, `split` reads GitHub's answers
+saved with `gh api` and starts no process (`references/measuring.md`, "When
+the agent may not run the script's GitHub calls"); a verdict still needs
+`fetch`'s file.
 
 ## Steps
 
@@ -104,6 +108,34 @@ the run-to-run noise. Compare the tests that ran on the branch with the
 baseline now (step 3.3): a lost test fails the change before it merges.
 If the change touched tests or test setup, run the break-it probe (step
 3.4) now too, and record which behaviour the changed test caught.
+
+**A pull request that changes CI can measure itself before it merges.** A
+`pull_request` run uses the workflow files of the pull request's merge ref,
+so its runs are the new CI. Check two exceptions first: a reusable workflow
+called as `owner/repo/...@ref` runs from that ref, not from the pull
+request, and a checkout that selects the head runs something else. When CI
+selects tests per pull request, runs of different pull requests did
+different work, so a total wait compares the selections, not the CI:
+
+1. **After side, with the person's yes** (runs cost minutes): fix the count
+   first (5, say), then push that many empty commits
+   (`git commit --allow-empty`), one at a time, each after the previous run
+   has finished, so none is cancelled by a concurrency group and none
+   overlaps another. An empty commit leaves the pull request's diff alone,
+   so the selection stays the same, unless the selector compares only the
+   latest push. Keep every run, failed and cancelled included.
+2. **Before side**: recent runs of the same jobs on the base branch.
+3. **Compare jobs whose work doesn't depend on the selection** (a full
+   typecheck, say), each by `compare --job NAME` and by its end on the
+   run's clock, `compare --job NAME --end`: the change can make one job
+   finish sooner and another later. Check with `MEASURE tests` that each job
+   ran the same tests on both sides. Report the total wait beside them as a
+   description only.
+
+These are still the branch's runs: label them **provisional**. Runs in a row
+on one pull request share its cache and its moment, and the window after the
+merge (step 3) is still the result. A squash merge drops the empty commits;
+under a merge-commit policy, ask before adding them.
 
 ### 3. After the change merges
 
@@ -154,14 +186,23 @@ If the change touched tests or test setup, run the break-it probe (step
    ```sh
    python3 scripts/measure.py compare --before .joggernaut/before-fix.jsonl \
      --after .joggernaut/after-fix.jsonl --workflow "CI" --event pull_request \
-     --base main --label ubuntu-latest [--job "test"]
+     --base main --label ubuntu-latest [--job "test"] [--ran "test"]
    ```
+
+   If the timed runs ran different sets of jobs within a side (a path
+   filter, an `if:`), it refuses a whole-run verdict and lists the sets: pass
+   `--ran JOB` (runs that ran that job, named in the baseline before you read
+   the after side) or `--job`. If each side ran one set but the sets differ,
+   the change altered the jobs, and it says so: step 3 (the tests by name)
+   is what shows nothing was lost.
 
    It prints the medians, the slowest runs (below 20 runs a side, the
    smaller side's slowest run and the larger side's typical slowest of that
    many; the slowest 5% from 20; provisional below 100), the Hodges-Lehmann
    estimate of the change with its exact 95% interval, the runs it left out
-   and why, the failure rate and the runner-minutes per run on each side, and
+   and why, the failure rate and the runner-minutes per run on each side (unrounded, and
+   rounded up per job as GitHub bills its hosted runners; price another
+   provider's runners at its own rate and rounding), and
    one verdict with the run count: **median faster** (with ", but more runs
    failed after" when the failure rate rose within chance), **median slower**,
    **mixed** (the runs tend one way, the median went the other or nowhere),

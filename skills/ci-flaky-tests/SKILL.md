@@ -66,6 +66,35 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    `.joggernaut/before.jsonl`, fetch it first as `references/measuring.md`
    says. `python3 scripts/measure.py split --in .joggernaut/before.jsonl` lists jobs that failed and then passed on a
    rerun of the same commit (`--json` lists them all; the text shows ten). Where CI keeps JUnit reports, name the tests.
+   A rerun is only one sign: a test that fails on a pull request is usually
+   followed by a new push, not a rerun, so a test failing on many pull
+   requests can show up there a few times. Count those too. Put each run's
+   test reports in a folder named by its run id
+   (`.joggernaut/reports/RUN_ID/`): the JUnit XML its jobs upload, or a
+   `failed.txt` of failing test names taken from the check annotations or
+   the log where there is no report. `gh run download` keeps one artifact
+   per name, so for a run with reruns download each artifact by id into its
+   own subfolder, or a passing attempt's report replaces the failed one's.
+   Read failed runs, and the runs around their failures, so a pass on both
+   sides of each failure can show. Then:
+
+   ```sh
+   python3 scripts/measure.py flaky --in .joggernaut/before.jsonl --reports .joggernaut/reports
+   ```
+
+   A failure stands alone when a report shows the test passing before it
+   and after it, with no other pull request's run between them failing it
+   (or failed with no report read): one pull request's own change fails the
+   test on that pull request only, and a broken base fails it on every run
+   until fixed. A test that stood alone on 3 or more pull requests (a
+   choice: two can share a change) is **recurring**, a candidate. A green
+   run with no report is no evidence (it may not have run the test). Before
+   treating a recurring test as flaky, read two or three of those pull
+   requests and check that none changed what the test covers (a snapshot or
+   schema test that many changes break isn't flaky), then reproduce it
+   (step 2). Its cost: the failed runs' runner-minutes, observed; the wait,
+   only where a rerun followed. Several tests failing in one run share that
+   run's cost.
    Rank by occurrences times the observed cost of each (as ci-diagnose's Reliability section gives it).
 2. **Reproduce before changing anything.** Run the one test many times,
    in a fixed batch, the way CI ran it, then under strain: fewer CPUs or a busy

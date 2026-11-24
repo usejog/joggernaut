@@ -153,9 +153,52 @@ in `references/measuring.md`.
      every task's output and result. Keep
      separate jobs where the separate status check is required or the tasks
      need different runners.
-   - **Drop a `needs` edge** only when the upstream job passes no output or
-     artifact and gates nothing. A deploy waiting on tests is a gate and
-     stays.
+   - **Drop a `needs` edge** A → B only when B reads none of A's outputs
+     and A gates nothing: no `needs.A.outputs`, `needs.A.result` or
+     `toJSON(needs)` in B, no artifact or cache A saves that B restores,
+     nothing A publishes that B uses (an image, a deploy, a database), and no
+     `if:` in B that relies on A's success. A deploy waiting on tests is a
+     gate and stays. Without the edge, B runs when A fails, which costs
+     minutes on failed runs; a required check that relied on B being skipped
+     must still fail: check it on a run where A fails.
+   - **Run independent steps side by side** in the job that finishes last,
+     when two or more long steps that aren't setup neither read what the
+     other writes (files, outputs, `$GITHUB_ENV`, services, ports) nor rely on
+     its cleanup. First choice: native parallel steps in the same job (a
+     `parallel:` group; each step in it runs in the background, with an
+     implicit wait at the group's end, and a failed step fails the job
+     there, GitHub docs). The job keeps its name, its check, its setup and
+     its runner, and adds no runner-minutes; it saves up to the shorter
+     group's time, less where the steps compete for the runner's cores,
+     memory or disk (check worker counts against the cores). On a
+     self-hosted or third-party runner, check with one run that it supports
+     the syntax. Second choice, when the runner has no room: a new job with
+     the same `needs`, which adds a runner, setup and minutes, and saves
+     min(moved, kept − d) a run, where d is how much longer the new job waits
+     and sets up than the old; it is a slowdown when d exceeds the kept time,
+     so work it out on each run. If the moved steps need something the kept
+     ones build, the new job depends on it and this arithmetic doesn't hold.
+     A new job can pass a required check's name while its own tests fail:
+     find the required checks (`rules/branches/BRANCH`, branch protection,
+     and the `merge_group` checks), make the new job's result reach one
+     through a gate that already exists and fails unless every job it needs
+     ended `success`, and check on the pull request that a failure, a skip
+     and a cancellation of the new job each block the merge. Where no such
+     gate exists, making a job required is a repository setting: list it
+     for a person instead. Either way, compare the tests that ran, by name.
+   - **Remove a redundant gate job.** A chain of gate jobs at the end of the
+     slowest path (a called workflow's last check job, then the caller's)
+     pays queue, setup and a gap per gate. Keep the one a required check
+     names. Fold another into it, or remove it, only when: the gate that
+     stays enforces everything the removed one did (a gate can check that a
+     leg ran or wasn't skipped, not only results: move that logic, don't
+     drop it); no required check, ruleset or `merge_group` check names the
+     removed one; and no other caller of a changed reusable workflow relies
+     on it (search every workflow that calls it). Then check on the pull
+     request that a failed, a skipped and a cancelled leg each still block
+     the merge. Make the gate that stays cheap: no checkout, no toolchain.
+     Moving it to another runner type is for a person, as is changing which
+     checks are required.
    - **Trim checkout.** The default checkout fetches one commit (checkout
      docs); keep it where history isn't read. Where it is (versioning,
      changed-file lists), first set the depth, refs and tags the step needs
@@ -216,6 +259,15 @@ This is reasoning from how CI works, not a measurement.
   dropping it lets the downstream job start sooner, by up to the gap
   between that job and the next-latest one it waits for, and shortens the
   wait only if that path is the slowest.
+- Two groups of steps that don't depend on each other, run one after the
+  other, take the sum of their times; run at once, the longer of the two.
+  So the saving is at most the shorter group's time. In a new job, the new
+  job's queue and setup run at the same time as the old job's and cost
+  something only beyond the old job's own, once the new job finishes last.
+- Every job on the slowest path pays its queue, setup and the gap before
+  it, whatever its work. A gate job does a second of work, so a chain of
+  them at the end costs their overhead; one gate that checks everything
+  costs it once.
 - A downloaded binary skips the compile; whether that is faster here shows
   in the step seconds before and after.
 

@@ -130,6 +130,7 @@ import importlib.util
 spec = importlib.util.spec_from_file_location("measure", M)
 mm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mm)
+mm.proc()  # measure.py imports subprocess on first use; the fakes below replace its run
 if mm.fails_rose((0, 20), (3, 23)):
     bad.append("fails_rose: 0/20 against 3/23 is within chance (Fisher p = 0.14)")
 try:
@@ -870,7 +871,10 @@ for text, want in (("Verdict: FAIL\nStopped running: test_refund_rounding\nGet a
                    ("Verdict: FAIL\nStopped running: test_refund_rounding_new", 1),
                    ("Verdict: FAIL\nStopped running: test_other\ntest_refund_rounding still ran.", 1),
                    ("Verdict: FAIL\nStopped running: test_other (test_refund_rounding still ran)", 1),
-                   ("Verdict: FAIL\nStopped running: `report::billing::tests.test_billing::test_refund_rounding`", 0)):
+                   ("Verdict: FAIL\nStopped running: `report::billing::tests.test_billing::test_refund_rounding`", 0),
+                   ("Verdict: FAIL\nStopped running: tests.test_billing.test_refund_rounding", 0),
+                   ("Verdict: FAIL\nStopped running: tests/test_billing.py::test_refund_rounding", 0),
+                   ("Verdict: FAIL\nStopped running: tests.test_billing.test_refund_rounding_new", 1)):
     d = tempfile.mkdtemp()
     open(os.path.join(d, "verdict.md"), "w").write(text)
     r = run([E + "/ci-measure/check.py", d])
@@ -1164,6 +1168,278 @@ with tempfile.TemporaryDirectory() as t:
     if ex is None or os.path.exists(path) or "more than one run in 20" not in err:
         bad.append("fetch: a baseline with most runs unreadable was written\n" + so + err)
 mm.sleep = mm.time.sleep
+
+
+# ---- v0.3 fixtures
+
+# Offline reading. GitHub's own answers saved in a folder read the same as fetch's file;
+# a run whose jobs can't be read whole is named; a startup failure lists no jobs and stays.
+def _raw(rec):
+    """A fetched record back in the shape GitHub answers with."""
+    r = {k: rec.get(k) for k in ("id", "name", "path", "event", "head_branch", "head_sha", "run_attempt",
+                                 "conclusion", "created_at", "run_started_at", "updated_at")}
+    r["status"] = "completed"
+    r["head_commit"] = {"message": rec.get("head_message") or ""}
+    r["head_repository"] = {"full_name": rec.get("head_repo")}
+    bases = rec.get("pull_request_bases") or []
+    r["pull_requests"] = [{"number": n, "base": {"ref": bases[0] if bases else "main"}} for n in rec.get("pull_requests") or []]
+    jobs = [dict(j, run_id=rec["id"]) for j in rec["jobs"]]
+    return r, jobs
+
+
+def _save_dir(folder, recs, slurp_every=2):
+    os.makedirs(folder, exist_ok=True)
+    raws = [_raw(x) for x in recs]
+    json.dump([{"total_count": len(raws), "workflow_runs": [r for r, _ in raws]}], open(folder + "/runs.json", "w"))
+    for i, (r, jobs) in enumerate(raws):
+        pages = [{"total_count": len(jobs), "jobs": jobs[:3]}, {"total_count": len(jobs), "jobs": jobs[3:]}]
+        with open(folder + "/jobs-%d.json" % r["id"], "w") as f:
+            # Both shapes gh prints: --slurp's array, and pages one after another.
+            f.write(json.dumps(pages) if i % slurp_every == 0 else "".join(json.dumps(x) for x in pages))
+
+
+NO_PROCESS = r"""
+import sys, runpy
+BANNED = ("subprocess.Popen", "os.system", "os.posix_spawn", "os.fork", "os.exec", "os.spawn", "os.forkpty")
+def hook(ev, args):
+    if (ev == "import" and args[0] == "subprocess") or ev in BANNED:
+        raise SystemExit("PROCESS: " + ev)
+sys.addaudithook(hook)
+script = sys.argv[1]
+sys.argv = [script] + sys.argv[2:]
+try:
+    runpy.run_path(script, run_name="__main__")
+finally:
+    if "subprocess" in sys.modules:
+        print("PROCESS: subprocess was imported", file=sys.stderr)
+"""
+with tempfile.TemporaryDirectory() as t:
+    src = E + "/ci-diagnose/repo/ci-history/runs.jsonl"
+    recs = [json.loads(l) for l in open(src) if l.strip()]
+    _save_dir(t + "/saved", recs)
+    want = run([M, "split", "--in", src, "--json"]).stdout
+    got = subprocess.run([sys.executable, "-c", NO_PROCESS, M, "split", "--runs-dir", t + "/saved", "--json"],
+                         capture_output=True, text=True)
+    if got.returncode != 0 or "PROCESS" in got.stderr or json.loads(got.stdout or "{}") != json.loads(want):
+        bad.append("split --runs-dir: should match the JSONL file and start no process\n" + got.stderr[-2000:])
+    for args in (["split", "--runs-dir", t + "/nothing-here"], ["split", "--runs-dir", t + "/junk"]):
+        os.makedirs(t + "/junk", exist_ok=True)
+        open(t + "/junk/x.json", "w").write("{not json")
+        r = subprocess.run([sys.executable, "-c", NO_PROCESS, M] + args, capture_output=True, text=True)
+        if r.returncode == 0 or "PROCESS" in r.stderr or "measure.py:" not in r.stderr:
+            bad.append("split --runs-dir: a bad folder should stop with a message and no process\n" + r.stderr)
+    r = run([M, "compare", "--before", t + "/saved", "--after", t + "/saved"])
+    if r.returncode == 0 or "compare reads only files fetch wrote" not in r.stderr:
+        bad.append("compare: a folder of saved answers must be refused\n" + r.stderr)
+    # A rerun saved without filter=all (latest attempt only) is named; an empty startup failure stays.
+    extra = copy.deepcopy(recs[:3])
+    extra[0]["run_attempt"] = 2
+    for j in extra[0]["jobs"]:
+        j["run_attempt"] = 2
+    extra[1]["conclusion"], extra[1]["jobs"] = "startup_failure", []
+    _save_dir(t + "/edge", extra)
+    os.remove(t + "/edge/jobs-%d.json" % extra[1]["id"])
+    open(t + "/edge/empty.json", "w").write(json.dumps({"total_count": 0, "jobs": []}))
+    r = run([M, "split", "--runs-dir", t + "/edge", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if ("only attempt 2's jobs saved" not in r.stderr or got.get("runs") != 2
+            or got.get("ended_runs") != 2 or got.get("passed_runs") != 1):
+        bad.append("split --runs-dir: a latest-attempt-only rerun should be named, a startup failure kept\n"
+                   + r.stdout[:300] + r.stderr)
+src_text = open(M).read()
+for phrase in ("auth login", "auth token", "auth status"):
+    if phrase in src_text:
+        bad.append("measure.py: holds %r, which reads like an auth command to an agent guard" % phrase)
+if re.search(r"^import subprocess|^from subprocess", src_text, re.M):
+    bad.append("measure.py: imports subprocess at the top; reading saved runs must not load it")
+
+
+# The runner's own steps keep their bucket whatever --setup-pattern says.
+_steps = [("Set up job", 10), ("Install deps", 20), ("Test", 30), ("Post Install deps", 5), ("Complete job", 1)]
+_t = 0
+_sj = {"started_at": _at(0), "created_at": _at(0), "steps": []}
+for n, d in _steps:
+    _sj["steps"].append({"name": n, "started_at": _at(_t), "completed_at": _at(_t + d)})
+    _t += d
+_sj["completed_at"] = _at(_t)
+got = mm.job_split(_sj, "install")
+if (got["setup"], got["running"], got["cleanup"]) != (30, 30, 6):
+    bad.append("job_split: Set up job, Post and Complete job must keep their buckets under a pattern: %r" % got)
+
+
+# Reusable workflows with gates: a caller job "checks" calls Static, Test and a trailing
+# Validation gate; the caller's "verify" gate needs checks. The path runs through Static,
+# the gates are the tail, Static is the last job that did work, and without the gates each
+# run ends 34 s sooner. Runs where verify does real work have no tail: they count as 0.
+def _steps_job(name, queued, started, steps, labels=("ubuntu-latest",)):
+    t, out = started, []
+    for n, d in steps:
+        out.append({"name": n, "conclusion": "success", "started_at": _at(t), "completed_at": _at(t + d)})
+        t += d
+    return {"id": abs(hash((name, queued, started))) % 10 ** 9, "name": name, "run_attempt": 1,
+            "conclusion": "success", "created_at": _at(queued), "started_at": _at(started),
+            "completed_at": _at(t), "labels": list(labels), "runner_name": "r", "steps": out}
+
+
+def _gated(i, verify_work=1):
+    t0 = i * 4000
+    return _run(i, [
+        _steps_job("checks / Static", t0 + 1, t0 + 3, [("Set up job", 2), ("Run actions/checkout@v4", 5),
+                                                         ("Typecheck app", 140), ("Typecheck api", 76),
+                                                         ("Test exported", 58), ("Complete job", 0)]),
+        _steps_job("checks / Test", t0 + 1, t0 + 3, [("Set up job", 2), ("Test", 150)]),
+        _steps_job("checks / Validation", t0 + 284, t0 + 294, [("Set up job", 2), ("Check results", 1)]),
+        _steps_job("verify", t0 + 297, t0 + 314, [("Set up job", 2), ("Check results", verify_work)]),
+    ], t0)
+
+
+with tempfile.TemporaryDirectory() as t:
+    open(t + "/g.jsonl", "w").write("".join(json.dumps(_gated(i)) + "\n" for i in range(6)))
+    got = json.loads(run([M, "split", "--in", t + "/g.jsonl", "--json"]).stdout)
+    chain = got["slowest_path_chains"][0]["jobs"]
+    if chain != ["checks / Static", "checks / Validation", "verify"]:
+        bad.append("split: the reusable-workflow path should be Static -> Validation -> verify: %r" % chain)
+    if (got["gate_tails"] != [{"jobs": ["checks / Validation", "verify"], "runs": 6}]
+            or got["gate_ceiling_median"] != 33 or got["last_working_jobs"] != [["checks / Static", 6]]):
+        bad.append("split: gates at the end and the last job that did work: %r %r %r"
+                   % (got["gate_tails"], got["gate_ceiling_median"], got["last_working_jobs"]))
+    st = [x["step"] for x in got["last_working_job_steps"]["checks / Static"]]
+    if st[:5] != ["Set up job", "Run actions/checkout@v4", "Typecheck app", "Typecheck api", "Test exported"]:
+        bad.append("split: the last working job's steps, in order: %r" % st)
+    text = run([M, "split", "--in", t + "/g.jsonl"]).stdout
+    if "last job that did work (before the candidates): checks / Static (6 runs)" not in text:
+        bad.append("split: the text should name the last job that did work\n" + text)
+    mixed = [_gated(i) for i in range(5)] + [_gated(10 + i, verify_work=30) for i in range(6)]
+    open(t + "/m.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in mixed))
+    got = json.loads(run([M, "split", "--in", t + "/m.jsonl", "--json"]).stdout)
+    if got["gate_ceiling_median"] != 0 or got["gate_ceiling_runs"] != 11:
+        bad.append("split: runs with no gate tail should count as 0: %r over %r"
+                   % (got["gate_ceiling_median"], got["gate_ceiling_runs"]))
+    # Steps that ran side by side (native parallel steps) are marked: they don't add up.
+    par = _gated(30)
+    st = par["jobs"][0]["steps"]
+    # Test exported ran beside Typecheck api (as native parallel steps do); the job's end is unchanged.
+    st[4]["started_at"] = st[3]["started_at"]
+    open(t + "/p.jsonl", "w").write(json.dumps(par) + "\n")
+    got = json.loads(run([M, "split", "--in", t + "/p.jsonl", "--json"]).stdout)
+    if not got["last_working_job_steps_overlap"].get("checks / Static"):
+        bad.append("split: overlapping steps should be marked: %r" % got["last_working_job_steps_overlap"])
+
+
+# A rerun of failed jobs: both attempts' rows, as GitHub lists them with filter=all. The
+# reused build is one execution (its minutes once) and gives no wait figure (#21).
+def _rerun_run(i):
+    t0 = i * 4000
+    b1 = dict(_job("build", t0, t0 + 10, t0 + 100), run_attempt=1)
+    t1 = dict(_job("test", t0 + 100, t0 + 110, t0 + 200, conclusion="failure"), run_attempt=1)
+    b2 = dict(b1, run_attempt=2, created_at=_at(t0 + 301), id=b1["id"] + 1)
+    t2 = dict(_job("test", t0 + 301, t0 + 310, t0 + 400), run_attempt=2)
+    r = _run(i, [b1, t1, b2, t2], t0)
+    r["run_attempt"], r["run_started_at"] = 2, _at(t0 + 300)
+    return r
+
+
+rr = _rerun_run(0)
+if mm.run_minutes(rr) != 6 or abs(mm.run_minutes(rr, True) - 270 / 60.0) > 1e-9:
+    bad.append("run_minutes: a reused job must count once: %r rounded, %r exact"
+               % (mm.run_minutes(rr), mm.run_minutes(rr, True)))
+with tempfile.TemporaryDirectory() as t:
+    plain = _run(1, [_job("build", 4000, 4010, 4100), _job("test", 4100, 4110, 4200)], 4000)
+    open(t + "/r.jsonl", "w").write(json.dumps(rr) + "\n" + json.dumps(plain) + "\n")
+    got = json.loads(run([M, "split", "--in", t + "/r.jsonl", "--json"]).stdout)
+    row = [x for x in got["jobs"] if x["job"] == "CI / build"][0]
+    if row["waiting"] != 10 or row["wait_runs"] != 1 or row["runs"] != 2:
+        bad.append("split: a reused job's 0 wait must not count (#21): %r" % row)
+    if got["passed_after_rerun"] != 1:
+        bad.append("split: a run that passed on a rerun should be counted: %r" % got["passed_after_rerun"])
+
+
+# When most runs fail, the report leads with it.
+with tempfile.TemporaryDirectory() as t:
+    rs = []
+    for i in range(10):
+        x = _run(i, [_job("test", i * 4000, i * 4000 + 5, i * 4000 + 100)], i * 4000)
+        if i >= 4:
+            x["conclusion"] = "failure"
+        rs.append(x)
+    rs.append(dict(_run(20, [_job("test", 80000, 80005, 80100)], 80000), conclusion="cancelled"))
+    open(t + "/f.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in rs))
+    first = run([M, "split", "--in", t + "/f.jsonl"]).stdout.splitlines()[0]
+    if not first.startswith("MOST RUNS FAIL: 4 of 10 runs that passed or failed passed (40%)") or "1 cancelled" not in first:
+        bad.append("split: most runs failing should lead the report: %r" % first)
+
+
+# compare and the jobs each run ran (#19). A run's work, as the jobs list shows it, is the
+# set of jobs it ran. build + integration against build alone must never pass for a speedup
+# unnoticed; runs that ran different sets within a side need --ran or --job.
+def _work(i, integration, t0=None, integ=90):
+    t0 = i * 4000 if t0 is None else t0
+    jobs = [_job("build", t0, t0 + 2, t0 + 100)]
+    if integration:
+        jobs.append(_job("integration", t0 + 100, t0 + 102, t0 + 100 + integ))
+    return _run(i, jobs, t0)
+
+
+with tempfile.TemporaryDirectory() as t:
+    def side(name, rows):
+        open(t + "/" + name, "w").write("".join(json.dumps(x) + "\n" for x in rows))
+        return t + "/" + name
+    b = side("b.jsonl", [_work(i, True) for i in range(5)])
+    a_ = side("a.jsonl", [_work(100 + i, False) for i in range(5)])
+    r = run([M, "compare", "--before", b, "--after", a_, "--label", "ubuntu-latest", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if not got.get("jobs_changed") or "jobs changed" not in got.get("verdict", ""):
+        bad.append("compare: a side that stopped running a job must say the jobs changed\n" + r.stdout + r.stderr)
+    b = side("b2.jsonl", [_work(i, True) for i in range(5)] + [_work(10 + i, False) for i in range(3)])
+    a_ = side("a2.jsonl", [_work(100 + i, True, integ=60) for i in range(5)] + [_work(110 + i, False) for i in range(5)])
+    r = run([M, "compare", "--before", b, "--after", a_, "--label", "ubuntu-latest"])
+    if r.returncode == 0 or "ran different sets of jobs" not in r.stderr:
+        bad.append("compare: runs with different job sets within a side must refuse a whole-run verdict\n" + r.stdout + r.stderr)
+    r = run([M, "compare", "--before", b, "--after", a_, "--label", "ubuntu-latest", "--ran", "integration", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("before_runs") != 5 or got.get("after_runs") != 5 or got.get("verdict_code") != "faster":
+        bad.append("compare --ran: should time the 5 runs a side that ran integration\n" + r.stdout + r.stderr)
+    r = run([M, "compare", "--before", b, "--after", a_, "--label", "ubuntu-latest", "--job", "integration",
+             "--end", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("before_median") != 190 or got.get("after_median") != 160:
+        bad.append("compare --end: should time from the run's start to the job's end\n" + r.stdout + r.stderr)
+    r = run([M, "compare", "--before", b, "--after", a_, "--end"])
+    if r.returncode == 0:
+        bad.append("compare: --end without --job should be refused")
+
+
+# flaky: a failure stands alone between two reports where the test passed, on one pull
+# request; a broken base fails a stretch of pull requests together; green runs with no
+# report are no evidence; a failed run with no report joins the stretch.
+def _flaky(seq):
+    with tempfile.TemporaryDirectory() as t:
+        rows = []
+        for i, (pr, st) in enumerate(seq):
+            x = _run(i, [_job("test", i * 100, i * 100 + 2, i * 100 + 50)], i * 100)
+            x["pull_requests"] = [pr]
+            x["conclusion"] = "failure" if st in ("f", "r") else "success"
+            rows.append(x)
+            if st in ("p", "f"):
+                os.makedirs(t + "/rep/%d" % x["id"])
+                open(t + "/rep/%d/report.xml" % x["id"], "w").write(
+                    '<testsuite name="s"><testcase classname="c" name="T">%s</testcase>'
+                    '<testcase classname="c" name="other"/></testsuite>' % ("<failure/>" if st == "f" else ""))
+        open(t + "/runs.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in rows))
+        r = run([M, "flaky", "--in", t + "/runs.jsonl", "--reports", t + "/rep", "--short", "--json"])
+        got = json.loads(r.stdout) if r.returncode == 0 else {"tests": []}
+        return ([x for x in got["tests"] if x["test"] == "T"] or [{}])[0], r
+
+
+for seq, alone, label in (
+        ([(1, "p"), (2, "f"), (3, "p"), (4, "f"), (5, "p"), (6, "f"), (7, "p")], 3, "recurring on 3 pull requests"),
+        ([(1, "p"), (2, "f"), (3, "f"), (4, "f"), (5, "f"), (6, "p")], 0, "a broken base"),
+        ([(1, "p"), (2, "f"), (3, "p"), (2, "f"), (4, "p"), (2, "f"), (5, "p")], 1, "one pull request"),
+        ([(1, "p"), (2, "f"), (3, "g"), (4, "f"), (5, "g"), (6, "f"), (7, "p")], 0, "green runs with no report"),
+        ([(1, "p"), (2, "f"), (3, "r"), (4, "p"), (5, "f"), (6, "p"), (7, "f"), (8, "p")], 2, "an unread failed run")):
+    got, r = _flaky(seq)
+    if got.get("alone_on_pull_requests") != alone or got.get("recurring") != (alone >= 3):
+        bad.append("flaky: %s should stand alone on %d pull requests: %r\n%s" % (label, alone, got, r.stderr))
 
 
 # every check.py fails on its untouched sample (the planted cause is there)

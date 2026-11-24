@@ -11,7 +11,9 @@ text = open(p).read()
 fail = []
 # The field must be the test's name, short or qualified, and nothing else.
 NAMES = {"test_refund_rounding", "tests.test_billing::test_refund_rounding",
-         "report::billing::tests.test_billing::test_refund_rounding"}
+         "report::billing::tests.test_billing::test_refund_rounding",
+         # The dotted and the pytest path spellings of the same test (#20).
+         "tests.test_billing.test_refund_rounding", "tests/test_billing.py::test_refund_rounding"}
 fields = [m.strip().strip("`").strip() for m in re.findall(r"^Stopped running:(.*)$", text, re.M)]
 if not any(f in NAMES for f in fields):
     fail.append("no `Stopped running:` line whose field is test_refund_rounding")

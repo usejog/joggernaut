@@ -9,6 +9,35 @@ there and adds that folder to `.git/info/exclude`, so nothing gets committed.
 Needs Python 3.9+ and the GitHub CLI, logged in (`gh auth status`). If `gh`
 isn't logged in, stop and ask the person to run `gh auth login`.
 
+## When the agent may not run the script's GitHub calls
+
+Some teams guard what their agents run. `fetch` and `cachelog` run `gh`, and
+`fetch` runs `git` to check that its output isn't tracked. Everything else
+only reads files. To describe runs without letting the script call
+anything, save GitHub's own answers with plain GET calls you run yourself,
+then point `split` (or `flaky`) at the folder: with a folder, the script
+never imports `subprocess` and starts no process. Whether a guard may allow
+the file at all is the person's policy; ask, and don't work around a guard.
+
+```sh
+mkdir -p .joggernaut/saved   # untracked: git ls-files .joggernaut must list nothing
+gh api --method GET --paginate --slurp repos/OWNER/NAME/actions/workflows/ci.yml/runs \
+  -f event=pull_request -f status=completed -f per_page=100 \
+  -f created='START..YYYY-MM-DDTHH:MM:SSZ' > .joggernaut/saved/runs.json   # a few days; every page in one file
+# then, for each run id in it (filter=all keeps the attempts before a rerun):
+gh api --method GET --paginate --slurp repos/OWNER/NAME/actions/runs/RUN_ID/jobs \
+  -f filter=all -f per_page=100 > .joggernaut/saved/jobs-RUN_ID.json
+MEASURE split --runs-dir .joggernaut/saved
+```
+
+Files are told apart by what they hold, so names don't matter. A run with
+no jobs saved, fewer jobs than its pages' count, or only its latest
+attempt's jobs is left out and named; more than one in 20 stops it. This is
+for describing runs. `compare` refuses a folder: a saved listing can't show
+the query that filled it (a listing of successes alone is complete by its
+own count, with every failure missing), so a verdict reads only files
+`fetch` wrote.
+
 ## Baseline, before any change
 
 If `git ls-files .joggernaut` lists anything, the folder is tracked: stop
@@ -111,10 +140,25 @@ fetch it only once it has ended and every run created in it has finished;
 finish keeps the fastest of the window and can pass for a speedup with no
 change at all.
 
-`compare` times every successful comparable run in each file, whatever jobs
-it ran. If `split` shows groups and the two sides hold them in different
-mixes (more docs-only pushes after, say), the medians move with the mix:
-say so, and time the job the fix changes with `--job`.
+Runs that ran different jobs did different work. `compare` reads a run's
+work, as far as the jobs list shows it, as the set of jobs it ran (names
+with counts, so matrix legs count):
+
+- one set on both sides: whole runs compare as before;
+- one set on each side, different between them: the change altered the
+  jobs (folded, split or renamed them). The whole runs compare, and the
+  output says the jobs changed: the tests compared by name (below) are what
+  show no work was lost;
+- several sets within a side (a path filter, an `if:`): `compare` refuses a
+  whole-run verdict, since the median would move with the mix, and lists
+  each side's sets. Name the workload with `--ran JOB` (only runs that ran
+  that job; write it into the baseline before reading the after side), or
+  time one job with `--job`.
+
+The same jobs can still run different tests (per-pull-request test
+selection); only `MEASURE tests` shows that. `--job NAME --end` times that
+job from the run's start to its end, on the run's clock (its queue and the
+jobs before it count), not the job's own duration.
 
 `compare` needs at least 5 successful comparable runs a side. Those are the
 runs it times; `--label`, `--job` and `--cache` choose them. The failure rate
