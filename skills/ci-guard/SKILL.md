@@ -116,19 +116,29 @@ in `references/measuring.md`.
    hook tool, its own command for the same checks:
 
    ```sh
-   case $(tr -d ' \t\r\n') in *'"stop_hook_active":true'*) exit 0 ;; esac
-   hook=$(git rev-parse --path-format=absolute --git-path hooks/pre-push 2>/dev/null) || exit 0
+   python3 -c 'import json, sys; sys.exit(json.load(sys.stdin).get("stop_hook_active") is not True)' \
+     2>/dev/null && exit 0
+   top=$(git rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] && cd "$top" || exit 0
+   dir=$(git config --path --get core.hooksPath)
+   if [ -n "$dir" ]; then hook=$dir/pre-push
+   else hook=$(git rev-parse --git-path hooks/pre-push) || exit 0
+   fi
+   case $hook in /*) ;; *) hook=./$hook ;; esac
    [ -x "$hook" ] || exit 0
    "$hook" --all >&2 || exit 2
    ```
 
-   `git rev-parse --git-path hooks/pre-push` takes path relocation into
-   account (git docs); it gave the `core.hooksPath` folder, relative or
-   absolute, from any folder and worktree, on git 2.54. That matters
-   because the hook runs wherever Claude last changed to. `--all` checks
-   the working tree from its root. It lets the agent stop when `stop_hook_active` is true, so a
-   failure it can't fix doesn't hold it forever, and outside a repository
-   or without the hook file. On a failure, it
+   It reads `stop_hook_active` as JSON, the top-level field only, and lets
+   the agent stop when it is true, so a failure it can't fix doesn't hold it
+   forever; anything else runs the checks. It finds the hook from the root
+   of the working tree, because the hook runs wherever Claude last changed
+   to: `core.hooksPath` as configured (a relative one is taken from the
+   root, git-config docs), or else `git rev-parse --git-path
+   hooks/pre-push`, which finds `.git/hooks` in a linked worktree too. It
+   works on git 2.9 and later: `--path-format` needs git 2.31, and before
+   2.10 `--git-path` ignored `core.hooksPath` (git's release notes). `--all`
+   checks the working tree from its root. It does nothing outside a
+   repository or without the hook file. On a failure, it
    exits 2 with the failed check's output on stderr: Claude Code's hook docs
    say that keeps Claude working and shows it the message. Offer; don't add
    unasked.
@@ -189,7 +199,9 @@ round, a broken working tree can stop a good push of another branch.
 **Hooks and worktrees.** `core.hooksPath` replaces `.git/hooks`: git looks
 for hooks only in that folder (git-config docs), so a hook in `.git/hooks`
 stops running. The template runs `.git/hooks/pre-push` itself, with git's
-exact input, after its own checks pass (git-lfs installs one there). For
+exact input, after its own checks pass (git-lfs installs one there), unless
+that file is a byte-for-byte copy of the template, which would only run the
+same checks again. For
 each other executable hook there (git-lfs also installs post-checkout,
 post-commit and post-merge), commit a wrapper of the same name in
 `.githooks` that runs it, or list it for the person. A relative
@@ -236,7 +248,10 @@ can contain spaces), and never let one ref's line reset a flag another set.
   may be tracked. A relative path in an extended config resolves from the
   config that declares it (TypeScript docs), so in a shared base every
   project would share one file: set it in each config, or in the base as
-  `${configDir}/...`, which resolves per project (TypeScript 5.5). TypeScript 7's
+  `${configDir}/...`, which resolves per project (TypeScript 5.5). That is
+  the config's folder, so two configs in one folder (`tsconfig.app.json`
+  and `tsconfig.test.json`) would still share one file: give each of those
+  its own file name, in its own config. TypeScript 7's
   native `tsc` (and `tsgo`, its preview) supports incremental builds too
   (typescript-go README), and `tsc -b` keeps build info for each project.
   Time the hook cold and warm, before and after.
