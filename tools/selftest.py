@@ -2486,15 +2486,16 @@ with tempfile.TemporaryDirectory() as t:
                 or v.get("timed_with_failed_job") != [[1, 5], [1, 5]]:
             bad.append("compare #11: a sibling failing at %ds: %r %r\n%s" % (when, code, v.get("timed_with_failed_job"),
                                                                            r.stdout[-600:] + r.stderr))
-    # #13: a green rerun whose second attempt ran on another pool isn't timed, and its first
-    # attempt (the push's routing) is on the usual pool: a verdict, not a refusal.
+    # A green rerun whose second attempt ran on another pool.
     before = [_cr(3000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     after = [_cr(4000 + i, [_J("test", 0, 50 + i)]) for i in range(5)]
     after.append(_cr(4005, [_J("test", 0, 60, conclusion="failure"),
                             _J("test", 100, 60, labels=("self-hosted", "spare"), attempt=2)], attempt=2))
+    # (#13 stays a refusal: leaving reruns' pools out lets what gets rerun choose the timed
+    # runs, as five review rounds showed; the refusal names the run, so a person can judge.)
     v, r = _cmp(t, before, after, "--label", "self-hosted")
-    if not (v.get("verdict_code") or "").startswith("faster"):
-        bad.append("compare #13: a rerun on another pool refused the comparison: %r" % (v.get("verdict") or v))
+    if "error" not in v or "run 4005, a rerun" not in r.stderr:
+        bad.append("compare #13: a rerun on another pool should refuse, naming the run: %r" % (v.get("verdict") or r.stderr))
     # The red-team's swap: a canary that fails on the experimental pool keeps those runs from
     # being timed; fast pushes went there before, slow ones after. Still refused.
     def canary(base_id, exp_fast):

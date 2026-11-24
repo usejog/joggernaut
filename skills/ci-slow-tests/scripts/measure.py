@@ -1496,28 +1496,23 @@ def cmd_compare(a):
     # that job ran in any attempt.
     selected = lambda rs: [r for r in finished(rs) if (not a.ran or ran_any(r))
                            and (not a.cache or cache.get(str(r["id"])) == a.cache)]
-    # The runs the per-job runner check reads: every green run of the cohort, timed or not
-    # (a canary that fails on one pool keeps its runs from being timed, so which pushes went
-    # there decides which are timed), reruns included, each by its first attempt (where the
-    # push was routed; a retry's pool isn't).
+    # The runs the per-job and whole-run runner checks read, as before: every green run of
+    # the cohort, timed or not (a canary that fails on one pool keeps its runs from being
+    # timed, so which pushes went there decides which are timed), reruns included, by their
+    # final attempt. Leaving reruns' pools out would let what gets rerun choose the timed runs.
     did_job = lambda r: not a.job or any(j.get("name") == a.job for j in latest_jobs(r) if executed(j))
     routed = lambda rs: [r for r in rs if workflow_matches(r, a.workflow) and r.get("conclusion") == "success"
                          and not outside_cohort(r, a, cache) and did_job(r) and (ran_job is None or ran_job(r))]
-    # Jobs that got a runner, of a run's first attempt; with --job (not --end) that job only.
-    placed = lambda r, every=False: [j for j in first_jobs(r) if on_a_runner(j)
-                                     and (every or not a.job or a.end or j.get("name") == a.job)]
-    # Under --label, the timed job counts only on that runner (its other placements are the
-    # routing count's); with --end, every other job counts wherever it ran.
-    # In a rerun, the timed job's first placement off that runner is the retry's affair; in a
-    # first-attempt run, a same-name job (an earlier leg) is on the clock too.
-    labelled = lambda j, r: (not a.label or a.label in (j.get("labels") or [])
-                             or (a.end and (j.get("name") != a.job or (r.get("run_attempt") or 1) == 1)))
+    # A final attempt's jobs that got a runner (a job cancelled while it waited has a start
+    # time but no runner, and says nothing about where pushes ran).
+    placed = lambda r: [j for j in latest_jobs(r) if on_a_runner(j)]
+    where = lambda r: "run %s%s" % (r.get("id"), ", a rerun" if (r.get("run_attempt") or 1) > 1 else "")
     # Known runner group ids, by job name (0 is an id; null or unsaved is unknown).
-    def group_ids(runs_, ok=lambda j, r: True):
+    def group_ids(runs_, ok):
         ids = {}
         for r in runs_:
             for j in placed(r):
-                if ok(j, r) and j.get("runner_group_id") is not None:
+                if ok(j) and j.get("runner_group_id") is not None:
                     ids.setdefault(j.get("name"), set()).add(j["runner_group_id"])
         return ids
     # A side with no timed run has nothing to compare: not enough runs, which comes before
@@ -1526,17 +1521,14 @@ def cmd_compare(a):
     if comparable and not a.label:
         # Where the compared pushes were routed, failed and cancelled runs included (a pool
         # only failed runs used still shows the pushes were routed differently).
-        # With --end, the timed job is told apart by name: a sibling on the same runner
-        # mustn't stand in for it.
-        labels = lambda rs: {(j.get("name") if a.end and j.get("name") == a.job else "", runner_key(j))
-                             for r in selected(rs) for j in placed(r)}
+        named = lambda j: not a.job or j.get("name") == a.job
+        labels = lambda rs: {runner_key(j) for r in selected(rs) for j in placed(r) if named(j)}
         lb, la = labels(rb), labels(ra)
         if lb != la:
             die("runner labels differ between before and after (%s before; %s after); pass --label (and"
                 " --job) to compare the same runner"
-                % ("; ".join(sorted(n + (": " if n else "") + show_runner(k) for n, k in lb)),
-                   "; ".join(sorted(n + (": " if n else "") + show_runner(k) for n, k in la))))
-        sb_, sa_ = group_ids(selected(rb)), group_ids(selected(ra))
+                % ("; ".join(sorted(map(show_runner, lb))), "; ".join(sorted(map(show_runner, la)))))
+        sb_, sa_ = group_ids(selected(rb), named), group_ids(selected(ra), named)
         for name in set(sb_) & set(sa_):
             if sb_[name] != sa_[name]:
                 die("job %r ran in runner groups %s before and %s after (failed and cancelled runs included);"
@@ -1548,23 +1540,28 @@ def cmd_compare(a):
     # groups can share every label; GitHub names each job's group, and fetch saves it from
     # 0.4 on): every known group id is compared, and a job with no saved id (an older file)
     # or a null one hides nothing the others show. A job on one side only is fine.
+    # With --end every job counts: the jobs before it are on its clock.
+    counted = lambda j: ((not a.job or a.end or j.get("name") == a.job)
+                         and (not a.label or a.end or a.label in (j.get("labels") or [])))
     def job_labels(rs):
-        labels = {}
+        labels, first = {}, {}
         for r in routed(rs):
             for j in placed(r):
-                if labelled(j, r):
+                if counted(j):
                     labels.setdefault(j.get("name"), set()).add(runner_key(j))
-        return labels, group_ids(routed(rs), labelled)
-    (jb, gb), (ja, ga) = job_labels(rb), job_labels(ra)
+                    first.setdefault((j.get("name"), runner_key(j)), r)
+        return labels, group_ids(routed(rs), counted), first
+    (jb, gb, fb_), (ja, ga, fa_) = job_labels(rb), job_labels(ra)
     groups = bool(gb and ga)
     if comparable:
-        for side, seen, ids in (("before", jb, gb), ("after", ja, ga)):
+        for side, seen, ids, first in (("before", jb, gb, fb_), ("after", ja, ga, fa_)):
             for name, sets in seen.items():
                 if len(sets) > 1:
                     die("job %r ran on different runners within the %s runs (%s), so a shift in the mix"
                         " could pass for a speedup; measure a period where it ran on one runner, or pass"
                         " --label with a label only one of them has"
-                        % (name, side, "; ".join(sorted(map(show_runner, sets)))))
+                        % (name, side, "; ".join("%s, first in %s" % (show_runner(k), where(first[(name, k)]))
+                                                 for k in sorted(sets))))
             for name, g in ids.items():
                 if len(g) > 1:
                     die("job %r ran in different runner groups within the %s runs (%s) under the same labels,"
@@ -1579,24 +1576,19 @@ def cmd_compare(a):
                     % (name, ", ".join(map(str, sorted(gb[name]))), ", ".join(map(str, sorted(ga[name])))))
     if comparable and (not a.job or a.end):
         # Timing whole runs, or a job's end on the run's clock (the jobs before it count):
-        # every routed first-attempt run must have run on the same set of runners, or a shift
-        # between pools (under differently named jobs) could pass for a speedup.
-        # Groups count here only where every job read has one saved: an older file's rows
-        # would otherwise differ from a newer file's by the field alone.
-        # A rerun's first attempt counts too (a pool it used shows where pushes went), unless
-        # it ran a subset of a full run's runners (it stopped early, at a failure).
+        # every routed run must have run on the same set of runners, or a shift between pools
+        # (under differently named jobs) could pass for a speedup. Groups count here only where
+        # every job read has one (an older file's rows would otherwise differ by the field alone).
         everyone = routed(rb) + routed(ra)
-        saved = all(j.get("runner_group_id") is not None for r in everyone for j in placed(r, True))
-        # Under --label, a job's placement off that runner is the routing count's.
-        key_of = lambda r: frozenset((runner_key(j), j.get("runner_group_id") if saved else None)
-                                     for j in placed(r, True) if not a.label or labelled(j, r))
-        full = {key_of(r) for r in everyone if (r.get("run_attempt") or 1) == 1}
-        sets = full | {key_of(r) for r in everyone if (r.get("run_attempt") or 1) > 1
-                       and not any(key_of(r) <= f for f in full)}
+        saved = all(j.get("runner_group_id") is not None for r in everyone for j in placed(r))
+        sets = {}
+        for r in everyone:
+            sets.setdefault(frozenset((runner_key(j), j.get("runner_group_id") if saved else None)
+                                      for j in placed(r)), r)
         if len(sets) > 1:
-            die("the runs ran on %d different sets of runners (labels and runner groups), so a shift in the"
-                " mix could pass for a speedup; pass --job to time one job, or --label with a label only one"
-                " set has" % len(sets))
+            die("the runs ran on %d different sets of runners (labels and runner groups; first seen in %s), so"
+                " a shift in the mix could pass for a speedup; pass --job to time one job, or --label with a"
+                " label only one set has" % (len(sets), "; ".join(where(r) for r in sets.values())))
     # Runs that ran different jobs (a path filter, an `if:`) did different work, and a median
     # over the mix moves with the mix. A run's work, as far as the jobs list shows it, is the
     # set of jobs it ran (names with counts, so matrix legs count). With one set on each side
