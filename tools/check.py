@@ -89,7 +89,7 @@ def check_skills():
         ev = os.path.join(os.path.dirname(path), "references", "evidence.md")
         if not os.path.exists(ev):
             err("%s: no references/evidence.md" % path)
-        for ref in re.findall(r"`(references/[\w.-]+|scripts/measure\.py)`", body):
+        for ref in re.findall(r"`(references/[\w.-]+|scripts/[\w.-]+)`", body):
             if not os.path.exists(os.path.join(os.path.dirname(path), ref)):
                 err("%s: refers to missing %s" % (path, ref))
     guide = open("skills/ci-measure/references/measuring.md").read()

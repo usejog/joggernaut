@@ -174,9 +174,8 @@ in `references/measuring.md`.
    - pushes a day: distinct pull-request commits that started CI, over the
      days the file spans. A reopened pull request or a re-run of the same
      commit isn't counted again;
-   - runner-minutes, unrounded and rounded up per job (how GitHub bills its
-     hosted runners; another provider prices its runners its own way), by
-     runner label, and the share in runs that failed,
+   - runner-minutes, unrounded and rounded up per job (step 5 says which a
+     label is priced by), by runner label, and the share in runs that failed,
      timed out or were cancelled (by a concurrency group or by hand). Not
      all of it is waste: a failed run may have caught a real bug;
    - pushes per pull request, and catch-up runs: pushes whose commit message
@@ -244,9 +243,19 @@ in `references/measuring.md`.
    minutes, cache or artifact storage; standard runners on public
    repositories cost nothing, and self-hosted runners aren't billed by
    GitHub per minute), then rank by runner-minutes a day, per runner label: every job and attempt, cancelled runs included. Across labels,
-   rank by dollars only with each label's per-minute price from GitHub's
-   published rates or the person's own plan, and say which; minutes inside
-   a plan's included minutes may not change the invoice.
+   rank by dollars only where each label maps to its billing terms, with
+   usage counted in their unit, and say where each price came from: for a
+   GitHub-hosted label, GitHub's published rates or the person's own plan
+   (GitHub rounds each job up to a whole minute, as `measure.py`'s rounded
+   runner-minutes do; minutes inside a plan's included minutes may not
+   change the invoice); for a label a third-party runner provider serves,
+   which GitHub counts as self-hosted and doesn't bill by the minute, that
+   provider's published pricing or the person's contract with it, in its
+   own unit (per second, per minute or per machine, where fewer minutes may
+   not change the bill; `measure.py` prints unrounded runner-minutes beside
+   the rounded ones for terms that don't round). Where a label's terms are unknown, give its usage
+   and leave its dollars open. (Joggernaut is made by the team behind Jog,
+   which sells CI runners; no skill recommends a provider.)
 6. **Report**, in this shape (a made-up example; every number in yours
    comes from the runs). When `split` says most runs fail, open with that
    line and the Reliability section, before the PR wait:
