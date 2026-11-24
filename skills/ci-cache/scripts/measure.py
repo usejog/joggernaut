@@ -1590,16 +1590,30 @@ def cmd_compare(a):
         # How many runs reached the named job(s): fewer after, beyond chance, means runs
         # stopped before it (failures, cancellations upstream) or the mix of work changed,
         # so the runs timed aren't like for like.
-        reach = lambda rs: (lambda w: (sum(1 for r in w if not ran_all(r, names)), len(w)))(
-            [r for r in rs if in_workflow(r) and r.get("conclusion") not in (None, "skipped", "neutral")])
-        res["not_reaching_before"], res["not_reaching_after"] = reach(rb), reach(ra)
+        # Over every finished run, and over the runs whose jobs list the named job(s) at all
+        # (so runs that never would, docs-only pushes say, can't dilute the drop): the larger
+        # rise counts.
+        finished = lambda rs: [r for r in rs if in_workflow(r) and r.get("conclusion") not in (None, "skipped", "neutral")]
+        listed = lambda r: all(any(j.get("name") == n for j in r.get("jobs", [])) for n in names)
+        reach = lambda w: (sum(1 for r in w if not ran_all(r, names)), len(w))
+        pairs = [(reach([r for r in finished(rb) if listed(r)]), reach([r for r in finished(ra) if listed(r)])),
+                 (reach(finished(rb)), reach(finished(ra)))]
+        nb2_, na2_ = next((p for p in pairs if fails_rose(*p)), pairs[1])  # the more specific first
+        res["not_reaching_before"], res["not_reaching_after"] = nb2_, na2_
     # Runs cancelled with no failure (a newer push, a concurrency group) are in neither the
     # timings nor the failure rate. A change that gets slow runs cancelled can look faster.
     cancelled = lambda rs: (sum(1 for r in rs if in_workflow(r) and r.get("conclusion") == "cancelled"
                                 and not run_failed(r)),
                             sum(1 for r in rs if in_workflow(r) and r.get("conclusion") not in (None, "skipped", "neutral")))
     res["cancelled_before"], res["cancelled_after"] = cancelled(rb), cancelled(ra)
-    wcb, wca = (cancelled(started(rb)), cancelled(started(ra))) if work else ((0, 0), (0, 0))
+    # Cancellations are checked in every workload on its own (each named job's runs, and the
+    # runs where all ran); the first that rose beyond chance is the one reported.
+    wcb, wca, cwork = (0, 0), (0, 0), work
+    for ns in workloads:
+        sel = [r for r in rb if ran_all(r, ns)], [r for r in ra if ran_all(r, ns)]
+        cb_, ca_ = cancelled(sel[0]), cancelled(sel[1])
+        if ns == workloads[0] or (fails_rose(cb_, ca_) and not fails_rose(wcb, wca)):
+            wcb, wca, cwork = cb_, ca_, " and ".join(ns)
     if work:
         res["cancelled_before_job"], res["cancelled_after_job"] = wcb, wca
 

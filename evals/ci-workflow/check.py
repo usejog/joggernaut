@@ -18,18 +18,22 @@ if len(jobs) >= 8:
     fail.append("still %d jobs; the tiny lint jobs weren't folded" % len(jobs))
 run_text = "\n".join(re.findall(r"run:\s*(.*(?:\n\s{8,}.*)*)", wf))
 # A fold may run the lints from a loop over literal words: `for t in ts css ...`, or an array
-# `tasks=(ts css ...)` with `for t in "${tasks[@]}"`, then `pnpm run "lint:$t"`. Expand such a
-# loop's words where its variable follows `lint:`, so only the tasks it names count (#34).
-arrays = {m.group(1): [w.strip("'\"") for w in m.group(2).split()]
-          for m in re.finditer(r"\b([A-Za-z_]\w*)=\(([^)$`]*)\)", run_text)}
+# `tasks=(ts css ...)` with `for t in "${tasks[@]}"`, then `pnpm run "lint:$t"`. Each `run:`
+# step is read alone (an array is the one assigned before the loop, in that step), and a
+# loop's words count only where its own body runs pnpm as a command, not inside a string (#34).
 expanded = []
-for m in re.finditer(r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^;\n]+?)\s*(?:;|\n)\s*do\b(.*?)\bdone\b", run_text, re.S):
-    var, items, body = m.group(1), m.group(2).strip(), m.group(3)
-    ref = re.fullmatch(r'"?\$\{([A-Za-z_]\w*)\[@\]\}"?', items)
-    words = arrays.get(ref.group(1), []) if ref else [w for w in items.split() if re.fullmatch(r"[\w.-]+", w)]
-    # This loop's own body runs the lint (an echo of its name doesn't count).
-    if re.search(r"""pnpm\s+(?:run\s+)?["']?lint:\$\{?%s\b""" % var, body):
-        expanded += ["lint:%s" % w for w in words]
+for step in re.findall(r"run:\s*(.*(?:\n\s{8,}.*)*)", wf):
+    for m in re.finditer(r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^;\n]+?)\s*(?:;|\n)\s*do\b(.*?)\bdone\b", step, re.S):
+        var, items, body = m.group(1), m.group(2).strip(), m.group(3)
+        ref = re.fullmatch(r'"?\$\{([A-Za-z_]\w*)\[@\]\}"?', items)
+        if ref:
+            assigned = list(re.finditer(r"\b%s=\(([^)$`]*)\)" % ref.group(1), step[:m.start()]))
+            words = [w.strip("'\"") for w in assigned[-1].group(1).split()] if assigned else []
+        else:
+            words = [w.strip("'\"") for w in items.split() if re.fullmatch(r"""["']?[\w.-]+["']?""", w)]
+        # pnpm at the start of a command: a line, or after ;, &&, ||, |, `do` or `then`.
+        if re.search(r"""(?:^|[;&|]|\bdo\b|\bthen\b)\s*pnpm\s+(?:run\s+)?["']?lint:\$\{?%s\b""" % var, body, re.M):
+            expanded += ["lint:%s" % w for w in words]
 run_text += "\n" + " ".join(expanded)
 for j in ["ts", "css", "md", "yaml", "json", "spell", "licenses"]:
     if not re.search(r"lint:%s\b" % j, run_text):

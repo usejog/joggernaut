@@ -1636,6 +1636,83 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("compare --job --end: fewer runs reaching the job should qualify the verdict: %r %r"
                    % (got.get("verdict_code"), got.get("not_reaching_after")))
 
+# Only the runs where both named jobs ran show the rise: each job's own runs hold 35 failures of
+# 80 on both sides, and among runs where both ran it goes 0/40 -> 35/40.
+with tempfile.TemporaryDirectory() as t:
+    def two(i, has_a, has_b, ok, fast=False):
+        t0, jobs = i * 4000, []
+        if has_a:
+            jobs.append(_job("a", t0, t0 + 1, t0 + 10))
+        if has_b:
+            jobs.append(_job("b", t0, t0 + 1, t0 + (10 if fast else 100)))
+        x = _run(i, jobs, t0)
+        if not ok:
+            jobs[-1]["conclusion"], x["conclusion"] = "failure", "failure"
+        return x
+    before = ([two(i, True, True, True) for i in range(40)] + [two(100 + i, True, False, i >= 35) for i in range(40)]
+              + [two(200 + i, False, True, i >= 35) for i in range(40)])
+    after = ([two(1000 + i, True, True, True, fast=True) for i in range(5)] + [two(1100 + i, True, True, False) for i in range(35)]
+             + [two(1200 + i, True, False, True) for i in range(40)] + [two(1300 + i, False, True, True) for i in range(40)])
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--ran", "a", "--job", "b"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("verdict_code") != "not_valid" or got.get("failed_after_job") != [35, 40]:
+        bad.append("compare --ran a --job b: the rise where both ran should count: %r %r"
+                   % (got.get("verdict_code"), got.get("failed_after_job")))
+    # Cancellations rise only where integration ran, with --ran backend --job integration.
+    def bi(i, cancel, fast=False):
+        t0 = i * 4000
+        jobs = [_job("backend", t0, t0 + 1, t0 + 20), _job("integration", t0 + 20, t0 + 21, t0 + (30 if fast else 180))]
+        x = _run(i, jobs, t0)
+        if cancel:
+            jobs[1]["conclusion"], x["conclusion"] = "cancelled", "cancelled"
+        return x
+    def be_only(i, cancel=False):
+        x = _run(i, [_job("backend", i * 4000, i * 4000 + 1, i * 4000 + 20)], i * 4000)
+        if cancel:
+            x["jobs"][0]["conclusion"], x["conclusion"] = "cancelled", "cancelled"
+        return x
+    before = [bi(i, False) for i in range(40)] + [be_only(100 + i) for i in range(55)] + [be_only(200 + i, True) for i in range(35)]
+    after = [bi(1000 + i, False, fast=True) for i in range(5)] + [bi(1100 + i, True) for i in range(35)] + [be_only(1200 + i) for i in range(90)]
+    open(t + "/b2.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a2.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    r = run([M, "compare", "--before", t + "/b2.jsonl", "--after", t + "/a2.jsonl", "--json",
+             "--ran", "backend", "--job", "integration", "--end"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if "_more_cancelled" not in (got.get("verdict_code") or "") and got.get("verdict_code") != "not_valid":
+        bad.append("compare: cancellations where integration ran should qualify: %r %r"
+                   % (got.get("verdict_code"), got.get("cancelled_after_job")))
+
+# Reach among the runs that list the job: docs-only runs can't dilute it. Before, 36 runs ran
+# backend then integration (6 fast, 30 slow); after, the 30 slow ones were cancelled in
+# backend, integration listed but never run.
+with tempfile.TemporaryDirectory() as t:
+    def stage(i, slow, cancel=False):
+        t0 = i * 4000
+        be = _job("backend", t0, t0 + 1, t0 + (100 if slow else 10))
+        end = mm.ts(be["completed_at"]) - 1793000000
+        it = _job("integration", end, end + 1, end + 50)
+        x = _run(i, [be, it], t0)
+        if cancel:
+            be["conclusion"], x["conclusion"] = "cancelled", "cancelled"
+            it.update(conclusion="skipped", steps=[])
+            it["started_at"] = None
+        return x
+    def docs(i):
+        return _run(i, [_job("docs", i * 4000, i * 4000 + 1, i * 4000 + 5)], i * 4000)
+    before = [stage(i, i >= 6) for i in range(36)] + [docs(100 + i) for i in range(94)]
+    after = ([stage(1000 + i, False) for i in range(6)] + [stage(1100 + i, True, cancel=True) for i in range(30)]
+             + [docs(1200 + i) for i in range(94)])
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json", "--job", "integration", "--end"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if (not (got.get("verdict_code") or "").startswith("faster") or not (got.get("verdict_code") or "").endswith("_fewer_reached")
+            or got.get("not_reaching_after") != [30, 36]):
+        bad.append("compare --job --end: runs stopped before the job, among those listing it, should qualify: %r %r"
+                   % (got.get("verdict_code"), got.get("not_reaching_after")))
+
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
 if mm.run_minutes(two) != 2 or abs(mm.run_minutes(two, True) - 2.0) > 1e-9:
@@ -2110,12 +2187,35 @@ jobs:
     steps:
       - run: pnpm test
 """
+ECHO_PNPM = LOOP_FOLD.replace('pnpm run "lint:$t" & pids+=("$!")', 'echo "pnpm run lint:$t"')
+assert ECHO_PNPM != LOOP_FOLD
+LATER_ARRAY = """name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          tasks=(ts css md yaml json spell)
+          for t in "${tasks[@]}"; do pnpm run "lint:$t"; done
+      - run: |
+          tasks=(ts css md yaml json spell licenses)
+          for t in "${tasks[@]}"; do echo "$t"; done
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm test
+"""
 ECHO_LOOP = TWO_LOOPS.replace('for t in ts css; do pnpm run "lint:$t"; done',
                               'for t in ts css md yaml json spell; do pnpm run "lint:$t"; done').replace(
     'for t in md yaml json spell licenses; do pnpm run "format:$t"; done',
     'for t in ts css md yaml json spell licenses; do echo "lint:$t done"; done')
 assert ECHO_LOOP != TWO_LOOPS
-for tasks, want in (("ts css md yaml json spell licenses", 0), ("ts css md yaml json spell", 1), (None, 1), ("ECHO", 1), ('"ts" "css" "md" "yaml" "json" "spell" "licenses"', 0)):
+for tasks, want in (("ts css md yaml json spell licenses", 0), ("ts css md yaml json spell", 1), (None, 1), ("ECHO", 1), ('"ts" "css" "md" "yaml" "json" "spell" "licenses"', 0),
+                    ("ECHO_PNPM", 1), ("LATER", 1)):
     work = tempfile.mkdtemp(prefix="joggernaut-loop-")
     try:
         shutil.copytree(E + "/ci-workflow/repo", work, dirs_exist_ok=True)
@@ -2126,8 +2226,10 @@ for tasks, want in (("ts css md yaml json spell licenses", 0), ("ts css md yaml 
         wfdir = os.path.join(work, ".github/workflows")
         for f in os.listdir(wfdir):
             os.remove(os.path.join(wfdir, f))
-        open(os.path.join(wfdir, "ci.yml"), "w").write(ECHO_LOOP if tasks == "ECHO" else
-                                                        LOOP_FOLD % tasks if tasks else TWO_LOOPS)
+        open(os.path.join(wfdir, "ci.yml"), "w").write(
+            ECHO_LOOP if tasks == "ECHO" else LATER_ARRAY if tasks == "LATER" else
+            ECHO_PNPM % "ts css md yaml json spell licenses" if tasks == "ECHO_PNPM" else
+            LOOP_FOLD % tasks if tasks else TWO_LOOPS)
         open(os.path.join(work, "PR.md"), "w").write("Folded the lints.")
         r = run([E + "/ci-workflow/check.py", work])
         if (r.returncode != 0) != bool(want) or (want and "lint:licenses no longer runs" not in r.stdout) \
