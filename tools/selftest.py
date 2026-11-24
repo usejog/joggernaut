@@ -2441,6 +2441,115 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("flaky --runs-dir: a run with no jobs page dropped out of the line: %r\n%s" % (got, r.stderr))
 
 
+
+# compare: who is timed, and the runner checks (#11, #12, #13, #35, #39).
+def _J(name, at, secs, labels=("self-hosted", "std"), conclusion="success", group=None, attempt=1):
+    return dict(name=name, at=at, secs=secs, labels=list(labels), conclusion=conclusion, group=group, attempt=attempt)
+
+
+def _cr(rid, specs, conclusion="success", attempt=1, base="main", groups=True):
+    t0 = rid * 5000
+    jobs = []
+    for k, x in enumerate(specs):
+        j = {"id": rid * 100 + k, "name": x["name"], "run_attempt": x["attempt"], "conclusion": x["conclusion"],
+             "created_at": _at(t0 + x["at"]), "started_at": _at(t0 + x["at"]),
+             "completed_at": _at(t0 + x["at"] + x["secs"]), "labels": x["labels"], "runner_name": "r", "steps": []}
+        if groups:
+            j["runner_group_id"], j["runner_group_name"] = x["group"], None if x["group"] is None else "g%d" % x["group"]
+        jobs.append(j)
+    return {"id": rid, "name": "CI", "path": ".github/workflows/ci.yml", "event": "pull_request",
+            "head_branch": "b%d" % rid, "head_sha": "%040d" % rid, "run_attempt": attempt, "head_message": "Fix",
+            "head_repo": "o/r", "conclusion": conclusion, "created_at": _at(t0), "run_started_at": _at(t0),
+            "updated_at": _at(t0 + 3000), "pull_requests": [rid], "pull_request_bases": [base], "jobs": jobs}
+
+
+def _cmp(t, before, after, *flags):
+    for name, rows in (("b", before), ("a", after)):
+        open(os.path.join(t, name), "w").write("".join(json.dumps(x) + "\n" for x in rows))
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--json"] + list(flags))
+    return (json.loads(r.stdout) if r.returncode == 0 else {"error": r.stderr}), r
+
+
+with tempfile.TemporaryDirectory() as t:
+    # #11: a sibling that failed before the timed job started could have been its input: the
+    # verdict is qualified, and the failed runs among the timed ones are counted. One that
+    # failed after it started is counted, and the verdict stands.
+    for when, want in ((0, "_after_failed_job"), (30, "")):
+        sides = []
+        for base_id, secs in ((1000, 100), (2000, 50)):
+            rows = [_cr(base_id + i, [_J("test", 10, secs + i)]) for i in range(4)]
+            rows.append(_cr(base_id + 4, [_J("lint", when, 5, conclusion="failure"), _J("test", 10, secs + 4)]))
+            sides.append(rows)
+        v, r = _cmp(t, sides[0], sides[1], "--job", "test", "--label", "self-hosted")
+        code = v.get("verdict_code") or ""
+        if not code.startswith("faster") or ("_after_failed_job" in code) != bool(want) \
+                or v.get("timed_with_failed_job") != [[1, 5], [1, 5]]:
+            bad.append("compare #11: a sibling failing at %ds: %r %r\n%s" % (when, code, v.get("timed_with_failed_job"),
+                                                                           r.stdout[-600:] + r.stderr))
+    # #13: a green rerun whose second attempt ran on another pool isn't timed, and its first
+    # attempt (the push's routing) is on the usual pool: a verdict, not a refusal.
+    before = [_cr(3000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
+    after = [_cr(4000 + i, [_J("test", 0, 50 + i)]) for i in range(5)]
+    after.append(_cr(4005, [_J("test", 0, 60, conclusion="failure"),
+                            _J("test", 100, 60, labels=("self-hosted", "spare"), attempt=2)], attempt=2))
+    v, r = _cmp(t, before, after, "--label", "self-hosted")
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare #13: a rerun on another pool refused the comparison: %r" % (v.get("verdict") or v))
+    # The red-team's swap: a canary that fails on the experimental pool keeps those runs from
+    # being timed; fast pushes went there before, slow ones after. Still refused.
+    def canary(base_id, exp_fast):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            exp = fast == exp_fast
+            rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100),
+                                          _J("canary", 0, 5, labels=("self-hosted", "exp" if exp else "std"),
+                                             conclusion="failure" if exp else "success")]))
+        return rows
+    v, r = _cmp(t, canary(5000, True), canary(6000, False), "--label", "self-hosted")
+    if "error" not in v or "different runners" not in r.stderr:
+        bad.append("compare: a canary routing swap passed for a speedup: %r" % v.get("verdict"))
+    # #12: two runner groups share every label; the mix moves from the slow group to the fast.
+    def grouped(base_id, slow, keep=True):
+        return [_cr(base_id + i, [_J("test", 0, 90 if i < slow else 30, labels=("self-hosted",),
+                                     group=1 if i < slow else 2)], groups=keep) for i in range(30)]
+    v, r = _cmp(t, grouped(7000, 25), grouped(8000, 5), "--label", "self-hosted")
+    if "error" not in v or "runner group" not in r.stderr:
+        bad.append("compare #12: a shift between runner groups passed: %r" % v.get("verdict"))
+    # ... and with the groups unsaved (older files), labels alone, and it says so.
+    v, r = _cmp(t, grouped(7000, 25, False), grouped(8000, 5, False), "--label", "self-hosted")
+    if v.get("runner_groups_checked") is not False:
+        bad.append("compare #12: files without runner groups weren't flagged: %r" % v)
+    # #39: another base branch's runs, on another runner, don't make --base main refuse.
+    before = [_cr(9000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
+    before += [_cr(9100 + i, [_J("test", 0, 300, labels=("self-hosted", "old"))], base="release") for i in range(3)]
+    after = [_cr(9200 + i, [_J("test", 0, 50 + i)]) for i in range(5)]
+    v, r = _cmp(t, before, after, "--base", "main")
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare #39: another branch's runner refused --base main: %r" % (v.get("verdict") or v))
+    # #39: a job new after the change is not enough runs, not a runner change.
+    before = [_cr(9300 + i, [_J("build", 0, 100)]) for i in range(5)]
+    after = [_cr(9400 + i, [_J("build", 0, 100), _J("lint", 0, 20)]) for i in range(4)]
+    v, r = _cmp(t, before, after, "--ran", "lint", "--job", "lint")
+    if v.get("verdict_code") != "not_enough_runs":
+        bad.append("compare #39: a new job should be not enough runs: %r" % (v.get("verdict") or v))
+    # #39: routing behind --job --label (and whole runs): which runs reach the runner moved.
+    for flags in (["--job", "test", "--label", "fast"], ["--label", "fast"]):
+        def routed(base_id, off, secs):
+            return [_cr(base_id + i, [_J("test", 0, secs + i % 3,
+                                         labels=("self-hosted", "slow" if i < off else "fast"))]) for i in range(30)]
+        v, r = _cmp(t, routed(10000, 2, 100), routed(11000, 25, 50), *flags)
+        if "_routing_changed" not in (v.get("verdict_code") or ""):
+            bad.append("compare #39: routing moved off the runner under %s: %r" % (flags, v.get("verdict") or v))
+    # #35: a run with two jobs named test is left out of the job sets as of the timings.
+    before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
+    before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))
+    after = [_cr(13000 + i, [_J("test", 0, 50 + i)]) for i in range(5)]
+    v, r = _cmp(t, before, after, "--job", "test")
+    if sum(x["runs"] for x in v.get("job_sets", {}).get("before", [])) != v.get("before_runs"):
+        bad.append("compare #35: job_sets and timings count different runs: %r" % v.get("job_sets"))
+
+
 # every check.py fails on its untouched sample (the planted cause is there)
 for case in sorted(glob.glob(E + "/ci-*/")):
     name = os.path.basename(case.rstrip("/"))
