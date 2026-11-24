@@ -109,9 +109,10 @@ a race. Each of these can hide a failure or drop coverage without making the cod
    alone: read the runs with `fetch`, which records the base. GitHub lists a
    run's pull request only while it is open, so a closed one's runs are
    keyed by their branch, and pull requests that reused a branch count as
-   one. `fetch` saves the pull requests that were open from that branch when
-   each run was created (`pull_requests_found`), and `flaky` names the
-   branches whose runs found several: a test there may recur on more pull
+   one. `fetch` saves the candidates, the pull requests from that branch open
+   when each run was created or closed within the hour before
+   (`pull_requests_found`), and `flaky` names the branches whose runs have
+   several: a test there may recur on more pull
    requests than shown, so read those runs. A failure stands alone when a
    report shows the test passing before it and after it on that line, with
    no other pull request's run between them failing it (or failed with no

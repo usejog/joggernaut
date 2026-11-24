@@ -533,10 +533,8 @@ def pr_bases(a, r):
     # page must hold them all (under 100), or which were open then can't be told.
     whole = made is not None and len(prs) < 100 and all(
         p.get("number") and p.get("created_at") and "closed_at" in p for p in prs)
-    # Only pull_request and pull_request_target runs: a review or comment event can come on a
-    # closed pull request. A `closed` event's run is created just after the close, so a pull
-    # request counts as open until an hour after it closed: such a run then matches its own
-    # pull request too, and with another open at once it is unsure, never the wrong one.
+    # Candidates only, never an owner: pull_request and pull_request_target runs, and a pull
+    # request counts until an hour after it closed (a `closed` event's run comes just after).
     whole = whole and r.get("event") in ("pull_request", "pull_request_target")
     open_then = [p for p in prs if whole and ts(p["created_at"]) <= made
                  and (p["closed_at"] is None or made <= ts(p["closed_at"]) + 3600)]
@@ -588,7 +586,7 @@ def record(r, jobs, bases, found=()):
         "run_started_at": r.get("run_started_at"), "updated_at": r.get("updated_at"),
         "pull_requests": [p.get("number") for p in r.get("pull_requests") or []],
         "pull_request_bases": bases,
-        # Pull requests found for a run GitHub no longer lists (pr_bases): one is the run's.
+        # Candidate pull requests for a run GitHub no longer lists (pr_bases): evidence, not an owner.
         "pull_requests_found": list(found),
         "jobs": [{
             "id": j["id"], "name": j.get("name"), "run_attempt": j.get("run_attempt", 1),
@@ -2130,7 +2128,11 @@ def failed_tests(folder, short=None):
         top = os.path.relpath(path, folder).split(os.sep)[0]
         m = re.match(r"^attempt[-_ ]?(\d+)$", top, re.I)
         return int(m.group(1)) if m and top != os.path.basename(path) else None
-    dirs = {int(m.group(1)) for x in os.listdir(folder) if os.path.isdir(os.path.join(folder, x))
+    try:
+        listed = os.listdir(folder)
+    except OSError:
+        listed = []  # unreadable: os.walk below reads nothing either, as before
+    dirs = {int(m.group(1)) for x in listed if os.path.isdir(os.path.join(folder, x))
             for m in [re.match(r"^attempt[-_ ]?(\d+)$", x, re.I)] if m}
 
     for root, _, files in os.walk(folder):
@@ -2189,9 +2191,8 @@ def failed_tests(folder, short=None):
                         att[0].add(name(fields[:-1]))
     if not found:
         return None if not skipped else ([], [], skipped, set(), set(), {})
-    by_att = {n: set() for n in dirs}  # an attempt folder with no report shows nothing passing
-    by_att.update({n: p - f for n, (f, p) in attempts.items()})
-    return failed, passed - failed, skipped, txt, junit, by_att
+    # Attempts with a report read (JUnit or failed.txt): a folder of coverage alone is no report.
+    return failed, passed - failed, skipped, txt, junit, {n: p - f for n, (f, p) in attempts.items()}
 
 
 def cmd_flaky(a):
@@ -2317,8 +2318,10 @@ def cmd_flaky(a):
     several = sorted((b, sorted(n)) for b, n in reused.items() if len(n) > 1)
     # Reruns whose folder holds a report for every attempt: their passes aren't counted (a lost
     # or merged report can't be told apart), but a person can read them.
-    complete = sorted(rid for rid, rep_ in reports.items() if (by_id[rid].get("run_attempt") or 1) > 1
-                      and set(range(1, (by_id[rid].get("run_attempt") or 1) + 1)) <= set(rep_[2]))
+    # The run's attempts: its listing's, or a later one its saved jobs show.
+    last = lambda r: max([r.get("run_attempt") or 1] + [j.get("run_attempt") or 1 for j in r.get("jobs", [])])
+    complete = sorted(rid for rid, rep_ in reports.items() if last(by_id[rid]) > 1
+                      and set(range(1, last(by_id[rid]) + 1)) <= set(rep_[2]))
     # A failed.txt name no JUnit report shows (a file at the run's root beside reports in a
     # leg's folder, a name spelled otherwise): its failures can't meet a pass of the same test.
     # Per workflow: a JUnit report of another workflow says nothing about these names.
@@ -2340,7 +2343,7 @@ def cmd_flaky(a):
           % (len(reports), unread))
     nobase = sum(1 for r in runs if (r.get("event") or "").startswith("pull_request") and not r.get("pull_request_bases"))
     if several:
-        print("  %d branches' runs no longer listed with a pull request were found open under several pull requests"
+        print("  %d branches' runs no longer listed with a pull request have several candidate pull requests"
               " (%s): each branch counts as one pull request here, so a test may recur on more than shown"
               % (len(several), "; ".join("%s: #%s" % (b, ", #".join(map(str, n))) for b, n in several[:3])))
     if complete:

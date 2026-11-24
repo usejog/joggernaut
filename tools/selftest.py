@@ -2509,6 +2509,7 @@ def _rr(i, pr, st, attempt=1):
     return x
 rows = [_rr(0, 1, "p"), _rr(1, 2, "f"), _rr(2, 3, "p", attempt=2), _rr(3, 4, "f"), _rr(4, 5, "p")]
 for folders, listed in (({"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _rep("p")}, True),
+                        ({"attempt-1/a/r.xml": _rep("p"), "attempt-2/coverage.xml": "<coverage/>"}, False),
                         ({"attempt-2/a/r.xml": _rep("p")}, False),
                         ({"a/attempt-1/r.xml": _rep("p"), "a/attempt-2/r.xml": _rep("p")}, False)):
     reps = {rows[0]["id"]: {"a/r.xml": _rep("p")}, rows[1]["id"]: {"a/r.xml": _rep("f")},
