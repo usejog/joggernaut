@@ -197,7 +197,10 @@ under a merge-commit policy, ask before adding them.
    If the timed runs ran different sets of jobs within a side (a path
    filter, an `if:`), it refuses a whole-run verdict and lists the before
    side's sets: time the job the fix changes by its own duration with
-   `--job`, which gives the verdict. `--ran JOB` times whole runs that ran
+   `--job`, which gives the verdict as long as that job's eligibility is the
+   same on both sides (its `if:` and path filters unchanged, and the share
+   of runs that ran it about the same: `compare` prints the counts and
+   qualifies a change beyond chance); otherwise report it as unverified. `--ran JOB` times whole runs that ran
    that job, a descriptive reading only (`ran_descriptive`): which runs ran
    it can change with the change itself. If each side ran one set but the sets differ, the verdict ends
    in `_jobs_changed` and is never a plain one: it holds only if the

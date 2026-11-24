@@ -1569,7 +1569,7 @@ with tempfile.TemporaryDirectory() as t:
     for extra in (["--ran", "integration"], ["--job", "integration", "--end"], ["--job", "integration"]):
         r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json"] + extra)
         got = json.loads(r.stdout) if r.returncode == 0 else {}
-        if (code_of(got) != "not_valid" or got.get("failed_before") != got.get("failed_after")
+        if (got.get("verdict_code") != "not_valid" or got.get("failed_before") != got.get("failed_after")
                 or got.get("failed_before_job") != [0, 40] or got.get("failed_after_job") != [35, 40]):
             bad.append("compare %s: failures where the job ran rose 0/40 -> 35/40, the workflow's didn't: %r"
                        % (extra, {k: got.get(k) for k in ("verdict_code", "failed_before", "failed_after",
@@ -1844,7 +1844,8 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json",
              "--ran", "integration", "--job", "backend"])
     got = json.loads(r.stdout) if r.returncode == 0 else {}
-    if not (code_of(got) or "").endswith("_fewer_reached") or "job" not in rose_checks(got):
+    if (not (code_of(got) or "").endswith("_fewer_reached") or "job" not in rose_checks(got)
+            or got.get("verdict_code") != "ran_descriptive"):
         bad.append("compare --ran integration --job backend: the workload losing integration should qualify: %r %r"
                    % (code_of(got), rose_checks(got)))
 
@@ -1949,6 +1950,27 @@ with tempfile.TemporaryDirectory() as t:
     mwf = [x for x in got.get("reach_checks") or [] if x["check"] == "missed with a failure"]
     if not mwf or mwf[0]["missed_after"][0] != 12:
         bad.append("compare: a run cancelled before any job should count as missed with a failure: %r" % mwf)
+
+# A canary allowed to fail runs on an experimental runner where it fails: on 12 fast pushes
+# before, 12 slow ones after. Those runs aren't timed, but which runner the canary used still
+# shows the mix changed, so the runner check must refuse.
+with tempfile.TemporaryDirectory() as t:
+    def canary(i, slow, fails):
+        t0 = i * 4000
+        jobs = [dict(_job("build", t0, t0 + 1, t0 + (100 if slow else 10)), labels=["self-hosted"])]
+        c = dict(_job("canary", t0, t0 + 1, t0 + 5), labels=["self-hosted", "experimental"] if fails else ["self-hosted"])
+        if fails:
+            c["conclusion"] = "failure"
+        jobs.append(c)
+        return _run(i, jobs, t0)
+    before = [canary(i, False, True) for i in range(12)] + [canary(100 + i, True, False) for i in range(24)]
+    after = ([canary(1000 + i, False, False) for i in range(12)] + [canary(1100 + i, True, True) for i in range(12)]
+             + [canary(1200 + i, True, False) for i in range(12)])
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--label", "self-hosted"])
+    if r.returncode == 0:
+        bad.append("compare: a canary on two runners, failing on different pushes, passed the runner check\n" + r.stdout)
 
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)

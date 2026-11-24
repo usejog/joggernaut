@@ -212,8 +212,9 @@ cancellation before it, a condition, a matrix leg left out, a skipped
 caller), and no one count sees them all without other traffic diluting it,
 so several are checked, and a change in any counts: among the runs that list
 the job (or a caller of it, or it by name), among the runs where the other
-named job ran (both ways, with `--ran` and `--job`), among the runs that
-also had a job fail or be cancelled, and among all runs. `--json` lists each
+named job ran (both ways, with `--ran` and `--job`), and among all runs
+(the runs that missed it, those that missed it with a failure or
+cancellation in the run, and those that list it and did). `--json` lists each
 (`reach_checks`); the text prints each. If
 more runs fail after than chance explains (a one-sided test at 5%), the
 result is not valid. If more fail after but within chance, the verdict says

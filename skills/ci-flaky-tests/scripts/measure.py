@@ -1457,6 +1457,13 @@ def cmd_compare(a):
     cb, ca = candidates(rb), candidates(ra)
     if a.ran and not cb + ca:
         die("no successful timed run ran a job named %r" % a.ran)
+    # The runner checks read every successful run of the selection, a job that failed in it
+    # (one allowed to fail, a canary) included: which runner such a job used shows which
+    # pushes went where, even though the run isn't timed.
+    def on_runners(rs):
+        return [r for r in rs if workflow_matches(r, a.workflow) and r.get("conclusion") == "success"
+                and not outside_cohort(r, a, cohort_cache) and did_job(r) and (ran_job is None or ran_job(r))]
+    rcb, rca = on_runners(rb), on_runners(ra)
     if not a.label:
         def labels(rs):
             out = set()
@@ -1465,7 +1472,7 @@ def cmd_compare(a):
                     if (not a.job or j.get("name") == a.job) and j.get("labels"):
                         out.add(tuple(sorted(j["labels"])))
             return out
-        if cb and ca and labels(cb) != labels(ca):  # a side with no timed run: not enough runs
+        if cb and ca and labels(rcb) != labels(rca):  # a side with no timed run: not enough runs
             die("runner labels differ between before and after; pass --label (and --job) "
                 "to compare the same runner")
 
@@ -1482,7 +1489,7 @@ def cmd_compare(a):
                     continue  # no labels: skipped, never on a runner
                 seen.setdefault(j.get("name"), set()).add(tuple(sorted(j["labels"])))
         return seen
-    jb, ja = job_labels(cb), job_labels(ca)
+    jb, ja = job_labels(rcb), job_labels(rca)
     for side, seen in (("before", jb), ("after", ja)):
         for name, sets in seen.items():
             if len(sets) > 1:
@@ -1500,7 +1507,7 @@ def cmd_compare(a):
         def runner_sets(rs):
             return {frozenset(tuple(sorted(j.get("labels") or [])) for j in latest_jobs(r) if executed(j))
                     for r in rs}
-        sets = runner_sets(cb) | runner_sets(ca)
+        sets = runner_sets(rcb) | runner_sets(rca)
         if len(sets) > 1:
             die("the timed runs ran on %d different sets of runners, so a shift in the mix could pass"
                 " for a speedup; pass --job to time one job, or --label with a label only one set has"
@@ -1530,9 +1537,9 @@ def cmd_compare(a):
         show = "; ".join("%d runs ran %s" % (n, ", ".join(k) or "no job") for k, n in mb_[:4]) + (
             "; and %d more sets" % (len(mb_) - 4) if len(mb_) > 4 else "")
         die("the timed runs%s ran different sets of jobs (a path filter or an `if:`), so a median %s"
-            " moves with the mix (before: %d sets, after: %d). Before: %s. Name a workload with --ran JOB that"
-            " leaves one set a side (runs that ran that job, chosen from the before side), or time one job's"
-            " own duration with --job"
+            " moves with the mix (before: %d sets, after: %d). Before: %s. Time one job's own duration with"
+            " --job for a verdict; --ran JOB (runs that ran that job, leaving one set a side) gives a"
+            " descriptive reading only"
             % (" that ran %s" % a.ran if a.ran else "", "of a job's end on the run's clock" if a.end
                else "over the whole runs", len(mb_), len(ma_), show))
     graph_changed = (not a.job or a.end) and len(mb_) == 1 and len(ma_) == 1 and mb_[0][0] != ma_[0][0]
@@ -1729,16 +1736,16 @@ def cmd_compare(a):
             and res["fewer_reached_by"]:
         x = next(c for c in res["reach_checks"] if c["check"] == res["fewer_reached_by"])
         res["verdict_code"] += "_fewer_reached"
-        res["verdict"] += ("; but fewer runs reached %s after (%s: %d of %d missed it, against %d of %d before):"
-                           " stopped upstream, skipped by a condition or left out of a matrix, so the runs that"
-                           " reached it may be the fast ones; name why before calling it faster"
-                           % ((" and ".join(names), {"listed": "of the runs that list it or a caller",
-                                                    "listed by name": "of the runs that list it by name",
-                                                    "ran": "of the runs where %s ran" % a.ran,
-                                                    "job": "of the runs where %s ran, missing %s" % (a.job, a.ran),
-                                                    "stopped": "counting runs that list it, missed it and had a job fail or be cancelled, of all runs",
-                                                    "missed with a failure": "counting runs that missed it and had a failure or cancellation, not necessarily before it, of all runs",
-                                                    "all": "of all runs"}[x["check"]])
+        res["verdict"] += ("; but which runs reached %s changed (%s: %d of %d after, against %d of %d before):"
+                           " runs stopped upstream, skipped by a condition or left out of a matrix may have been"
+                           " the slow ones; name why before calling it faster"
+                           % ((" and ".join(names), {"listed": "runs that didn't run it, of those that list it or a caller",
+                                                    "listed by name": "runs that didn't run it, of those that list it by name",
+                                                    "ran": "runs that didn't run it, of those where %s ran" % a.ran,
+                                                    "job": "runs where %s ran without %s, of those where %s ran" % (a.job, a.ran, a.job),
+                                                    "stopped": "runs that list it, didn't run it and had a job fail or be cancelled, of all runs",
+                                                    "missed with a failure": "runs that didn't run it and had a failure or cancellation, not necessarily before it, of all runs",
+                                                    "all": "runs that didn't run it, of all runs"}[x["check"]])
                               + tuple(x["missed_after"]) + tuple(x["missed_before"])))
     if work and res["verdict_code"] in qualify + tuple(q + "_more_cancelled" for q in qualify) + tuple(
             q + s_ for q in qualify for s_ in ("_fewer_reached", "_more_cancelled_fewer_reached")) and res["more_reached_by"]:
