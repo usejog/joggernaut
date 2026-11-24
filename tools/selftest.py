@@ -2874,6 +2874,53 @@ with tempfile.TemporaryDirectory() as t:
                 [_cr(73000 + i, [_J("test", 0, 10 + i, labels=(), group=2)]) for i in range(6)], "--job", "test")
     if "error" not in v:
         bad.append("compare #12: a label-less job's group change passed: %r" % v.get("verdict"))
+    # Round 8. Neutral runs still show which runner pushes asked for.
+    def neutral(base_id, n_pool):
+        return [_cr(base_id + i, [_J("test", 0, 10 if i < 12 else 100, labels=((n_pool,) if (i < 12) == (n_pool == "M") else ("L",)),
+                                     conclusion="neutral" if (i < 12) == (n_pool == "M") else "success")],
+                    conclusion="neutral" if (i < 12) == (n_pool == "M") else "success") for i in range(24)]
+    v, r = _cmp(t, neutral(74000, "M"), neutral(75000, "N"), "--job", "test")
+    if "error" not in v:
+        bad.append("compare: neutral runs' runners were ignored: %r" % v.get("verdict"))
+    # --ran gate: failures counted among the runs where gate got a runner, not where it was queued.
+    def gate_fail(base_id, after):
+        rows = []
+        for i in range(24):
+            kind = "fast" if i < 6 else "slow" if i < 12 else "fail"
+            got = (kind == "slow") if not after else kind in ("fast", "fail")
+            g = _J("gate", 0, 1, labels=("L",), conclusion="success" if got else "cancelled")
+            x = _cr(base_id + i, [g, _J("test", 1, 10 if kind == "fast" else 100, labels=("L",),
+                                        conclusion="failure" if kind == "fail" else "success")],
+                    conclusion="failure" if kind == "fail" else "success")
+            if not got:
+                x["jobs"][0]["runner_name"] = None
+            rows.append(x)
+        return rows
+    v, r = _cmp(t, gate_fail(76000, False), gate_fail(77000, True), "--ran", "gate", "--job", "test")
+    if v.get("verdict_code") != "not_valid":
+        bad.append("compare --ran: a rise in failures where the job ran was hidden: %r %r"
+                   % (v.get("verdict") or v, (v.get("failed_before_job"), v.get("failed_after_job"))))
+    # --ran gate: a rerun whose retried gate was cancelled in the queue still shows the pool its
+    # first attempt used.
+    def gate_retry(base_id, fast_spare):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            secs = 10 if fast else 100
+            if fast == fast_spare:
+                g2 = _J("gate", 150, 1, labels=("self-hosted", "std"), conclusion="cancelled", attempt=2)
+                x = _cr(base_id + i, [_J("gate", 0, 1, labels=("self-hosted", "std")),
+                                      _J("test", 1, secs, labels=("self-hosted", "spare"), conclusion="failure"),
+                                      g2, _J("test", 200, secs, labels=("self-hosted", "spare"), attempt=2)], attempt=2)
+                x["jobs"][2]["runner_name"] = None
+            else:
+                x = _cr(base_id + i, [_J("gate", 0, 1, labels=("self-hosted", "std")),
+                                      _J("test", 1, secs, labels=("self-hosted", "std"))])
+            rows.append(x)
+        return rows
+    v, r = _cmp(t, gate_retry(78000, True), gate_retry(79000, False), "--ran", "gate", "--job", "test", "--label", "self-hosted")
+    if "error" not in v:
+        bad.append("compare --ran: a queued gate on a retry hid the pool: %r" % (v.get("reading") or v.get("verdict")))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))

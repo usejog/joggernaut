@@ -1476,7 +1476,7 @@ def cmd_compare(a):
         die("--min-runs can't go below %d: with fewer runs a side, a 95%% interval can"
             " hardly or never rule out no change" % MIN_RUNS)
     # --ran's workload: runs where that job got a runner (a job cancelled in the queue didn't run).
-    ran_job = (lambda r: any(j.get("name") == a.ran for j in latest_jobs(r) if on_a_runner(j))) if a.ran else None
+    ran_job = (lambda r: any(j.get("name") == a.ran for j in r.get("jobs", []) if on_a_runner(j))) if a.ran else None
     excluded = []
     # The timed runs, chosen once: the job sets, the runner checks over the timed runs and
     # the timings read this; the failure, cancellation and reach checks read every run.
@@ -1496,7 +1496,8 @@ def cmd_compare(a):
     # event and base, any outcome, in the selected cache state, and with --ran the runs where
     # that job got a runner in some attempt.
     ran_any = lambda r: any(j.get("name") == a.ran and on_a_runner(j) for j in r.get("jobs", []))
-    selected = lambda rs: [r for r in finished(rs) if (not a.ran or ran_any(r))
+    # Every completed run, neutral and skipped ones too, as the label check read before.
+    selected = lambda rs: [r for r in rs if in_workflow(r) and (not a.ran or ran_any(r))
                            and (not a.cache or cache.get(str(r["id"])) == a.cache)]
     # The runs the per-job and whole-run runner checks read, as before: every green run of
     # the cohort, timed or not (a canary that fails on one pool keeps its runs from being
@@ -1654,7 +1655,8 @@ def cmd_compare(a):
     # Both named: each one's runs, and the runs where both ran, are checked, and the worst
     # counts. (Failures in one job can stop runs before the other starts.)
     names = list(dict.fromkeys(n for n in (a.ran, a.job) if n))
-    ran_all = lambda r, ns: all(any(j.get("name") == n and executed(j) for j in r.get("jobs", [])) for n in ns)
+    # A job ran when it got a runner (one cancelled in the queue has a start time and no runner).
+    ran_all = lambda r, ns: all(any(j.get("name") == n and on_a_runner(j) for j in r.get("jobs", [])) for n in ns)
     workloads = [[n] for n in names] + ([names] if len(names) > 1 else [])
     rate_ = lambda f: f[0] / float(f[1]) if f[1] else 0.0
     work, wfb, wfa, started = None, (0, 0), (0, 0), (lambda rs: [])
