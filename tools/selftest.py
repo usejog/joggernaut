@@ -574,10 +574,12 @@ with tempfile.TemporaryDirectory() as t:
     got = [json.loads(l)["pull_request_bases"] for l in open(out)] if os.path.exists(out) else []
     if r.returncode != 0 or not got or got[0] != ["main"] or got[1] != []:
         bad.append("fetch: a closed pull request's branch wasn't found, or a fork's was: %r\n%s" % (got[:2], r.stderr))
-    # #37: two closed pull requests reused one branch: each run gets the one open when it was
-    # created (and its base); a pulls listing with no closed_at field finds none.
+    # #37: two pull requests reused one branch (the first closed, the second open): each run
+    # finds the one open when it was created; the bases stay every base the branch used; a
+    # pulls listing with no closed_at field finds none.
     reused = [dict(r, status="completed", pull_requests=[], head_repository={"full_name": "o/r"}, head_branch="reused")
-              for r in rows[:2]]
+              for r in rows[:3]]
+    reused[2]["event"] = "pull_request_review"  # can come on a closed pull request: never matched
     json.dump(reused, open(t + "/reused.json", "w"))
     c0, c1 = reused[0]["created_at"], reused[1]["created_at"]
     for pulls, want in (({"o:reused": [{"number": 5, "base": {"ref": "main"}, "created_at": "2026-01-01T00:00:00Z",
@@ -591,9 +593,14 @@ with tempfile.TemporaryDirectory() as t:
                            cwd=t, env=dict(env, FAKE_RUNS=t + "/reused.json", FAKE_PULLS=json.dumps(pulls)),
                            capture_output=True, text=True)
         got = sorted((x["created_at"], x.get("pull_requests_found"), x["pull_request_bases"])
-                     for x in (json.loads(l) for l in open(out))) if os.path.exists(out) else []
-        expect = ([(min(c0, c1), [5], ["main"]), (max(c0, c1), [9], ["release"])] if want == "two"
-                  else [(min(c0, c1), [], ["main"]), (max(c0, c1), [], ["main"])])
+                     for x in (json.loads(l) for l in open(out)) if x["event"] == "pull_request") \
+            if os.path.exists(out) else []
+        review = [x.get("pull_requests_found") for x in (json.loads(l) for l in open(out))
+                  if x["event"] == "pull_request_review"] if os.path.exists(out) else []
+        if review != [[]]:
+            bad.append("fetch #37: a review event's run was matched to a pull request: %r" % review)
+        expect = ([(min(c0, c1), [5], ["main", "release"]), (max(c0, c1), [9], ["main", "release"])]
+                  if want == "two" else [(min(c0, c1), [], ["main"]), (max(c0, c1), [], ["main"])])
         if r.returncode != 0 or got != expect:
             bad.append("fetch #37: closed pull requests on one branch (%s): %r\n%s" % (want, got, r.stderr))
     r, n = fetch(["completed"] * 5 + ["queued"])
@@ -2495,7 +2502,7 @@ if not got or got["tests"][0]["alone_on_pull_requests"] != 3:
     bad.append("flaky #37: two closed pull requests on one branch counted as one: %r" % (got or r.stderr))
 rows[1]["pull_requests_found"] = [5, 9]
 got, r = _flaky_rows(rows, reps)
-if not got or got["tests"][0]["alone_on_pull_requests"] != 2 or got.get("runs_with_several_pull_requests") != 2:
+if not got or got["tests"][0]["alone_on_pull_requests"] != 2 or got.get("runs_keyed_by_branch_unsure") != 2:
     bad.append("flaky #37: a branch with an unsure run must key every run of it by branch: %r" % (got or r.stderr))
 
 # #38: a rerun whose every attempt's report shows the test passing separates two failures.
@@ -2506,14 +2513,24 @@ def _rr(i, pr, st, attempt=1):
 rows = [_rr(0, 1, "p"), _rr(1, 2, "f"), _rr(2, 3, "p", attempt=2), _rr(3, 4, "f"), _rr(4, 5, "p")]
 both = {"attempt-1/a/r.xml": _rep("p"), "attempt-2/a/r.xml": _rep("p")}
 for folders, want in ((both, 2), ({"attempt-2/a/r.xml": _rep("p")}, 0),
-                      (dict(both, **{"attempt-3/a/r.xml": _rep("p")}), 0)):
-    reps = {rows[0]["id"]: {"r.xml": _rep("p")}, rows[1]["id"]: {"a/r.xml": _rep("f")},
+                      (dict(both, **{"attempt-3/a/r.xml": _rep("p")}), 0),
+                      (dict(both, **{"attempt-3/coverage.xml": "<coverage/>"}), 0),
+                      ({"a/attempt-1/r.xml": _rep("p"), "a/attempt-2/r.xml": _rep("p")}, 0)):
+    reps = {rows[0]["id"]: {"a/r.xml": _rep("p")}, rows[1]["id"]: {"a/r.xml": _rep("f")},
             rows[2]["id"]: folders, rows[3]["id"]: {"a/r.xml": _rep("f")}, rows[4]["id"]: {"a/r.xml": _rep("p")}}
-    reps[rows[0]["id"]] = {"a/r.xml": _rep("p")}
     got, r = _flaky_rows(rows, reps)
     if not got or got["tests"][0]["alone_on_pull_requests"] != want:
         bad.append("flaky #38: a rerun with attempt folders %s: alone on %r, not %d"
                    % (sorted(folders), (got or {"tests": [{}]})["tests"][0].get("alone_on_pull_requests"), want))
+
+# #38: legs split across attempts (linux in attempt 1, windows in attempt 2) show no test
+# passing in both, so no pass.
+reps = {rows[0]["id"]: {"a/r.xml": _rep("p")}, rows[1]["id"]: {"a/r.xml": _rep("f")},
+        rows[2]["id"]: {"attempt-1/a/r.xml": _rep("p"), "attempt-2/b/r.xml": _rep("p")},
+        rows[3]["id"]: {"a/r.xml": _rep("f")}, rows[4]["id"]: {"a/r.xml": _rep("p")}}
+got, r = _flaky_rows(rows, reps)
+if not got or [x for x in got["tests"] if x["test"].startswith("a::")][0]["alone_on_pull_requests"] != 0:
+    bad.append("flaky #38: legs split across attempts made a pass: %r" % (got or r.stderr))
 
 # #35: two projects in one artifact, kept apart by a folder each, are two tests.
 rows = [_fr(0, 1, False)]

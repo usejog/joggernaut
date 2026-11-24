@@ -515,11 +515,10 @@ def pr_bases(a, r):
     """The branch each pull request of a run targeted, and the pull requests found for a run
     GitHub no longer lists. GitHub lists a run's pull request only while it is open, so for
     one from this repository ask for the pull requests from the run's head branch in any
-    state (open, merged or closed). A pull_request run is created by an event on an open pull
-    request, so the ones open when the run was created are its candidates: one, and its
-    number and base are the run's; several (open at once from one branch), all their
-    numbers, and the bases of every pull request from the branch, as before. A fork's run
-    records none: the measuring guide leaves fork runs out on both sides."""
+    state (open, merged or closed). A pull_request or pull_request_target run is created by an
+    event on an open pull request (or just after it closed), so the ones open then (with an
+    hour's grace after a close) are its candidates, saved as found: one is the run's. A fork's
+    run records none: the measuring guide leaves fork runs out on both sides."""
     listed = r.get("pull_requests") or []
     head_repo = (r.get("head_repository") or {}).get("full_name")
     if (listed or not (r.get("event") or "").startswith("pull_request") or not r.get("head_branch")
@@ -533,10 +532,15 @@ def pr_bases(a, r):
     # Every pull request needs its open time and a closed_at field (null while open), or
     # which were open then can't be told.
     whole = made is not None and all(p.get("number") and p.get("created_at") and "closed_at" in p for p in prs)
+    # Only pull_request and pull_request_target runs: a review or comment event can come on a
+    # closed pull request. A `closed` event's run is created just after the close, so a pull
+    # request counts as open until an hour after it closed: such a run then matches its own
+    # pull request too, and with another open at once it is unsure, never the wrong one.
+    whole = whole and r.get("event") in ("pull_request", "pull_request_target")
     open_then = [p for p in prs if whole and ts(p["created_at"]) <= made
-                 and (p["closed_at"] is None or made <= ts(p["closed_at"]))]
-    if len(open_then) == 1:
-        return [(open_then[0].get("base") or {}).get("ref")], [open_then[0]["number"]]
+                 and (p["closed_at"] is None or made <= ts(p["closed_at"]) + 3600)]
+    # The bases stay every base the branch's pull requests used, as before: a pull request's
+    # base can change after the run, so the one found now isn't the run's for certain.
     return sorted({(p.get("base") or {}).get("ref") for p in prs}), sorted(p["number"] for p in open_then)
 
 
@@ -2119,12 +2123,14 @@ def failed_tests(folder, short=None):
         x for x in os.path.relpath(path, folder).split(os.sep)[:-1]
         if not re.match(r"^(?:\d+|attempt[-_ ]?\d+)$", x, re.I)))
 
+    # Only a folder right under the run's (RUN_ID/attempt-N/) says which attempt uploaded a
+    # report; a folder named so inside an artifact says nothing about the run's attempts.
     def attempt_of(path):
-        for x in os.path.relpath(path, folder).split(os.sep)[:-1]:
-            m = re.match(r"^attempt[-_ ]?(\d+)$", x, re.I)
-            if m:
-                return int(m.group(1))
-        return None
+        top = os.path.relpath(path, folder).split(os.sep)[0]
+        m = re.match(r"^attempt[-_ ]?(\d+)$", top, re.I)
+        return int(m.group(1)) if m and top != os.path.basename(path) else None
+    dirs = {int(m.group(1)) for x in os.listdir(folder) if os.path.isdir(os.path.join(folder, x))
+            for m in [re.match(r"^attempt[-_ ]?(\d+)$", x, re.I)] if m}
 
     for root, _, files in os.walk(folder):
         for f in sorted(files):
@@ -2182,7 +2188,9 @@ def failed_tests(folder, short=None):
                         att[0].add(name(fields[:-1]))
     if not found:
         return None if not skipped else ([], [], skipped, set(), set(), {})
-    return failed, passed - failed, skipped, txt, junit, {n: p - f for n, (f, p) in attempts.items()}
+    by_att = {n: set() for n in dirs}  # an attempt folder with no report shows nothing passing
+    by_att.update({n: p - f for n, (f, p) in attempts.items()})
+    return failed, passed - failed, skipped, txt, junit, by_att
 
 
 def cmd_flaky(a):
@@ -2326,7 +2334,7 @@ def cmd_flaky(a):
                           "failed_txt_names_no_report_shows": lone, "workflows_with_no_junit_pass_evidence": no_pass,
                           "runs_without_base": sum(1 for r in runs if (r.get("event") or "").startswith("pull_request")
                                                    and not r.get("pull_request_bases")),
-                          "runs_with_several_pull_requests": several,
+                          "runs_keyed_by_branch_unsure": several,
                           "xml_not_junit": not_junit}, indent=2))
         return
     print("reports read for %d runs; %d failed runs have none (unknown: never counted as a pass)"
