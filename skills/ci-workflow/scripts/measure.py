@@ -1655,13 +1655,18 @@ def cmd_compare(a):
     # Both named: each one's runs, and the runs where both ran, are checked, and the worst
     # counts. (Failures in one job can stop runs before the other starts.)
     names = list(dict.fromkeys(n for n in (a.ran, a.job) if n))
-    # A job ran when it got a runner (one cancelled in the queue has a start time and no runner).
-    ran_all = lambda r, ns: all(any(j.get("name") == n and on_a_runner(j) for j in r.get("jobs", [])) for n in ns)
+    # A run "ran" a job when the job asked for a runner (it has a start time), as before; the
+    # failure and cancellation checks also read the runs where it got one (a job cancelled in
+    # the queue never did), and the worse of the two counts: a failure that stopped the job
+    # before it ran, and a workload that only queued it, each stay in sight.
+    ran_all = lambda r, ns: all(any(j.get("name") == n and executed(j) for j in r.get("jobs", [])) for n in ns)
+    ran_got = lambda r, ns: all(any(j.get("name") == n and on_a_runner(j) for j in r.get("jobs", [])) for n in ns)
     workloads = [[n] for n in names] + ([names] if len(names) > 1 else [])
+    readings = [(ns, f) for ns in workloads for f in (ran_all, ran_got)]
     rate_ = lambda f: f[0] / float(f[1]) if f[1] else 0.0
     work, wfb, wfa, started = None, (0, 0), (0, 0), (lambda rs: [])
-    for ns in workloads:
-        sel = (lambda ns_: lambda rs: [r for r in rs if ran_all(r, ns_)])(ns)
+    for ns, ran_f in readings:
+        sel = (lambda ns_, f_: lambda rs: [r for r in rs if f_(r, ns_)])(ns, ran_f)
         fb_, fa_ = fail_rate(sel(rb)), fail_rate(sel(ra))
         worse = (fails_rose(fb_, fa_), rate_(fa_) - rate_(fb_))
         if work is None or worse > (fails_rose(wfb, wfa), rate_(wfa) - rate_(wfb)):
@@ -1723,10 +1728,10 @@ def cmd_compare(a):
     # Cancellations are checked in every workload on its own (each named job's runs, and the
     # runs where all ran); the first that rose beyond chance is the one reported.
     wcb, wca, cwork = (0, 0), (0, 0), work
-    for ns in workloads:
-        sel = [r for r in rb if ran_all(r, ns)], [r for r in ra if ran_all(r, ns)]
+    for ns, ran_f in readings:
+        sel = [r for r in rb if ran_f(r, ns)], [r for r in ra if ran_f(r, ns)]
         cb_, ca_ = cancelled(sel[0]), cancelled(sel[1])
-        if ns == workloads[0] or (fails_rose(cb_, ca_) and not fails_rose(wcb, wca)):
+        if (ns, ran_f) == readings[0] or (fails_rose(cb_, ca_) and not fails_rose(wcb, wca)):
             wcb, wca, cwork = cb_, ca_, " and ".join(ns)
     if work:
         res["cancelled_before_job"], res["cancelled_after_job"] = wcb, wca
@@ -1881,7 +1886,7 @@ def cmd_compare(a):
             res["verdict_code"] += "_routing_changed"
             res["verdict"] += ("; but which runs ran on %s changed (%d of %d didn't first run %s there after, against"
                                " %d of %d before): the timed runs may not be like the runs before" % (
-                                   (a.label,) + oa[:1] + oa[1:] + (a.job or "their jobs",) + ob))
+                                   (a.label,) + oa[:1] + oa[1:] + (a.job or "every job",) + ob))
     if graph_changed and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
         # One set a side, different sets: the change altered the jobs, or the mix of pull
         # requests did. Never a plain verdict: only the workflow's diff can say which.
@@ -1952,7 +1957,7 @@ def cmd_compare(a):
     if a.label:
         print("runs whose first attempt didn't run %s on %s (elsewhere, or only on a retry): before %d of %d,"
               " after %d of %d%s" % (
-            (a.job or "a job", a.label) + tuple(res["off_runner_before"]) + tuple(res["off_runner_after"]) + (
+            (a.job or "every job", a.label) + tuple(res["off_runner_before"]) + tuple(res["off_runner_after"]) + (
                 ": the verdict holds only if the same pushes reach %s on both sides (counts can't show a swap)"
                 % a.label if res["off_runner_before"][0] or res["off_runner_after"][0] else "",)))
     if not groups:

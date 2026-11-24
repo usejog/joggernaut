@@ -2921,6 +2921,22 @@ with tempfile.TemporaryDirectory() as t:
     v, r = _cmp(t, gate_retry(78000, True), gate_retry(79000, False), "--ran", "gate", "--job", "test", "--label", "self-hosted")
     if "error" not in v:
         bad.append("compare --ran: a queued gate on a retry hid the pool: %r" % (v.get("reading") or v.get("verdict")))
+    # Round 9. Fail-fast cancels test (b) while it waits, on six new failures after: the runs
+    # where it asked for a runner fail more after, so not valid, as before.
+    def failfast(base_id, n_ff, n_docs):
+        rows = [_cr(base_id + i, [_J("test (a)", 0, 50, labels=("L",)), _J("test (b)", 0, (100 if base_id < 81000 else 50) + i % 3, labels=("L",))])
+                for i in range(20)]
+        rows += [_cr(base_id + 100 + i, [_J("docs", 0, 5, labels=("L",), conclusion="failure")], conclusion="failure")
+                 for i in range(n_docs)]
+        for i in range(n_ff):
+            x = _cr(base_id + 200 + i, [_J("test (a)", 0, 5, labels=("L",), conclusion="failure"),
+                                        _J("test (b)", 0, 1, labels=("L",), conclusion="cancelled")], conclusion="failure")
+            x["jobs"][1]["runner_name"] = None
+            rows.append(x)
+        return rows
+    v, r = _cmp(t, failfast(80000, 0, 10), failfast(81000, 6, 4), "--job", "test (b)")
+    if v.get("verdict_code") != "not_valid":
+        bad.append("compare: failures that cancelled the job in the queue left its workload: %r" % (v.get("verdict") or v))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))
