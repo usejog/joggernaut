@@ -2567,8 +2567,13 @@ with tempfile.TemporaryDirectory() as t:
         if k >= 3:
             del x["path"]
     got = json.loads(_split(t, rows, "--json").stdout or "{}")
-    if got.get("job_sets") != 2:
-        bad.append("split: workflows told apart by id made one set of jobs: %r" % got.get("job_sets"))
+    # An older failed run of ci.yml with no id doesn't make id 35 unplaceable: ci.yml's id is 17.
+    old_ci = copy.deepcopy(rows[0])
+    old_ci.update(id=old_ci["id"] + 900, conclusion="failure", head_sha="%040d" % 999, pull_requests=[999])
+    del old_ci["workflow_id"]
+    got2 = json.loads(_split(t, rows + [old_ci], "--json").stdout or "{}")
+    if got.get("job_sets") != 2 or got2.get("job_sets") != 2:
+        bad.append("split: workflows told apart by id made one set of jobs: %r %r" % (got.get("job_sets"), got2.get("job_sets")))
     # #14: a repository whose pull-request workflow runs on pull_request_target alone.
     rows = []
     for i in range(6):

@@ -887,12 +887,13 @@ def cmd_split(a):
     for r in every:
         if not r.get("path") and r.get("workflow_id") in id_path:
             r["path"] = id_path[r["workflow_id"]]
-    # An id stands for a workflow only where every run with a file has its id too: a file from
-    # an older fetch has a file and no id, and its workflow's id-only runs would make another.
-    if any(r.get("path") and r.get("workflow_id") is None for r in every):
-        for r in every:
-            if not r.get("path"):
-                r.pop("workflow_id", None)
+    # An id stands for a workflow unless it could be a file whose id is unknown (a file from an
+    # older fetch has no id) that runs under the same display name: then it can't be placed.
+    known = set(id_path.values())
+    unknown_names = {r.get("name") for r in every if r.get("path") and r["path"] not in known}
+    for r in every:
+        if not r.get("path") and r.get("name") in unknown_names:
+            r.pop("workflow_id", None)
     # --workflow names a file (ci.yml) when one of the runs' files has that name, else a
     # display name: never both, so a file and another file's display name don't pool.
     files = {os.path.basename(r.get("path") or "") for r in every}
