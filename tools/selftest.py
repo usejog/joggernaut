@@ -2736,6 +2736,63 @@ with tempfile.TemporaryDirectory() as t:
                 [_cr(47000 + i, [_J("test", 0, 50 + i, labels=("L",), group=7)]) for i in range(6)], "--label", "L")
     if "error" not in v or "runner group 0 before and 7 after" not in r.stderr:
         bad.append("compare #12: a move from group 0 to group 7 passed: %r" % (v.get("verdict") or r.stderr))
+    # Round 4. A canary on another pool fails and is retried there: the reruns' first attempts
+    # show the extra pool, on the fast pushes before and the slow after. Refused.
+    def canary_rerun(base_id, fast_canary):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            secs = 10 if fast else 100
+            if fast == fast_canary:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "std")),
+                                              _J("canary", 0, 5, labels=("self-hosted", "exp"), conclusion="failure"),
+                                              _J("test", 200, secs, labels=("self-hosted", "std"), attempt=2),
+                                              _J("canary", 200, 5, labels=("self-hosted", "exp"), attempt=2)], attempt=2))
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "std"))]))
+        return rows
+    v, r = _cmp(t, canary_rerun(48000, True), canary_rerun(49000, False), "--label", "self-hosted")
+    if "error" not in v:
+        bad.append("compare: a pool seen only in reruns' first attempts passed for whole runs: %r" % v.get("verdict"))
+    # One null group id is unknown, not another runner.
+    b_ = [_cr(50000 + i, [_J("test", 0, 100 + i, labels=("L",), group=1)]) for i in range(6)]
+    a_ = [_cr(51000 + i, [_J("test", 0, 50 + i, labels=("L",), group=None if i == 0 else 1)]) for i in range(6)]
+    v, r = _cmp(t, b_, a_, "--label", "L")
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare: one null runner group refused whole runs: %r" % (v.get("verdict") or v))
+    # --end without --label: a helper always on M doesn't hide test moving to M on failed runs.
+    def helper(base_id, fail_fast, after=False):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            if fast == fail_fast:
+                rows.append(_cr(base_id + i, [_J("helper", 0, 5, labels=("M",)),
+                                              _J("test", 5, 5, labels=("L" if after else "M",), conclusion="failure")], conclusion="failure"))
+            else:
+                rows.append(_cr(base_id + i, [_J("helper", 0, 5, labels=("M",)),
+                                              _J("test", 5, 10 if fast else 100, labels=("L",))]))
+        return rows
+    v, r = _cmp(t, helper(52000, True), helper(53000, False, True), "--job", "test", "--end")
+    if "error" not in v:
+        bad.append("compare --end: a helper's runner hid the timed job's change: %r" % v.get("verdict"))
+    # --end --label L: an earlier same-name job moving from M to N is refused.
+    def earlier(base_id, pool, secs):
+        return [_cr(base_id + i, [_J("helper-m", 0, 1, labels=("M",)), _J("helper-n", 0, 1, labels=("N",)),
+                                  _J("test", 1, secs, labels=(pool,)), _J("test", 1 + secs, 10, labels=("L",))])
+                for i in range(6)]
+    v, r = _cmp(t, earlier(54000, "M", 90), earlier(55000, "N", 5), "--job", "test", "--end", "--label", "L")
+    if "error" not in v:
+        bad.append("compare --end --label: an earlier same-name job's move passed: %r" % (v.get("reading") or v.get("verdict")))
+    # An older before file (no group fields) against a newer after file: labels alone, a verdict,
+    # and the note.
+    old_b = [_cr(56000 + i, [_J("build", 0, 5, labels=("ubuntu-latest",)), _J("test", 5, 100 + i, labels=("macos-latest",))],
+                 groups=False) for i in range(6)]
+    new_a = [_cr(57000 + i, [_J("build", 0, 5, labels=("ubuntu-latest",), group=0),
+                             _J("test", 5, 50 + i, labels=("macos-latest",), group=0)]) for i in range(6)]
+    v, r = _cmp(t, old_b, new_a)
+    text = run([M, "compare", "--before", t + "/b", "--after", t + "/a"]).stdout
+    if not (v.get("verdict_code") or "").startswith("faster") or "have none saved" not in text:
+        bad.append("compare: an older before file refused, or no note: %r\n%s" % (v.get("verdict") or v, text))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))
