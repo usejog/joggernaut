@@ -1958,7 +1958,7 @@ def junit_results(path):
                                               else text[0] if text else "")).strip()
                   # Run-specific parts blanked: addresses, temp names, then any number. Keyed by a
                   # short hash, never shown: a message can hold a secret (a URL with a password).
-                  msg = re.sub(r"0[xX][0-9a-fA-F]+|\btmp[\w.-]{6,}|\d+(?:\.\d+)*", "#", " ".join(msg.split()))
+                  msg = re.sub(r"0[xX][0-9a-fA-F]+|\btmp[\w.-]{6,}|\d+(?:\.\d+)*(?:[eE][-+]?\d+)?", "#", " ".join(msg.split()))
                   msg = "message %s" % hashlib.sha256(msg.encode()).hexdigest()[:8] if msg else ""
                   k = json.dumps([where, suite_path, suite_file, local(c.tag), c.get("type") or "", msg])
                   errs[k] = errs.get(k, 0) + 1

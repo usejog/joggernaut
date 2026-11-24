@@ -834,7 +834,7 @@ if r.returncode == 0 or "hunter2" in r.stdout + r.stderr:
 # #6: the same suite error, its message differing only in numbers (a time, a pid), is no change.
 r = two_reports('<testsuite name="s"><error type="RuntimeError" message="worker 12 died after 3.2s"/>'
                 '<testcase classname="k" name="x"/></testsuite>',
-                '<testsuite name="s"><error type="RuntimeError" message="worker 7 died after 4s"/>'
+                '<testsuite name="s"><error type="RuntimeError" message="worker 7 died after 1e-05s"/>'
                 '<testcase classname="k" name="x"/></testsuite>')
 if r.returncode != 0:
     bad.append("tests: a suite error whose message differs only in numbers counted as new\n" + r.stdout + r.stderr)
@@ -2529,6 +2529,10 @@ for body, want, what in ((WRITTEN, True, "each lint written out"), (LOOP_OK, Tru
                          ('for t in ts css md yaml json spell licenses; do npm "lint:$t"; done', False,
                           "npm without run (npm runs no script that way)"),
                          ('mkdir "$HOME/lint-logs"\n' + WRITTEN, True, "a fold that makes a folder in its home"),
+                         ('for t in ts css md yaml json spell licenses; do pnpm --filter acme-site run "lint:$t"; done', False,
+                          "pnpm --filter on a package that isn't there (runs nothing)"),
+                         (WRITTEN + '\necho "Lint passed" >> "$GITHUB_STEP_SUMMARY"', True, "a fold writing the step summary"),
+                         ("mkdir reports\n" + WRITTEN, True, "mkdir reports in both jobs (each job's own machine)"),
                          ("pnpm --filter . run lint:ts\n" + "\n".join("pnpm run lint:%s" % x for x in ["css", "md", "yaml", "json", "spell", "licenses"]),
                           True, "a fold with pnpm --filter"),
                          (LOOP_DROPS, False, "a loop whose bare wait drops exit codes"),
@@ -2560,7 +2564,23 @@ for body, want, what in ((WRITTEN, True, "each lint written out"), (LOOP_OK, Tru
                 "jobs:\n", "defaults:\n  run:\n    shell: bash {0}\njobs:\n", 1).replace(
                 "      - run: pnpm test\n", "      - run: pnpm test\n        shell: bash\n", 1)
             open(work + "/.github/workflows/ci.yml", "w").write(text)
+        if what == "mkdir reports in both jobs (each job's own machine)":
+            text = open(work + "/.github/workflows/ci.yml").read().replace(
+                "      - run: pnpm test\n", "      - run: mkdir reports\n      - run: pnpm test\n", 1)
+            open(work + "/.github/workflows/ci.yml", "w").write(text)
         if what == "each lint written out":
+            # The same fold folded (>-) with blank lines between the commands, and a quoted
+            # shell with a comment: still seven commands.
+            folded = open(work + "/.github/workflows/ci.yml").read().replace("        run: |\n", "        run: >-\n", 1)
+            folded = folded.replace("\n          pnpm run lint:", "\n\n          pnpm run lint:")
+            folded = folded.replace("  test:\n", '        shell: "bash" # pipefail\n  test:\n', 1)
+            open(work + "/.github/workflows/ci.yml", "w").write(folded)
+            open(work + "/PR.md", "w").write("fold\n")
+            r = run([E + "/ci-workflow/check.py", work])
+            if r.returncode != 0:
+                bad.append("ci-workflow check: a folded (>-) fold with a quoted shell should pass\n" + r.stdout)
+            open(work + "/.github/workflows/ci.yml", "w").write(
+                FOLD % "\n".join("          " + l if l else "" for l in body.split("\n")))
             # The same fold with `shell: bash` after the run block: still one step, still passes.
             text = open(work + "/.github/workflows/ci.yml").read().replace("  test:\n", "        shell: bash\n  test:\n", 1)
             open(work + "/.github/workflows/ci.yml", "w").write(text)

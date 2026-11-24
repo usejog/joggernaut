@@ -35,8 +35,9 @@ def yaml_load(text):
 
     def scalar(v):
         v = v.strip()
-        if v[:1] in ("'", '"') and v[-1:] == v[:1]:
-            return v[1:-1]
+        q = re.match(r"""^(['"])(.*?)\1(\s+#.*)?$""", v)
+        if q:
+            return q.group(2)
         v = re.sub(r"\s+#.*$", "", v)
         if v.startswith("{") and v.endswith("}"):
             return {k.strip(): scalar(x) for k, _, x in (p.partition(":") for p in v[1:-1].split(",") if ":" in p)}
@@ -59,7 +60,21 @@ def yaml_load(text):
             body.pop()
         pad = min((ind(l) for l in body if l.strip()), default=0)
         body = [l[pad:] for l in body]
-        return (" ".join(l.strip() for l in body if l.strip()) if style == ">" else "\n".join(body)), i
+        if style != ">":
+            return "\n".join(body), i
+        # Folded: lines join with a space; a blank line, or a more indented line, keeps the break.
+        text, prev = "", None
+        for l in body:
+            if not l.strip():
+                text += "\n"
+                prev = None
+            elif prev is None or l.startswith(" ") or prev.startswith(" "):
+                text += ("\n" if prev is not None else "") + l
+                prev = l
+            else:
+                text += " " + l
+                prev = l
+        return text, i
 
     def node(i, col):
         """The value starting at line i, indented col: a list or a mapping."""
@@ -113,7 +128,7 @@ def run_steps():
         if not isinstance(doc, dict):
             continue
         run_of = lambda x: ((x or {}).get("defaults") or {}).get("run") or {}
-        for job in (doc.get("jobs") or {}).values():
+        for job_id, job in (doc.get("jobs") or {}).items():
             if not isinstance(job, dict):
                 continue
             for step in job.get("steps") or []:
@@ -123,7 +138,8 @@ def run_steps():
                 env = {}
                 for e in (doc.get("env"), job.get("env"), step.get("env")):
                     env.update({str(k): str(v) for k, v in (e or {}).items()} if isinstance(e, dict) else {})
-                out.append((str(step["run"] or ""), pick("shell"), pick("working-directory"), env))
+                out.append((str(step["run"] or ""), pick("shell"), pick("working-directory"), env,
+                            "%s: %s, step %d" % (f, job_id, (job.get("steps") or []).index(step) + 1)))
     return out
 
 
@@ -138,12 +154,19 @@ NPM = ('#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; es
        'case ${1:-} in run|run-script) shift ;; *) exit 0 ;; esac\n'
        'while [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; esac; done\n'
        '[ -n "${1:-}" ] || exit 0\necho "$1" >>"$LOG"\n[ "$1" != "${FAIL_SCRIPT:-}" ]\n')
-PM = ('#!/bin/sh\nskip() { while [ $# -gt 0 ]; do case $1 in --filter|-F|-C|--dir|--workspace) shift 2 ;;'
+PM = ('#!/bin/sh\nfor a; do [ "${prev:-}" != --filter ] && [ "${prev:-}" != -F ] || case $a in .|"$PKG"|"*"|./) ;;'
+      ' *) exit 0 ;; esac; prev=$a; done\n'  # a filter matching no package runs nothing, and succeeds
+      'skip() { while [ $# -gt 0 ]; do case $1 in --filter|-F|-C|--dir|--workspace) shift 2 ;;'
       ' -*) shift ;; *) break ;; esac; done; echo "$@"; }\n'
       'set -- $(skip "$@")\n'
       'case ${1:-} in run|run-script) shift; set -- $(skip "$@") ;; exec|dlx|install|i|ci|add) exit 0 ;; esac\n'
       '[ -n "${1:-}" ] || exit 0\necho "$1" >>"$LOG"\n[ "$1" != "${FAIL_SCRIPT:-}" ]\n')
 NOOP = '#!/bin/sh\nexit 0\n'
+try:
+    import json as _json
+    PKG = _json.load(open(os.path.join(d, "package.json"))).get("name") or ""
+except (OSError, ValueError):
+    PKG = ""
 LINTS = ["lint:%s" % j for j in ["ts", "css", "md", "yaml", "json", "spell", "licenses"]]
 steps = run_steps()
 with tempfile.TemporaryDirectory() as t:
@@ -155,18 +178,24 @@ with tempfile.TemporaryDirectory() as t:
     def execute(fail_script=""):
         """Every step, in a fresh copy of the repository, as GitHub runs it (expressions
         blanked): its exit status, and the lint scripts it asked a package manager to run."""
-        got = []
-        work = tempfile.mkdtemp(dir=t)
-        shutil.copytree(d, work, dirs_exist_ok=True)
-        home = tempfile.mkdtemp(dir=t)  # each probe starts from a fresh home too
-        for k, (step, shell, sub, extra) in enumerate(steps):
+        got, job = [], None
+        for k, (step, shell, sub, extra, where) in enumerate(steps):
+            if where.rsplit(", step", 1)[0] != job:
+                # Each job runs on a fresh machine: a fresh copy of the repository and home.
+                job = where.rsplit(", step", 1)[0]
+                work = tempfile.mkdtemp(dir=t)
+                shutil.copytree(d, work, dirs_exist_ok=True)
+                home = tempfile.mkdtemp(dir=t)
+                files = {k_: os.path.join(home, k_.lower()) for k_ in ("GITHUB_STEP_SUMMARY", "GITHUB_OUTPUT",
+                                                                       "GITHUB_ENV", "GITHUB_PATH")}
             template = SHELLS.get(shell, shell)
             if "{0}" not in template:
                 template += " {0}"
             script = "%s/step%d.sh" % (t, k)
             open(script, "w").write(re.sub(r"\$\{\{[^}]*\}\}", "", step) + "\n")
             log = "%s/log%d" % (t, k)
-            env = dict(extra, PATH=t + "/bin:/usr/bin:/bin", HOME=home, LOG=log, FAIL_SCRIPT=fail_script)
+            env = dict(extra, PATH=t + "/bin:/usr/bin:/bin", HOME=home, LOG=log, FAIL_SCRIPT=fail_script,
+                       PKG=PKG, CI="true", GITHUB_ACTIONS="true", **files)
             try:
                 rc = subprocess.run([x.replace("{0}", script) for x in template.split()],
                                     cwd=os.path.join(work, sub) if sub else work, env=env,
@@ -185,7 +214,7 @@ with tempfile.TemporaryDirectory() as t:
             fail.append("%s no longer runs" % lint)
     for k, (rc, _) in enumerate(clean):
         if rc != 0:
-            fail.append("a step fails with every lint passing (exit %s): %s" % (rc, steps[k][0].strip()[:80]))
+            fail.append("a step fails with every lint passing (exit %s): %s" % (rc, steps[k][4]))
     for lint in sorted(ran & set(LINTS)):
         # The skill's own failure probe: a failing lint must fail a step that ran it.
         if not any(rc != 0 for rc, x in execute(lint) if lint in x):
