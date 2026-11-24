@@ -150,9 +150,11 @@ in `references/measuring.md`.
    module. Before relying on `(cached)` results on the merge gate, search
    each package's `_test.go` files, and every package from this module
    that its tests import (`go list -test -deps -f '{{.ImportPath}}
-   {{.Dir}}' ./<pkg>` lists them; skip the standard library and other
-   modules), for `os/exec`, network and database clients, `time.Now`, and
-   paths outside the module. If a package has such tests, run that package
+   {{.Dir}}' ./<pkg>` lists them, the folder last on each line; skip the
+   standard library and other modules), for `os/exec`, network and
+   database clients, `time.Now`, and paths outside the module. A match in a
+   helper flags the package whose tests import it. If a package has such
+   tests, run that package
    with `-count=1` on the gate, keeping the command's other package
    arguments, and name it in the pull request. Add `-count=1` nowhere else:
    for other tests it reruns unchanged work without catching anything more.
