@@ -812,10 +812,22 @@ for before, after, what in (
     r = two_reports(before, after)
     if r.returncode == 0:
         bad.append("tests: %s passed\n%s" % (what, r.stdout))
+    if "parents in two files" in what and "p [b.py]" not in r.stdout:
+        bad.append("tests: a container wasn't shown with its file\n" + r.stdout + r.stderr)
+# #6: a Python traceback without a message attribute is keyed by its last line; addresses
+# and temp names don't count.
+for before, after, want in (
+        ("Traceback (most recent call last):\n  x\nRuntimeError: cleanup", "Traceback (most recent call last):\n  x\nRuntimeError: collection", 1),
+        ('<error type="E" message="Pool at 0x7f3a2b1c9d50 in /tmp/tmpa8fkq2zx"/>', '<error type="E" message="Pool at 0x7fe41d0c8a90 in /tmp/tmpq9wneb1c"/>', 0)):
+    wrap = lambda e: ('<testsuite name="s">%s<testcase classname="k" name="x"/></testsuite>'
+                      % (e if e.startswith("<") else '<error type="RuntimeError">%s</error>' % e))
+    r = two_reports(wrap(before), wrap(after))
+    if (r.returncode != 0) != bool(want):
+        bad.append("tests: suite error %r to %r should %s\n%s" % (before[-20:], after[-20:], "fail" if want else "pass", r.stdout))
 # #6: the same suite error, its message differing only in numbers (a time, a pid), is no change.
 r = two_reports('<testsuite name="s"><error type="RuntimeError" message="worker 12 died after 3.2s"/>'
                 '<testcase classname="k" name="x"/></testsuite>',
-                '<testsuite name="s"><error type="RuntimeError" message="worker 7 died after 4.9s"/>'
+                '<testsuite name="s"><error type="RuntimeError" message="worker 7 died after 4s"/>'
                 '<testcase classname="k" name="x"/></testsuite>')
 if r.returncode != 0:
     bad.append("tests: a suite error whose message differs only in numbers counted as new\n" + r.stdout + r.stderr)
@@ -2495,7 +2507,14 @@ exit $status"""
 LOOP_DROPS = """for t in ts css md yaml json spell licenses; do pnpm run "lint:$t" & done
 wait"""
 WRITTEN = "\n".join("pnpm run lint:%s" % x for x in ["ts", "css", "md", "yaml", "json", "spell", "licenses"])
+PIPED = 'for t in ts css md yaml json spell licenses; do pnpm run "lint:$t" | cat; done'
+EXEC_ECHO = 'for t in ts css md yaml json spell licenses; do pnpm exec echo "lint:$t"; done'
 for body, want, what in ((WRITTEN, True, "each lint written out"), (LOOP_OK, True, "a loop that keeps exit codes"),
+                         (PIPED, False, "a loop piped to cat (GitHub's default bash has no pipefail)"),
+                         (EXEC_ECHO, False, "pnpm exec echo of each name"),
+                         ("mkdir lint-logs\n" + WRITTEN, True, "a fold whose first command needs a fresh checkout"),
+                         ('status=0\nfor t in $LINTS; do pnpm run "lint:$t" || status=1; done\nexit $status', True,
+                          "a loop over the step's env"),
                          (LOOP_DROPS, False, "a loop whose bare wait drops exit codes"),
                          (WRITTEN.replace("pnpm run lint:licenses", ""), False, "a fold without licenses"),
                          ("\n".join("echo lint:%s" % x for x in ["ts", "css", "md", "yaml", "json", "spell", "licenses"]),
@@ -2510,6 +2529,14 @@ for body, want, what in ((WRITTEN, True, "each lint written out"), (LOOP_OK, Tru
         subprocess.run(["git", "tag", "sample"], cwd=work, check=True)
         open(work + "/.github/workflows/ci.yml", "w").write(
             FOLD % "\n".join("          " + l if l else "" for l in body.split("\n")))
+        if what == "a loop over the step's env":
+            text = open(work + "/.github/workflows/ci.yml").read().replace(
+                "      - name: Lint\n", "      - name: Lint\n        env:\n          LINTS: ts css md yaml json spell licenses\n", 1)
+            open(work + "/.github/workflows/ci.yml", "w").write(text)
+        if what == "each lint written out":
+            # The same fold with `shell: bash` after the run block: still one step, still passes.
+            text = open(work + "/.github/workflows/ci.yml").read().replace("  test:\n", "        shell: bash\n  test:\n", 1)
+            open(work + "/.github/workflows/ci.yml", "w").write(text)
         open(work + "/PR.md", "w").write("fold\n")
         r = run([E + "/ci-workflow/check.py", work])
         if (r.returncode == 0) != want:

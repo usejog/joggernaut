@@ -1952,8 +1952,12 @@ def junit_results(path):
           # a collection error) shows; numbers in the message (times, ids) are blanked.
           for c in suite:
               if local(c.tag) in FAILED_TAGS:
-                  msg = (c.get("message") or (c.text or "").strip().split("\n")[0]).strip()
-                  msg = re.sub(r"\d+", "#", " ".join(msg.split()))[:200]
+                  # The message, or the text's first line (a Python traceback's last: its error).
+                  text = [l for l in (c.text or "").strip().split("\n") if l.strip()]
+                  msg = (c.get("message") or (text[-1] if text and text[0].startswith("Traceback")
+                                              else text[0] if text else "")).strip()
+                  # Run-specific parts blanked: addresses, temp names, then any number.
+                  msg = re.sub(r"0x[0-9a-fA-F]+|\btmp[\w.-]{6,}|\d+(?:\.\d+)*", "#", " ".join(msg.split()))[:200]
                   k = json.dumps([where, suite_path, suite_file, local(c.tag), c.get("type") or "", msg])
                   errs[k] = errs.get(k, 0) + 1
           for tc in [c for c in suite if local(c.tag) == "testcase"]:

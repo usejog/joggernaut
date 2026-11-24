@@ -16,10 +16,13 @@ sample and its CI history is made up; none describes a real project.
 Each `check.py` decides by script, not by a model. Its limits, stated plainly:
 the ci-cache and ci-guard checks read the workflow's text, its triggers and
 `run:` lines, and don't execute it; the ci-workflow check runs each `run:`
-step under bash against a stub `pnpm` that records the scripts it runs, and
-fails each lint in turn, so a lint that stops running, or whose failure no
-longer fails its step, fails the check (it can't see a step's `if:` or a
-matrix); the assertion check compares expected values, so an
+step in a fresh copy of the repository, with the shell GitHub would use
+(`bash -e` unless the step or `defaults` names another) and the step's
+`env:` and `working-directory:`, against stub package managers that record
+the scripts they are asked to run, and fails each lint in turn, so a lint
+that stops running, or whose failure no longer fails its step, fails the
+check. It can't see a step's `if:` or a matrix, and other commands run for
+real, so run it only where the agent ran (the eval's sandbox); the assertion check compares expected values, so an
 assertion rewritten against a constant can pass; the ci-diagnose check looks for the planted cause in free text, and the ci-measure check reads an exact `Verdict:` first line and a `Stopped running:` line the prompt asks for. A passing eval is evidence, not proof: read the agent's diff.
 Checks diff against the sample as handed over (the `sample` tag), so an agent
 that commits can't hide a change. Every check also fails the
