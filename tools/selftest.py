@@ -2528,13 +2528,20 @@ with tempfile.TemporaryDirectory() as t:
             del x["path"]
         rows.append(x)
     got = json.loads(_split(t, rows, "--json", "--workflow", "ci.yml").stdout or "{}")
-    if (got.get("passed_runs"), got.get("ended_runs")) != (1, 3):
-        bad.append("split: --workflow by file dropped runs saved with no file: %r" % ((got.get("passed_runs"), got.get("ended_runs")),))
+    text = _split(t, rows, "--workflow", "ci.yml").stdout
+    if (got.get("passed_runs"), got.get("ended_runs"), got.get("runs_left_out_no_file")) != (1, 1, 2) \
+            or "2 runs named ci.yml have no workflow file saved" not in text:
+        bad.append("split: --workflow by file should leave out runs with no file, and say so first: %r\n%s"
+                   % ((got.get("passed_runs"), got.get("ended_runs"), got.get("runs_left_out_no_file")), text))
     rows = [_run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 60 + 540 * k)], 9000 * k) for k in range(2)]
     del rows[0]["path"]
     got = json.loads(_split(t, rows, "--json").stdout or "{}")
-    if got.get("job_sets") != 1:
-        bad.append("split: a run with no file made another set of jobs: %r" % got.get("job_sets"))
+    lint_fail = _run(5, [_job("lint", 45000, 45001, 45030, conclusion="failure")], 45000, name="Lint")
+    lint_fail.update(path=".github/workflows/lint.yml", conclusion="failure")
+    got2 = json.loads(_split(t, rows + [lint_fail], "--json").stdout or "{}")
+    if got.get("job_sets") != 1 or got2.get("job_sets") != 1:
+        bad.append("split: a run with no file, or another workflow's failure, made another set of jobs: %r %r"
+                   % (got.get("job_sets"), got2.get("job_sets")))
     # #14: a repository whose pull-request workflow runs on pull_request_target alone.
     rows = []
     for i in range(6):
@@ -2589,7 +2596,7 @@ with tempfile.TemporaryDirectory() as t:
     del no_start[-1]["run_started_at"]
     if (got.get("headline") or {}).get("job_sets") != 1 or (got.get("headline") or {}).get("reruns") != 1 \
             or "1 of the headline's runs passed on a rerun" not in text \
-            or "passed on a rerun" in _split(t, no_start).stdout:
+            or "1 from their creation" not in _split(t, no_start).stdout:
         bad.append("split #23: a rerun's carried-over jobs made another set, or the rerun wasn't named: %r\n%s"
                    % (got.get("headline"), text))
     # #35: a step stamped 10 s past its 60 s job shows clipped in the step table; a one-second

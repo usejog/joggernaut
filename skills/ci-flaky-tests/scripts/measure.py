@@ -882,10 +882,11 @@ def cmd_split(a):
     # --workflow names a file (ci.yml) when one of the runs' files has that name, else a
     # display name: never both, so a file and another file's display name don't pool.
     files = {os.path.basename(r.get("path") or "") for r in every}
-    # A run with no file is taken by its display name either way, as before.
+    by_file = bool(a.workflow) and a.workflow in files
     runs = [r for r in every if not a.workflow or (os.path.basename(r.get("path") or "") == a.workflow
-                                                     if a.workflow in files and r.get("path")
-                                                     else r.get("name") == a.workflow)]
+                                                     if by_file else r.get("name") == a.workflow)]
+    # By file, a run saved with no file can't be placed: left out, and said first.
+    unplaced_runs = [r for r in every if by_file and not r.get("path") and r.get("name") == a.workflow]
     if not runs:
         die("no runs to read")
     # PR wait over successful runs, as compare measures it.
@@ -898,6 +899,7 @@ def cmd_split(a):
     ended = [r for r in runs if r.get("conclusion") in ("success",) + FAILED]
     passed = sum(1 for r in ended if r.get("conclusion") == "success")
     out["passed_runs"], out["ended_runs"] = passed, len(ended)
+    out["runs_left_out_no_file"] = len(unplaced_runs)
     out["passed_after_rerun"] = sum(1 for r in ended if r.get("conclusion") == "success"
                                     and (r.get("run_attempt") or 1) > 1)
     out["cancelled_runs"] = sum(1 for r in runs if r.get("conclusion") == "cancelled")
@@ -908,7 +910,7 @@ def cmd_split(a):
     groups = cohorts([r for r in runs if r.get("conclusion") == "success"])
     # A run's set of jobs, as compare keys it: names with counts; with several workflow files
     # in the file, each name with its file.
-    several = len({r["path"] for r in runs if r.get("path")}) > 1
+    several = len({r["path"] for r in runs if r.get("path") and r.get("conclusion") == "success"}) > 1
     set_of = lambda r: tuple(sorted(("%s / %s" % (wf_key(r), j.get("name")) if several else j.get("name") or "")
                                     for j in latest_jobs(r) if executed(j)))
     total_wait = sum(walls) or 1.0
@@ -929,10 +931,7 @@ def cmd_split(a):
             ties = sum(1 for v in by_set.values() if len(v) == len(top[1])) - 1
             table.append({"longest_job": key, "runs": len(w), "median": median(w), "tail": list(tail(w)),
                           "share_of_wait": sum(w) / total_wait, "job_sets": len(by_set),
-                          # Reruns timed from their last attempt's start (run_started_at): their
-                          # wait covers only the jobs rerun.
-                          "reruns": sum(1 for r, x in walls_of if x is not None and (r.get("run_attempt") or 1) > 1
-                                        and r.get("run_started_at")),
+                          "reruns": sum(1 for r, x in walls_of if x is not None and (r.get("run_attempt") or 1) > 1),
                           "commonest_set": {"jobs": list(top[0]), "runs": len(top[1]), "median": median(top[1]),
                                             "tied_with": ties}})
     table.sort(key=lambda c: (-c["share_of_wait"], c["longest_job"]))
@@ -1184,6 +1183,9 @@ def cmd_split(a):
                                              "That is %.1f runs for each one that passed." % (len(ended) / float(passed))))
     else:
         print("runs: " + counts)
+    if unplaced_runs:
+        print("%d runs named %s have no workflow file saved, so they can't be told apart from another file's:"
+              " left out (fetch again to save it)" % (len(unplaced_runs), a.workflow))
     print("runs read: %d%s, over %.1f days%s" % (
         len(runs), " (workflow %s)" % a.workflow if a.workflow else "", out["span_days"],
         " (no pull-request runs with a head commit)" if out["pr_commits"] == 0
@@ -1225,12 +1227,15 @@ def cmd_split(a):
               % (head["job_sets"], ", ".join(cs["jobs"]), cs["runs"],
                  ", tied with %d other set%s" % (cs["tied_with"], "s" * (cs["tied_with"] > 1)) if cs["tied_with"] else "",
                  fmt(cs["median"])))
-    reruns = head["reruns"] if head else sum(1 for r in runs if r.get("conclusion") == "success"
-                                             and run_wall(r) is not None and (r.get("run_attempt") or 1) > 1
-                                             and r.get("run_started_at"))
-    if reruns:
-        print("  %d of the %s runs passed on a rerun: a run's wait starts at its last attempt, so theirs"
-              " covers only the jobs rerun" % (reruns, "headline's" if head else "blended"))
+    pool = path_runs if head else [r for r in runs if r.get("conclusion") == "success" and run_wall(r) is not None]
+    reran = [r for r in pool if (r.get("run_attempt") or 1) > 1]
+    late = sum(1 for r in reran if r.get("run_started_at"))
+    if reran:
+        print("  %d of the %s runs passed on a rerun%s" % (
+            len(reran), "headline's" if head else "blended",
+            ": a run's wait starts at its last attempt, so theirs covers only the jobs rerun" if late == len(reran)
+            else "; %d of them are timed from their last attempt's start (covering only the jobs rerun), %d from"
+                 " their creation (no attempt start saved)" % (late, len(reran) - late)))
     if len(names) > 1:
         if cross:
             label, value = out["wait_all_workflows_tail"]
