@@ -137,7 +137,8 @@ in `references/measuring.md`.
      group that big, the headline is the blend, and says so); the slowest path below describes that
      group. A group can still hold runs that ran different sets of jobs;
      `split` says so under the headline, with the commonest set's own
-     median: report that beside the headline. Report the headline as the PR
+     median: report that beside the headline (if several sets tie for
+     commonest, name them instead of picking one). Report the headline as the PR
      wait, naming its group, with the other groups beside it. The blended median over every run is printed
      last and labelled as a blend: never report it as the PR wait. With several
      workflows in the file each group is one workflow's runs and the blend
@@ -182,9 +183,10 @@ in `references/measuring.md`.
    - pushes a day: distinct pull-request head commits that started CI
      (`pull_request` and `pull_request_target` runs alike), over the days
      the file spans. A reopened pull request or a re-run of the same commit
-     isn't counted again. Runs from forks carry no pull-request number, so
-     they are keyed by fork, branch and target branch, and `split` says how
-     many were;
+     isn't counted again. A run whose pull request had closed by the fetch,
+     or a fork's, carries no pull-request number, so it is keyed by
+     repository and branch (two pull requests from one branch count as one),
+     and `split` says how many were;
    - runner-minutes, unrounded and rounded up per job (step 5 says which a
      label is priced by), by runner label, and the share in runs that failed,
      timed out or were cancelled (by a concurrency group or by hand). Not
