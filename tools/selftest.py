@@ -1477,8 +1477,10 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "compare", "--before", b, "--after", a_, "--label", "ubuntu-latest", "--job", "integration",
              "--end", "--json"])
     got = json.loads(r.stdout) if r.returncode == 0 else {}
-    if got.get("before_median") != 190 or got.get("after_median") != 160:
-        bad.append("compare --end: a job after the timed one shouldn't block it\n" + r.stdout + r.stderr)
+    # Every job a run ran counts for --end (one queued after the timed job can still have held
+    # its runner), so a set that varies only after it is refused too: safe, never a false speedup.
+    if r.returncode == 0:
+        bad.append("compare --end: runs whose job sets differ must be refused\n" + r.stdout)
 
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
@@ -1667,6 +1669,49 @@ with tempfile.TemporaryDirectory() as t:
     if got.get("cancelled_after") != [3, 8] or got.get("cancelled_before") != [0, 5]:
         bad.append("compare: cancelled runs should be counted a side: %r %r" % (got.get("cancelled_before"), got.get("cancelled_after")))
 
+# --end: a job before the timed one moved to a pool another job already used; and a build
+# queued beside the timed job on a one-slot pool, held the slot first in most runs before.
+with tempfile.TemporaryDirectory() as t:
+    def pooled(i, fast):
+        t0 = i * 4000
+        lint = _job("lint", t0, t0 + 1, t0 + 6)
+        lint["labels"] = ["big-runner"]
+        bj = _job("build", t0, t0 + 2, t0 + (20 if fast else 200))
+        if fast:
+            bj["labels"] = ["big-runner"]
+        end = mm.ts(bj["completed_at"]) - 1793000000
+        return _run(i, [lint, bj, _job("required", end, end + 1, end + 2)], t0)
+    open(t + "/b.jsonl", "w").write("".join(json.dumps(pooled(i, False)) + "\n" for i in range(10)))
+    open(t + "/a.jsonl", "w").write("".join(json.dumps(pooled(100 + i, True)) + "\n" for i in range(10)))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--job", "required", "--end",
+             "--label", "ubuntu-latest"])
+    if r.returncode == 0:
+        bad.append("compare --end: a job before it changed runner, and it passed\n" + r.stdout)
+
+    def slot(i, build_first, has_build=True):
+        t0 = i * 4000
+        jobs = []
+        if has_build:
+            jobs.append(_job("build", t0, t0 + 1, t0 + 181))
+        start = t0 + (181 if build_first else 1)
+        jobs.append(_job("required", t0, start, start + 19))
+        return _run(i, jobs, t0)
+    open(t + "/b2.jsonl", "w").write("".join(json.dumps(slot(i, i < 9, has_build=i < 9)) + "\n" for i in range(10)))
+    open(t + "/a2.jsonl", "w").write("".join(json.dumps(slot(100 + i, i < 1, has_build=i < 1)) + "\n" for i in range(10)))
+    r = run([M, "compare", "--before", t + "/b2.jsonl", "--after", t + "/a2.jsonl", "--job", "required", "--end"])
+    if r.returncode == 0:
+        bad.append("compare --end: work that held the slot before the timed job was left out\n" + r.stdout)
+
+    # A larger share cancelled after qualifies a faster verdict.
+    fast = [_work(300 + i, True, integ=10) for i in range(5)]
+    gone = [dict(_work(400 + i, True), conclusion="cancelled") for i in range(5)]
+    open(t + "/b3.jsonl", "w").write("".join(json.dumps(_work(200 + i, True)) + "\n" for i in range(5)))
+    open(t + "/a3.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in fast + gone))
+    r = run([M, "compare", "--before", t + "/b3.jsonl", "--after", t + "/a3.jsonl", "--json"])
+    got = json.loads(r.stdout) if r.returncode == 0 else {}
+    if got.get("verdict_code") != "faster_more_cancelled":
+        bad.append("compare: more runs cancelled after should qualify the verdict: %r\n%s" % (got.get("verdict_code"), r.stderr))
+
 # Steps: a stamp past the job's end is clipped; a zero-length step overlaps nothing; a step of the
 # repository's named "Post results" is work, so its job is no gate.
 got = mm.job_split(_job_steps([("Test", 0, 70)], 60))
@@ -1715,6 +1760,45 @@ got, r = _flaky_rows(rows, reps)
 t_ = (got or {"tests": [{}]})["tests"][0]
 if t_.get("recurring") or t_.get("alone_on_pull_requests") != 0 or t_.get("alone_on_other_branches") != 3:
     bad.append("flaky: pushed branches were counted as pull requests: %r" % t_)
+# Closed pull requests as fetch saves them (no numbers, the base recorded) are pull requests: a
+# flake standing alone on three of them recurs. With no base recorded, a pull request's own
+# pass, fail, pass on its own line never stands alone.
+rows, reps = [], {}
+for i, (pr, st) in enumerate([(1, "p"), (2, "f"), (3, "p"), (4, "f"), (5, "p"), (6, "f"), (7, "p")]):
+    x = _fr(i, pr, st == "p")
+    x["pull_requests"] = []
+    rows.append(x)
+    reps[x["id"]] = {"r.xml": _rep(st)}
+got, r = _flaky_rows(rows, reps)
+t_ = (got or {"tests": [{}]})["tests"][0]
+if not t_.get("recurring") or t_.get("alone_on_pull_requests") != 3:
+    bad.append("flaky: closed pull requests (no numbers) weren't counted as pull requests: %r" % t_)
+rows, reps = [], {}
+for i, (pr, st) in enumerate([(p_, x) for p_ in (1, 2, 3) for x in "pfp"]):
+    x = _fr(i, pr, st == "p")
+    x["pull_request_bases"] = []
+    rows.append(x)
+    reps[x["id"]] = {"r.xml": _rep(st)}
+got, r = _flaky_rows(rows, reps)
+t_ = (got or {"tests": [{}]})["tests"][0]
+if t_.get("recurring") or t_.get("alone_on_pull_requests") != 0:
+    bad.append("flaky: a pull request with no base stood alone on its own passes: %r" % t_)
+# --short over every report: T of Unit passing and T of Integration failing, in separate reports,
+# can't be matched by the short name.
+rows = [_fr(i, i + 1, i % 2 == 0) for i in range(5)]
+unit = '<testsuite name="s"><testcase classname="Unit" name="T"/></testsuite>'
+integ = '<testsuite name="s"><testcase classname="Integration" name="T"><failure/></testcase></testsuite>'
+reps = {x["id"]: {"u.xml": unit} if x["conclusion"] == "success" else {"i.xml": integ} for x in rows}
+got, r = _flaky_rows(rows, reps, "--short")
+if got is not None or "can't tell apart" not in r.stderr:
+    bad.append("flaky --short: one short name over two classes in separate reports should stop it\n" + r.stdout)
+# A run whose first attempt failed, rerun green, with no report: unknown, not a pass.
+rows = [_fr(0, 1, True), _fr(1, 2, False), _fr(2, 3, True), _fr(3, 4, True)]
+rows[2]["run_attempt"] = 2
+reps = {rows[0]["id"]: {"r.xml": _rep("p")}, rows[1]["id"]: {"r.xml": _rep("f")}, rows[3]["id"]: {"r.xml": _rep("p")}}
+got, r = _flaky_rows(rows, reps)
+if not got or got["tests"][0]["alone_on_pull_requests"] != 0:
+    bad.append("flaky: a rerun run with no report was taken as evidence: %r" % got)
 two_classes = ('<testsuite name="s"><testcase classname="a" name="T"><failure/></testcase>'
                '<testcase classname="b" name="T"/></testsuite>')
 rows = [_fr(0, 1, False)]

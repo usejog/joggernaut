@@ -160,7 +160,11 @@ in `references/measuring.md`.
      `if:` in B that relies on A's success. A deploy waiting on tests is a
      gate and stays. Trace every job downstream of B as well, on every event
      (push and release included): a job that needs B and relied on A having
-     passed, or uses A's artifact, must then need A itself. Without the edge, B runs when A fails, which costs
+     passed, or uses A's artifact, must then need A itself, and any condition
+     it has on B's result (`needs.B.result == 'success'`) must also read A's,
+     so it does on A's success, failure, skip and cancellation what it did
+     before (a publish still stops when the tests fail; a failure notice
+     still runs). Without the edge, B runs when A fails, which costs
      minutes on failed runs; a required check that relied on B being skipped
      must still fail: check it on a run where A fails.
    - **Run independent steps side by side** in the job that finishes last,
@@ -188,8 +192,9 @@ in `references/measuring.md`.
      release too) would no longer wait for the moved steps: add the new job
      to each of those `needs`, and to every condition that reads the old
      job's result (`needs.verify.result == 'success'`, `if: always()` with a
-     check), then show that a failed, skipped or cancelled new job still
-     stops each of them. Then find the required checks (`rules/branches/BRANCH`, branch protection,
+     check), so each of them does on success, failure, skip and cancellation
+     of the moved steps what it did before: a publish still stops, and a
+     rollback or failure notice still runs. Show it on a run of each. Then find the required checks (`rules/branches/BRANCH`, branch protection,
      and the `merge_group` checks), make the new job's result reach one
      through a gate that already exists and fails unless every job it needs
      ended `success`, and check on the pull request that a failure, a skip

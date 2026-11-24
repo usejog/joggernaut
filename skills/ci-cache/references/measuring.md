@@ -160,15 +160,22 @@ with counts, so matrix legs count):
 
 The same jobs can still run different tests (per-pull-request test
 selection inside a job); only `MEASURE tests` shows that, and only for the
-reports compared. Where selection can vary inside a job, compare the reports
-of every timed run against the baseline's, or say the test workload is
-unverified. `compare` also counts each side's runs cancelled with no
+reports compared, and it passes a run that ran more tests. Where selection
+can vary inside a job, a speed verdict needs every timed run to have run the
+same tests: compare each run's report with one reference run's both ways
+(`--before A --after B`, then `--before B --after A`; both pass only when
+the names match), and time only those runs. Otherwise report the timings as
+unverified (issue #32 tracks a tool check). `compare` also counts each side's runs cancelled with no
 failure (a newer push, a concurrency group): they are in neither the
-timings nor the failure rate, so if a larger share was cancelled after, say
-so beside the verdict: slow runs being cancelled can look like a speedup. `--job NAME --end` times that
+timings nor the failure rate. When a larger share was cancelled after, a
+faster (or mixed) verdict ends in `_more_cancelled`: if the change makes slow
+runs get cancelled, the runs left are the fast ones. Equal shares can still
+hide which runs finished (issue #33): read the cancelled runs before calling
+it faster. `--job NAME --end` times that
 job from the run's start to its end, on the run's clock (its queue and the
 jobs before it count), not the job's own duration, so the same job-set rule
-applies to it.
+applies to it over every job the runs ran (a job queued beside it can hold
+its runner), and every job's runner must match on both sides.
 
 `compare` needs at least 5 successful comparable runs a side. Those are the
 runs it times; `--label`, `--job` and `--cache` choose them. The failure rate

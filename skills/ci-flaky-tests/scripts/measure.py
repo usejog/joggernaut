@@ -1040,6 +1040,7 @@ def cmd_split(a):
     # self-hosted machines may bill by the second, or not by time at all.
     out["runner_minutes_exact"] = round(exact, 1)
     out["runner_minutes_exact_by_label"] = {k: round(v, 1) for k, v in exact_by_label.items()}
+    out["runner_seconds_by_label"] = {k: round(v * 60) for k, v in exact_by_label.items()}  # for per-second terms
     # Every minute of a run that failed, timed out or was cancelled, its green jobs included.
     # Not all of it is waste: a failed run may have caught a real bug, and a cancelled one
     # may never be run again.
@@ -1473,9 +1474,9 @@ def cmd_compare(a):
         seen = {}
         for r in rs:
             for j in latest_jobs(r):
-                if a.job and j.get("name") != a.job:
-                    continue
-                if not j.get("labels") or (a.label and a.label not in j["labels"]):
+                if a.job and not a.end and j.get("name") != a.job:
+                    continue  # with --end every job counts: the jobs before it are on its clock
+                if not j.get("labels") or (a.label and not a.end and a.label not in j["labels"]):
                     continue  # no labels: skipped, never on a runner
                 seen.setdefault(j.get("name"), set()).add(tuple(sorted(j["labels"])))
         return seen
@@ -1508,16 +1509,9 @@ def cmd_compare(a):
     # the whole runs compare (sides that differ mean the change altered the jobs; the tests by
     # name show nothing was lost). With several sets within a side, a whole-run verdict is
     # refused: --ran JOB names the workload (runs that ran that job), or --job times one job.
-    def job_set(r):
-        ran = [j for j in latest_jobs(r) if executed(j)]
-        if a.end:
-            # On the run's clock, only the jobs that ended before the timed job was queued can
-            # move its end; jobs after it don't.
-            mine = [j for j in ran if j.get("name") == a.job and j.get("created_at")]
-            if mine:
-                q = ts(mine[0]["created_at"]) + LINK_EARLY
-                ran = [j for j in ran if j is mine[0] or (j.get("completed_at") and ts(j["completed_at"]) <= q)]
-        return tuple(sorted(j.get("name") or "" for j in ran))
+    # Every job a run ran, even with --end: a job that ended after the timed one was queued
+    # can still have held the runner it waited for, so none is left out.
+    job_set = lambda r: tuple(sorted(j.get("name") or "" for j in latest_jobs(r) if executed(j)))
     def mix(rs):
         m = {}
         for r in rs:
@@ -1637,6 +1631,13 @@ def cmd_compare(a):
         else:
             res["verdict_code"] = "no_change_yet"
             res["verdict"] = "no measurable change yet with %s; more runs can tighten this" % sides
+    (cxb, nb_), (cxa, na_) = res["cancelled_before"], res["cancelled_after"]
+    if res["verdict_code"] in ("faster", "mixed") and na_ and nb_ and cxa * nb_ > cxb * na_:
+        # A larger share cancelled after: the runs that finished may be the fast ones.
+        res["verdict_code"] += "_more_cancelled"
+        res["verdict"] += ("; but a larger share of runs was cancelled after (%d of %d) than before (%d of %d):"
+                           " if the change makes slow runs get cancelled, the runs left are the fast ones"
+                           % (cxa, na_, cxb, nb_))
     if graph_changed and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
         # One set a side, different sets: the change altered the jobs, or the mix of pull
         # requests did. Never a plain verdict: only the workflow's diff can say which.
@@ -1965,15 +1966,14 @@ def failed_tests(folder, short=False):
                      if not re.match(r"^(?:\d+|attempt[-_ ]?\d+)$", x, re.I)]
             where = SHARD.sub(lambda m: m.group(1) + "#", "/".join(parts + [f[:-4]]))
             res, errs, _ = junit_results(path)
-            if short:
-                full = {}
-                for t in res:
-                    full.setdefault(json.loads(t)[-1], set()).add(t)
-                twice = sorted(k for k, v in full.items() if len(v) > 1)
-                if twice:
-                    die("%s: --short can't tell apart the tests named %s (several classes or suites);"
-                        " leave --short off" % (path, ", ".join(twice[:3])))
-            name = lambda fields: fields[-1] if short else show_test(json.dumps([where] + fields[1:]))
+            def name(fields):
+                full = show_test(json.dumps([where] + fields[1:]))
+                if short:
+                    # Shortened to the test's name, so it matches failed.txt lines; every full
+                    # name behind one short name, over every report read, must be the same.
+                    SHORT_OF.setdefault(fields[-1], set()).add(full)
+                    return fields[-1]
+                return full
             for t, outs in res.items():
                 fields = json.loads(t)
                 if any(o in ("failed", "errored") for o in outs):
@@ -1989,13 +1989,20 @@ def failed_tests(folder, short=False):
     return failed, passed - failed, skipped
 
 
+SHORT_OF = {}  # flaky --short: each short name and the full names it stood for
+
+
 def cmd_flaky(a):
     runs = [r for r in read_runs(a.input, need_jobs=False) if r.get("created_at")
             and r.get("conclusion") in ("success", "cancelled") + FAILED]
     by_id = {r["id"]: r for r in runs}
-    # Who a failure belongs to: the pull request, or for a push, the branch pushed.
-    pr_of = lambda r: (("pr",) + tuple(r.get("pull_requests") or []) if r.get("pull_requests")
-                       else ("branch", r.get("event"), r.get("head_repo"), r.get("head_branch")))
+    # Who a failure belongs to: for a pull-request event, its pull request (by number, or, once
+    # it has closed and GitHub lists no number, by its head repository and branch); otherwise
+    # the branch pushed.
+    def pr_of(r):
+        if (r.get("event") or "").startswith("pull_request"):
+            return ("pr",) + (tuple(r.get("pull_requests") or []) or (r.get("head_repo"), r.get("head_branch")))
+        return ("branch", r.get("event"), r.get("head_repo"), r.get("head_branch"))
     # Runs are lined up per workflow file and per base (the branch a pull request targets, or
     # the branch pushed): a base that broke breaks its own line only.
     # A pull request whose base wasn't recorded (GitHub lists a run's pull requests only while
@@ -2028,6 +2035,10 @@ def cmd_flaky(a):
         not_junit += [os.path.join(d, x) for x in got[2]]
     if not reports:
         die("no report in %s for any run in %s" % (a.reports, a.input))
+    twice = sorted(k for k, v in SHORT_OF.items() if len(v) > 1)
+    if twice:
+        die("--short can't tell apart the tests named %s: the reports hold each under several classes or"
+            " suites (%s); leave --short off" % (", ".join(twice[:3]), "; ".join(sorted(SHORT_OF[twice[0]])[:2])))
     tests = {}
     for rid, (failed, _) in reports.items():
         for t in failed:
@@ -2047,18 +2058,18 @@ def cmd_flaky(a):
             if r["id"] in reports:
                 if t in reports[r["id"]][1]:
                     return "pass"
-                # A failed run whose reports don't show this test either way (another suite's
-                # report, an empty failed.txt) might have failed it: unknown.
-                return "unread" if r.get("conclusion") in FAILED else "none"
-            # A failed run whose reports weren't read might have failed the test; a run that
-            # passed or was cancelled with none read is no evidence either way.
-            return "unread" if r.get("conclusion") in FAILED else "none"
+                # A run with a failure whose reports don't show this test either way (another
+                # suite's report, an empty failed.txt) might have failed it: unknown.
+                return "unread" if run_failed(r) else "none"
+            # A run with a failed attempt whose reports weren't read might have failed the test,
+            # even if a rerun passed; a run with no failure and none read is no evidence.
+            return "unread" if run_failed(r) else "none"
         # Between two passes of the test, a stretch whose failures and unread failed runs are
         # all one owner's stands alone.
         alone = {}
         for key, seq in lines.items():
-            if key[0] != wf:
-                continue
+            if key[0] != wf or "base unknown" in key[1]:
+                continue  # a line of one pull request with no base: its own passes prove nothing
             stretch, seen_pass = [], False
             for r in seq:
                 st = state(r)
