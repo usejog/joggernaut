@@ -2541,13 +2541,100 @@ with tempfile.TemporaryDirectory() as t:
         v, r = _cmp(t, routed(10000, 2, 100), routed(11000, 25, 50), *flags)
         if "_routing_changed" not in (v.get("verdict_code") or ""):
             bad.append("compare #39: routing moved off the runner under %s: %r" % (flags, v.get("verdict") or v))
+    # Review cases. A failed leg of the same name rules the run out under --job (main's
+    # guard): the slow workload on L before and the fast after, the other leg failing.
+    def legs(base_id, slow_on_l):
+        rows = []
+        for i in range(5):
+            l_secs, m_secs = (100, 10) if slow_on_l else (10, 100)
+            rows.append(_cr(base_id + i, [_J("test", 0, l_secs + i, labels=("self-hosted", "L")),
+                                          _J("test", 0, m_secs + i, labels=("self-hosted", "M"), conclusion="failure")]))
+        return rows
+    v, r = _cmp(t, legs(14000, True), legs(15000, False), "--job", "test", "--label", "L")
+    if v.get("verdict_code") != "not_enough_runs":
+        bad.append("compare: a failed same-name leg let a swap pass under --job: %r" % (v.get("verdict") or v))
+    # A run that failed on M and passed on a retry on L is a rerun: not timed, and not read by
+    # the runner-set check (its first attempt counts in the routing count).
+    before = [_cr(16000 + i, [_J("test", 0, 100 + i, labels=("self-hosted", "L"))]) for i in range(5)]
+    after = [_cr(17000 + i, [_J("test", 0, 50 + i, labels=("self-hosted", "L"))]) for i in range(5)]
+    after.append(_cr(17005, [_J("test", 0, 50, labels=("self-hosted", "M"), conclusion="failure"),
+                             _J("test", 100, 50, labels=("self-hosted", "L"), attempt=2)], attempt=2))
+    v, r = _cmp(t, before, after, "--label", "L")
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare: a retry on L refused whole runs under --label: %r" % (v.get("verdict") or v))
+    # A green rerun whose first attempt stopped at a failed build (test skipped) doesn't refuse
+    # whole runs over build and test.
+    def bt(rid, secs, attempt=1):
+        jobs = [_J("build", 0, 10, labels=("ubuntu-latest",)), _J("test", 10, secs, labels=("macos-latest",))]
+        return _cr(rid, jobs)
+    before = [bt(18000 + i, 100 + i) for i in range(6)]
+    after = [bt(19000 + i, 50 + i) for i in range(6)]
+    after.append(_cr(19006, [_J("build", 0, 10, labels=("ubuntu-latest",), conclusion="failure"),
+                             _J("build", 100, 10, labels=("ubuntu-latest",), attempt=2),
+                             _J("test", 110, 50, labels=("macos-latest",), attempt=2)], attempt=2))
+    v, r = _cmp(t, before, after)
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare: a rerun with a partial first attempt refused whole runs: %r" % (v.get("verdict") or v))
+    # A job cancelled while it waited (a start time, no runner) says nothing about runners.
+    before = [_cr(20000 + i, [_J("test", 0, 100 + i, labels=("ubuntu-latest",), group=1)]) for i in range(6)]
+    gone = _cr(20006, [_J("test", 0, 1, labels=("ubuntu-latest",), conclusion="cancelled")], conclusion="cancelled")
+    gone["jobs"][0]["runner_name"] = None
+    after = [_cr(21000 + i, [_J("test", 0, 50 + i, labels=("ubuntu-latest",), group=1)]) for i in range(6)]
+    for flags in ((), ("--job", "test")):
+        v, r = _cmp(t, before + [gone], after, *flags)
+        if not (v.get("verdict_code") or "").startswith("faster"):
+            bad.append("compare: a job cancelled before it got a runner refused %s: %r" % (flags, v.get("verdict") or v))
+    # --ran with the named job present but never timable: not enough runs, not "no run ran it".
+    two = lambda rid: _cr(rid, [_J("test", 0, 100), _J("test", 0, 90)])
+    v, r = _cmp(t, [two(22000 + i) for i in range(5)], [two(23000 + i) for i in range(5)], "--ran", "test", "--job", "test")
+    if v.get("verdict_code") != "not_enough_runs":
+        bad.append("compare --ran: a present but ambiguous job should be not enough runs: %r" % (v.get("verdict") or v))
+    # One legacy row on another branch doesn't switch off the group check for --base main.
+    legacy = _cr(7999, [_J("test", 0, 50, labels=("self-hosted",))], base="release", groups=False)
+    v, r = _cmp(t, grouped(7000, 25) + [legacy], grouped(8000, 5), "--label", "self-hosted", "--base", "main")
+    if "error" not in v or "runner group" not in r.stderr:
+        bad.append("compare #12: a legacy row elsewhere hid a group swap: %r" % v.get("verdict"))
+    # Routing: pushes that first reached test on a retry count as off the runner.
+    def retried(base_id, after):
+        # Before: the fast pushes ran test on L, then a later job failed and was retried.
+        # After: the slow pushes' build failed first, so they reached test only on the retry.
+        rows = []
+        for i in range(20):
+            fast = i < 10
+            secs = 10 if fast else 100
+            if not after and fast:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "L")),
+                                              _J("deploy", 20, 5, labels=("self-hosted", "L"), conclusion="failure"),
+                                              _J("deploy", 50, 5, labels=("self-hosted", "L"), attempt=2)], attempt=2))
+            elif after and not fast:
+                rows.append(_cr(base_id + i, [_J("build", 0, 5, labels=("self-hosted", "L"), conclusion="failure"),
+                                              _J("build", 50, 5, labels=("self-hosted", "L"), attempt=2),
+                                              _J("test", 60, secs, labels=("self-hosted", "L"), attempt=2)], attempt=2))
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "L"))]))
+        return rows
+    v, r = _cmp(t, retried(24000, False), retried(25000, True), "--job", "test", "--label", "L")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare #39: pushes first reaching test on a retry weren't counted: %r %r"
+                   % (v.get("verdict") or v, (v.get("off_runner_before"), v.get("off_runner_after"))))
+    # Routing the other way (more runs on L after), and a matrix with a leg on L in every run.
+    v, r = _cmp(t, routed(26000, 25, 100), routed(27000, 2, 50), "--job", "test", "--label", "fast")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare #39: more runs reaching the runner after wasn't qualified: %r" % (v.get("verdict") or v))
+    mat = lambda base_id, secs: [_cr(base_id + i, [_J("test", 0, secs + i, labels=("self-hosted", "fast")),
+                                                  _J("test", 0, 300, labels=("self-hosted", "slow"))]) for i in range(6)]
+    v, r = _cmp(t, mat(28000, 100), mat(29000, 50), "--job", "test", "--label", "fast")
+    if v.get("off_runner_before") != [0, 6] or not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare #39: a matrix leg on the runner in every run counted as off it: %r %r"
+                   % (v.get("off_runner_before"), v.get("verdict")))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))
     after = [_cr(13000 + i, [_J("test", 0, 50 + i)]) for i in range(5)]
     v, r = _cmp(t, before, after, "--job", "test")
-    if sum(x["runs"] for x in v.get("job_sets", {}).get("before", [])) != v.get("before_runs"):
-        bad.append("compare #35: job_sets and timings count different runs: %r" % v.get("job_sets"))
+    if sum(x["runs"] for x in v.get("job_sets", {}).get("before", [])) != v.get("before_runs") \
+            or v.get("before_runs") != 5 or not any("can't tell which" in x[2] for x in v.get("excluded", [])):
+        bad.append("compare #35: job_sets and timings count different runs: %r %r" % (v.get("job_sets"), v.get("before_runs")))
 
 
 # every check.py fails on its untouched sample (the planted cause is there)

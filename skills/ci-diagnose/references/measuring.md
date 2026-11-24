@@ -207,20 +207,22 @@ the verdict.
 Where the pushes ran matters as much as what they ran. `compare` keys a
 runner by its labels and its runner group (two self-hosted groups can share
 every label; `fetch` saves each job's group, and a file from an older
-version compares labels alone and says to fetch again). Each job must have
-run on one runner, the same on both sides, read over every green run of the
-selection, not only the timed ones (a canary that fails on one pool keeps
-those runs from being timed, so which pushes went there decides which are
-timed), and from each run's first attempt (a rerun's later pool is the
-retry's, not the push's). With `--label`, it also counts, of the runs that
-ran the job (or any job), those whose first attempt ran it elsewhere; a
-change beyond chance either way ends a faster or mixed verdict in
-`_routing_changed`, and any such run means the verdict holds only if the
-same pushes reach the runner on both sides, which counts can't show.
+version compares labels alone where it lacks them, and says to fetch
+again). Each job must have run on one runner, the same on both sides, read
+over every green first-attempt run of the selection, not only the timed
+ones (a canary that fails on one pool keeps those runs from being timed, so
+which pushes went there decides which are timed); a job cancelled before it
+got a runner says nothing about runners and is left out. With `--label`, it
+also counts, of the runs that ran the job (or any job) in any attempt, those
+whose first attempt didn't run it on that runner (it ran elsewhere, or only
+on a retry); a change beyond chance either way ends a faster or mixed
+verdict in `_routing_changed`, and any such run means the verdict holds only
+if the same pushes reach the runner on both sides, which counts can't show.
 `--job` times the job's own duration even when another job in the run
 failed (dropping those runs would let a failure pattern choose the timed
-ones); it counts them, and a job that failed before the timed one started
-(it could have been its input) ends the verdict in `_after_failed_job`.
+ones), unless a job of the same name failed (another matrix leg); it counts
+them, and a job that failed before the timed one started (it could have been
+its input) ends the verdict in `_after_failed_job`.
 
 `compare` needs at least 5 successful comparable runs a side. Those are the
 runs it times; `--label`, `--job` and `--cache` choose them. The failure rate
