@@ -56,7 +56,7 @@ in `references/measuring.md`.
 ## Steps
 
 1. **Baseline.** If there is no `.joggernaut/baseline.md`, or its commands didn't fetch with `--created` up to a time, record a baseline as `references/measuring.md` says. From `measure.py split`, note each job's setup and running
-   seconds, the job that finishes last, and runner-minutes by label;
+   seconds, the slowest path (the chain of jobs `split` prints), and runner-minutes by label;
    `compare` prints the median runner-minutes per run on each side.
 2. **Pick one change** (ranked as ci-diagnose step 5 says: observed or
    ceiling): the one that saves the most wait on the slowest

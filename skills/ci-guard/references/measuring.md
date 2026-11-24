@@ -23,8 +23,29 @@ MEASURE fetch --repo OWNER/NAME --workflow ci.yml --event pull_request --limit 1
 MEASURE split --in .joggernaut/before.jsonl
 ```
 
+`split` heads its output with the PR wait of one group of runs. Runs that
+ran different jobs (a path filter, an `if:`, a suite skipped on docs-only
+pushes) wait different times, so it groups the successful runs by the
+slowest job each one ran, lists every group with its run count, median,
+slowest runs and share of the total wait, and heads with the group that
+holds the most of the wait (`--cohort JOB` picks another). The median over
+all of them comes last, labelled as a blend; it is no group's wait. The
+slowest path is the chain of jobs that decided when each run ended, read
+from the jobs' times; it runs through the jobs of called (reusable)
+workflows, which GitHub lists in the caller's run as `CALLER / JOB`.
+
+If GitHub answers a read with a server error (HTTP 5xx), drops the
+connection or cuts the answer off, `fetch` tries twice more, waiting a few
+seconds between tries. A run whose jobs still can't be read is left out
+and named (`left out: run N (failure), jobs read failed 3 times: HTTP
+502`), never written without its jobs. A window read whole
+(`START..END`, the after side below) isn't written at all then, since the
+run left out could be a failure the comparison must count: fetch it again.
+A rate limit stops `fetch` at once, with the time it resets.
+
 Write `.joggernaut/baseline.md`: workflow, job and runner label measured, run
-count, median and the slowest runs as `split` printed them, the tests that ran
+count, median and the slowest runs as `split` printed them (and the group
+they describe, when it prints groups), any runs `fetch` left out, the tests that ran
 (from the JUnit report CI saves, or the runner's count if there is none), and
 these commands.
 
@@ -86,6 +107,11 @@ fetch it only once it has ended and every run created in it has finished;
 `--limit`. Fast runs finish first, so stopping at the fifth run to
 finish keeps the fastest of the window and can pass for a speedup with no
 change at all.
+
+`compare` times every successful comparable run in each file, whatever jobs
+it ran. If `split` shows groups and the two sides hold them in different
+mixes (more docs-only pushes after, say), the medians move with the mix:
+say so, and time the job the fix changes with `--job`.
 
 `compare` needs at least 5 successful comparable runs a side. Those are the
 runs it times; `--label`, `--job` and `--cache` choose them. The failure rate

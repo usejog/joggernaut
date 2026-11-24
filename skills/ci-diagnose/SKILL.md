@@ -112,21 +112,44 @@ in `references/measuring.md`.
    - the PR wait, at the median and the slowest 5% of successful runs (the
      slowest run, below 20; `split` says which), from
      the start of the run's final attempt to its last job done (time spent
-     waiting for someone to rerun a failure isn't in it). With several
+     waiting for someone to rerun a failure isn't in it). Runs that ran
+     different jobs (a path filter, an `if:`, a suite skipped on docs-only
+     pushes) wait different times, and one median over the mix describes
+     none of them. So `split` groups the successful runs by the slowest job
+     each one ran (slowest by that job's median running time over the file)
+     and prints each group's run count, median, slowest 5% and share of the
+     total wait. The headline is the group with the most of the wait
+     (`--cohort JOB` picks another); the slowest path below describes that
+     group. Report the headline as the PR wait, naming its group, with the
+     other groups beside it. The blended median over every run is printed
+     last and labelled as a blend: never report it as the PR wait. With several
      workflows in the file that line pools them; report the "PR wait across workflows" line instead, as the elapsed time for commits where two or more workflows were seen, read as follows: for each commit it takes each workflow's first run within 24 hours of the commit's first, drops the commit if any of those failed (even if a later run passed), and times until their last job finished (an optional slow job counts; a workflow missing for a commit isn't in it). Report a pull-request-wide wait only when every required workflow is present. If branch protection requires only some
      jobs (read `required_status_checks` as in ci-workflow; on 403 or 404,
      say it is unknown), the required checks can't pass before the slowest
      required job ends: say which job that is and rank on its path. Reviews,
      conflicts and a merge queue can add wait that no run shows;
-   - on the slowest path (the job that finishes last), the split into
-     waiting for a machine, setup (checkout, toolchains, caches, installs),
-     running, and time no step covers. Each part is a median over runs, and
-     the shares are of their sum, which need not equal the median wait.
-     These are elapsed intervals: "waiting" can be a runner shortage, a
-     concurrency limit or an environment approval, and "upstream" is time
-     before the last job was queued, which the `needs:` graph explains or
-     doesn't; say which, from the workflow, before naming a cause;
-   - every job's median split (`--json` lists every job, not only ten);
+   - the slowest path: the chain of jobs that decided when each run ended.
+     It starts at the job that finished last and steps back, at each job, to
+     the job that finished last just before it was queued: GitHub queues a
+     job when the last job it `needs` ends, and the jobs list has no
+     `needs:`, so `split` reads each link from the times (within a minute)
+     and prints the most common chains; check them against the workflow. A
+     called (reusable, `workflow_call`) workflow's jobs are in the caller's
+     run, named `CALLER / JOB`, so the chain runs through them like any
+     other job, and a short gate job at the end no longer hides the time
+     before it. The path's time is split into parts that add up to the run's
+     wait: before its first job was queued, between its jobs (one ended, the
+     next was queued), and its jobs' waiting for a machine, setup
+     (checkout, toolchains, caches, installs), running, cleanup and time no
+     step covers. Each part shows its median a run and its share of all the
+     path's seconds over the runs. These are elapsed intervals: "waiting"
+     can be a runner shortage, a concurrency limit or an environment
+     approval, and a long "before its first job" or "between its jobs" is
+     time no job in the list explains (an approval, a concurrency group);
+     say which, from the workflow, before naming a cause;
+   - every job's median split over the runs that ran it, called workflows'
+     jobs included (`--json` lists every job, not only ten), and each called
+     workflow's time, from its first job queued to its last done;
    - pushes a day: distinct pull-request commits that started CI, over the
      days the file spans. A reopened pull request or a re-run of the same
      commit isn't counted again;
@@ -155,9 +178,11 @@ in `references/measuring.md`.
 5. **Rank the fixes by the wait they would save, from these runs.**
    The slowest path is the job that finishes last and, at each of its
    `needs`, the needed job that finished last in that run (a needed job that
-   finished earlier isn't on the path): read the `needs:` graph in the
-   workflow as it was in the runs (a pull request can change it), and use
-   the `upstream` line of the split (time before the last job was queued).
+   finished earlier isn't on the path), through called workflows' jobs:
+   check the chains `split` prints against the `needs:` graph in the
+   workflow as it was in the runs (a pull request can change it). Rank
+   within the headline group of runs, and say which group a cause touches:
+   a saving in a suite that only some runs ran counts on those runs alone.
    For each cause on that path, get its seconds from these
    runs, never from a rule of thumb or a guessed percentage:
    - **observed**: the difference in median step time between runs of the
@@ -204,17 +229,21 @@ in `references/measuring.md`.
 
    ```
    Joggernaut · OWNER/NAME · 150 PR runs over 3.75 days   read-only · no tracked file changed
-   PR wait: median 14m 10s, slowest 5% 31m 02s, about 40 pushes a day
+   PR wait, runs that ran the test job (124 runs, 98% of the wait):
+     median 14m 10s, slowest 5% 31m 02s, about 40 pushes a day
+     other runs: lint only (docs changes), 13 runs, median 2m 05s
+     blended over all 137 successful runs: median 13m 45s (a mix, not a wait)
+   On the slowest path of the test-job runs (build -> test):
      waiting for a machine   0m 40s
      setup                   7m 25s   <- biggest: 52%
      running                 6m 05s
    Runner-minutes in failed, timed-out or cancelled runs 38%, catch-up 12%
 
    On the slowest path, observed in these runs         a run          a day
-   > 1  pnpm cache never saved on main: cold PRs   -4m 50s on 96 runs  -2h 04m  ci-cache
-          install 5m 20s on 96 cold runs, 0m 30s on 41 warm; same job, same runner
+   > 1  pnpm cache never saved on main: cold PRs   -4m 50s on 90 runs  -1h 56m  ci-cache
+          install 5m 20s on 90 cold runs, 0m 30s on 34 warm; same job, same runner
    On the slowest path, ceilings (not observed)
-     2  tests use 2 of 4 cores                     up to -2m 05s   up to -1h 23m  ci-slow-tests
+     2  tests use 2 of 4 cores                     up to -2m 05s   up to -1h 15m  ci-slow-tests
           with ideal scaling, twice the workers halves the 4m 10s test step
    Off the slowest path (runner-minutes, not wait)
      3  old PR runs keep going after a new push    up to 9 min on each of 54 runs        ci-workflow
@@ -248,8 +277,9 @@ in `references/measuring.md`.
 
 ## What it measures
 
-PR wait at the median and slowest 5% (the slowest run below 20 runs), the waiting/setup/running split per job
-and on the slowest path, minutes on failed or cancelled runs, pushes per pull
+PR wait at the median and slowest 5% (the slowest run below 20 runs) for each
+group of runs that ran the same slowest job, the waiting/setup/running split per job
+and on the slowest path (through called workflows' jobs), minutes on failed or cancelled runs, pushes per pull
 request, and catch-up runs. It changes no tracked file, so there is no after.
 
 ## Why this works: reasoning
@@ -258,6 +288,11 @@ This is reasoning from how CI works, not a measurement.
 
 - A pull request's checks finish when the job that finishes last does, so
   only time on that path shortens the wait; time saved elsewhere saves runner-minutes, and shortens the wait only if freeing a machine, a concurrency or matrix slot, or shared disk or database capacity lets a required job start or run sooner; the before logs can hint at that (queue or lock waits), and `ci-measure`'s after measures it.
+- Runs that skip a suite and runs that run it wait different times, so a
+  median over both moves with how many pushes changed only docs, not with
+  CI. Grouping runs by the slowest job they ran keeps each median to runs
+  that did comparable work, and the group with the most of the wait is the
+  one whose fixes save the most.
 - Every job pays three different costs (waiting for a machine, setting up,
   running), and each has different fixes. Splitting them first stops an
   agent from optimising tests when the time is in installs.
