@@ -1492,13 +1492,13 @@ def cmd_compare(a):
                              and on_base(r, a.base))
     finished = lambda rs: [r for r in rs if in_workflow(r) and r.get("conclusion") not in (None, "skipped", "neutral")]
     cache = load_cache_state(a)
-    # The selection the label and routing checks read: every finished run of the workflow,
-    # event and base, any outcome, in the selected cache state, and with --ran the runs where
-    # that job got a runner in some attempt.
+    # The selection the label and routing checks read: every run of the workflow, event and
+    # base, any outcome, and with --ran the runs where that job got a runner in some attempt.
     ran_any = lambda r: any(j.get("name") == a.ran and on_a_runner(j) for j in r.get("jobs", []))
     # Every completed run, neutral and skipped ones too, as the label check read before.
-    selected = lambda rs: [r for r in rs if in_workflow(r) and (not a.ran or ran_any(r))
-                           and (not a.cache or cache.get(str(r["id"])) == a.cache)]
+    # Not by cache state: a runner seen only on runs of the other state still shows where the
+    # pushes went (as the label check always read).
+    selected = lambda rs: [r for r in rs if in_workflow(r) and (not a.ran or ran_any(r))]
     # The runs the per-job and whole-run runner checks read, as before: every green run of
     # the cohort, timed or not (a canary that fails on one pool keeps its runs from being
     # timed, so which pushes went there decides which are timed), reruns included, by their

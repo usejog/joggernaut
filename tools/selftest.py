@@ -2963,6 +2963,20 @@ with tempfile.TemporaryDirectory() as t:
     v, r = _cmp(t, b_, a_, "--job", "test")
     if "error" not in v or "run 85205, a rerun" not in r.stderr:
         bad.append("compare: the label refusal didn't name the run: %r" % (r.stderr or v))
+    # Round 12. --cache hit doesn't hide a runner seen only on cache misses.
+    hits = {}
+    def cached(base_id, after):
+        rows = []
+        for i in range(32):
+            fast = i < 24
+            hits[str(base_id + i)] = "hit" if (not fast or after) else "miss"
+            rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100, labels=("L" if (not fast or after) else "M",))]))
+        return rows
+    b_, a_ = cached(86000, False), cached(87000, True)
+    open(t + "/cache.json", "w").write(json.dumps(hits))
+    v, r = _cmp(t, b_, a_, "--job", "test", "--cache", "hit", "--cache-state", t + "/cache.json")
+    if "error" not in v:
+        bad.append("compare --cache: a runner seen only on misses was hidden: %r" % v.get("verdict"))
     # #35: a run with two jobs named test is left out of the job sets as of the timings.
     before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
     before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))
