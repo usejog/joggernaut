@@ -1614,11 +1614,21 @@ def cmd_compare(a):
                                                    lambda r: not ran_all(r, [a.job]))))
             checks.append(("job", lambda rs: count([r for r in finished(rs) if ran_all(r, [a.job])],
                                                    lambda r: not ran_all(r, [a.ran]))))
-        checks += [("stopped", lambda rs: count(finished(rs), upstream)), ("all", lambda rs: count(finished(rs), missed))]
+        # Missed it with a failure or cancellation somewhere in the run, the job listed or not
+        # (a matrix whose planner failed lists no leg): seen together, not a claimed cause.
+        failed_too = lambda r: missed(r) and any(j.get("conclusion") in FAILED + ("cancelled",) for j in r.get("jobs", []))
+        checks += [("stopped", lambda rs: count(finished(rs), upstream)),
+                   ("missed with a failure", lambda rs: count(finished(rs), failed_too)),
+                   ("all", lambda rs: count(finished(rs), missed))]
         res["reach_checks"] = [{"check": c, "missed_before": list(f(rb)), "missed_after": list(f(ra))} for c, f in checks]
         res["not_reaching_before"], res["not_reaching_after"] = checks[0][1](rb), checks[0][1](ra)
         rose = [x for x in res["reach_checks"] if fails_rose(tuple(x["missed_before"]), tuple(x["missed_after"]))]
         res["fewer_reached_by"] = rose[0]["check"] if rose else None
+        # Both ways: a workload that grew (a path filter widened, a matrix leg added) changes
+        # which runs are timed as much as one that shrank.
+        hit = lambda c: (c[1] - c[0], c[1])
+        grew = [x for x in res["reach_checks"] if fails_rose(hit(x["missed_before"]), hit(x["missed_after"]))]
+        res["more_reached_by"] = grew[0]["check"] if grew else None
     # Runs cancelled with no failure (a newer push, a concurrency group) are in neither the
     # timings nor the failure rate. A change that gets slow runs cancelled can look faster.
     cancelled = lambda rs: (sum(1 for r in rs if in_workflow(r) and r.get("conclusion") == "cancelled"
@@ -1723,8 +1733,26 @@ def cmd_compare(a):
                                                     "listed by name": "of the runs that list it by name",
                                                     "ran": "of the runs where %s ran" % a.ran,
                                                     "job": "of the runs where %s ran, missing %s" % (a.job, a.ran),
-                                                    "stopped": "stopped upstream, of all runs", "all": "of all runs"}[x["check"]])
+                                                    "stopped": "of all runs, those that list it and had a job fail or be cancelled",
+                                                    "missed with a failure": "of all runs, those with a job that failed or was cancelled",
+                                                    "all": "of all runs"}[x["check"]])
                               + tuple(x["missed_after"]) + tuple(x["missed_before"])))
+    if work and res["verdict_code"] in qualify + tuple(q + "_more_cancelled" for q in qualify) + tuple(
+            q + s_ for q in qualify for s_ in ("_fewer_reached", "_more_cancelled_fewer_reached")) and res["more_reached_by"]:
+        x = next(c for c in res["reach_checks"] if c["check"] == res["more_reached_by"])
+        res["verdict_code"] += "_more_reached"
+        res["verdict"] += ("; but more runs reached %s after (%s, %d of %d ran it, against %d of %d before): the work"
+                           " behind the timed runs changed (a filter or a matrix that widened), so they may not be"
+                           " like the runs before; name why before calling it faster"
+                           % ((" and ".join(names), x["check"], x["missed_after"][1] - x["missed_after"][0], x["missed_after"][1],
+                               x["missed_before"][1] - x["missed_before"][0], x["missed_before"][1])))
+    if graph_changed and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
+        # One set a side, different sets: the change altered the jobs, or the mix of pull
+        # requests did. Never a plain verdict: only the workflow's diff can say which.
+        res["verdict_code"] += "_jobs_changed"
+        res["verdict"] += ("; but the sides ran different jobs: a speed verdict holds only if the workflow's"
+                           " diff explains every difference and every removed job's work still runs"
+                           " (compare the tests by name); otherwise the mix of work changed")
     if a.end and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
         # A job's end on the run's clock moves with which runs reached it, their queue order
         # and the runners of every job before it, none of which the jobs list pins down. It is
@@ -1734,13 +1762,6 @@ def cmd_compare(a):
         res["verdict"] = ("descriptive only (%s): a job's end on the run's clock moves with which runs reached it,"
                           " their queue order and their runners; give the job's own duration (--job) and the whole"
                           " run's wait for a verdict" % res["end_reading"])
-    if graph_changed and res["verdict_code"] not in ("not_enough_runs", "not_valid", "end_descriptive"):
-        # One set a side, different sets: the change altered the jobs, or the mix of pull
-        # requests did. Never a plain verdict: only the workflow's diff can say which.
-        res["verdict_code"] += "_jobs_changed"
-        res["verdict"] += ("; but the sides ran different jobs: a speed verdict holds only if the workflow's"
-                           " diff explains every difference and every removed job's work still runs"
-                           " (compare the tests by name); otherwise the mix of work changed")
     hidden = res["verdict_code"] == "not_enough_runs"
     if hidden:
         # No timings until there are enough runs, so a longer window is chosen without

@@ -1840,6 +1840,68 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("compare --ran integration --job backend: the workload losing integration should qualify: %r %r"
                    % (got.get("verdict_code"), rose_checks(got)))
 
+# --ran's workload changes with the change, three ways, each with a whole-run or job verdict:
+#   widened: a path filter runs preview on 36 faster pushes too (more reached it);
+#   planner: a matrix planner fails on the slow pushes after, before the postgres leg is listed;
+#   nested:  the direct row CI / Python / integration is skipped on the slow pushes, while 94 docs
+#            runs list only the skipped caller CI / Python on both sides (only the by-name count sees it).
+with tempfile.TemporaryDirectory() as t:
+    def pushes(i, slow, has, kind):
+        t0 = i * 4000
+        be = _job("backend", t0, t0 + 1, t0 + (100 if slow else 10))
+        end = mm.ts(be["completed_at"]) - 1793000000
+        jobs = [be]
+        if kind == "widened":
+            if has:
+                jobs.append(_job("preview", t0, t0 + 1, t0 + 5))
+        elif kind == "planner":
+            plan = _job("planner", t0, t0 + 1, t0 + 3)
+            jobs.insert(0, plan)
+            if has:
+                jobs.append(_job("integration (postgres)", end, end + 1, end + 31))
+            else:
+                plan["conclusion"] = "failure"
+        elif kind == "nested":
+            jobs.append(_job("CI / Python / integration", end, end + 1, end + (91 if slow else 31)) if has else
+                        dict(_job("CI / Python / integration", end, end, end), conclusion="skipped", steps=[], started_at=None))
+        x = _run(i, jobs, t0)
+        if kind == "planner" and not has:
+            x["conclusion"] = "failure"
+        return x
+    def docs_parent(i):
+        return _run(i, [_job("docs", i * 4000, i * 4000 + 1, i * 4000 + 5),
+                        dict(_job("CI / Python", i * 4000, i * 4000, i * 4000), conclusion="skipped", steps=[],
+                             started_at=None)], i * 4000)
+    cases = {
+        # before: preview on the 12 slow pushes only; after: on all 48 (36 fast ones too)
+        "widened": ([pushes(i, True, True, "widened") for i in range(12)] + [pushes(100 + i, False, False, "widened") for i in range(36)],
+                    [pushes(1000 + i, True, True, "widened") for i in range(12)] + [pushes(1100 + i, False, True, "widened") for i in range(36)],
+                    ["--ran", "preview"], "more"),
+        "planner": ([pushes(i, i >= 6, True, "planner") for i in range(36)] + [_run(200 + i, [_job("x", (200 + i) * 4000, (200 + i) * 4000 + 1, (200 + i) * 4000 + 2, conclusion="failure")], (200 + i) * 4000) for i in range(30)],
+                    [pushes(1000 + i, False, True, "planner") for i in range(6)] + [pushes(1100 + i, True, False, "planner") for i in range(30)]
+                    + [_run(1200 + i, [_job("x", (1200 + i) * 4000, (1200 + i) * 4000 + 1, (1200 + i) * 4000 + 2)], (1200 + i) * 4000) for i in range(30)],
+                    ["--ran", "integration (postgres)"], "fewer"),
+        "nested": ([pushes(i, i >= 6, True, "nested") for i in range(36)] + [docs_parent(300 + i) for i in range(94)],
+                   [pushes(1000 + i, i >= 6, i < 6, "nested") for i in range(36)] + [docs_parent(1300 + i) for i in range(94)],
+                   ["--ran", "backend", "--job", "CI / Python / integration"], "fewer"),
+    }
+    for kind, (before, after, extra, way) in cases.items():
+        for x in before + after:
+            x["conclusion"] = x.get("conclusion") or "success"
+        open(t + "/b.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in before))
+        open(t + "/a.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in after))
+        r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--json"] + extra)
+        got = json.loads(r.stdout) if r.returncode == 0 else {}
+        code = got.get("verdict_code") or ""
+        if kind == "nested":
+            ok = (code.startswith("faster") and "_fewer_reached" in code
+                  and got.get("fewer_reached_by") in ("listed", "listed by name"))
+        else:
+            ok = code.startswith("faster") and ("_%s_reached" % way) in code
+        if not ok:
+            bad.append("compare %s (%s): a changed workload passed for a speedup: %r %r %r\n%s"
+                       % (" ".join(extra), kind, code, got.get("reach_checks"), got.get("failed_before"), r.stderr[-300:]))
+
 # Runner-minutes: two matrix legs with one name, same seconds, in one attempt are two executions.
 two = _run(0, [_job("Test", 0, 1, 61), dict(_job("Test", 0, 1, 61), id=5)], 0)
 if mm.run_minutes(two) != 2 or abs(mm.run_minutes(two, True) - 2.0) > 1e-9:
