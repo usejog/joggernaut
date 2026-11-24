@@ -762,27 +762,35 @@ def step_times(job, pattern=None):
     """((name, occurrence), bucket, seconds) for each timed step: a repeated name is told
     apart by its occurrence, never by a made-up name another step could have."""
     seen, out = {}, []
+    j0, j1 = ts(job.get("started_at")), ts(job.get("completed_at"))
     for st in job.get("steps") or []:
-        d = secs(st.get("started_at"), st.get("completed_at"))
-        if d is None:
-            continue
         n = st.get("name") or ""
-        seen[n] = seen.get(n, 0) + 1
+        seen[n] = seen.get(n, 0) + 1  # counted even untimed, so a later step keeps its number
+        a, b = ts(st.get("started_at")), ts(st.get("completed_at"))
+        if a is None or b is None:
+            continue
+        if j0 is not None and j1 is not None:
+            a, b = max(a, j0), min(b, j1)  # as the buckets read it: a step's stamps can run past its job's
+        d = max(0.0, b - a)
         out.append(((n, seen[n]), bucket(n, pattern), d))
     return out
 
 
-def steps_overlap(job):
-    """True when two of a job's steps ran at once by more than a second (whole-second stamps)."""
-    spans = sorted((ts(s.get("started_at")), ts(s.get("completed_at"))) for s in job.get("steps") or []
-                   if s.get("started_at") and s.get("completed_at")
-                   and ts(s["completed_at"]) > ts(s["started_at"]))  # a zero-length step overlaps nothing
-    end = None
-    for a, b in spans:
-        if end is not None and a + 1 < end:
-            return True
-        end = b if end is None else max(end, b)
-    return False
+def overlap_seconds(job):
+    """Seconds of the job's clock during which two or more of its steps ran, each step
+    clipped to the job, so a reader can tell a one-second overlap from a real one."""
+    j0, j1 = ts(job.get("started_at")), ts(job.get("completed_at"))
+    spans = []
+    for s in job.get("steps") or []:
+        a, b = ts(s.get("started_at")), ts(s.get("completed_at"))
+        if a is None or b is None:
+            continue
+        if j0 is not None and j1 is not None:
+            a, b = max(a, j0), min(b, j1)
+        if b > a:
+            spans.append((a, b))
+    cuts = sorted({t for ab in spans for t in ab})
+    return sum(hi - lo for lo, hi in zip(cuts, cuts[1:]) if sum(1 for a, b in spans if a <= lo and b >= hi) > 1)
 
 
 def cohorts(ok_runs):
@@ -842,8 +850,41 @@ def run_minutes(r, exact=False):
     return total
 
 
+PR_EVENTS = ("pull_request", "pull_request_target")
+# A workflow is its file. Two files can share a display name; a record without a file
+# names a workflow it can't place.
+wf_key = lambda r: r.get("path") or r.get("name") or ""
+
+
+def pr_pushes(runs):
+    """{pull request: {head commit: [runs]}} for pull_request and pull_request_target runs
+    with a head commit (each records the pull request's head, not the base). A pull request is
+    its number; a fork's runs come with none, so they are keyed by fork, branch and target
+    branch, taking the number where another run of the same fork, branch and commit has
+    exactly one. Returns that and how many runs were keyed without a number."""
+    named = {}
+    for r in runs:
+        if r.get("event") in PR_EVENTS and r.get("head_sha") and r.get("pull_requests"):
+            named.setdefault((r.get("head_repo"), r.get("head_branch"), r["head_sha"]), set()).add(
+                tuple(r["pull_requests"]))
+    out, guessed = {}, 0
+    for r in runs:
+        if r.get("event") not in PR_EVENTS or not r.get("head_sha"):
+            continue
+        pr = tuple(r.get("pull_requests") or [])
+        if not pr:
+            same = named.get((r.get("head_repo"), r.get("head_branch"), r["head_sha"]), set())
+            if len(same) == 1:
+                pr = next(iter(same))
+            else:
+                pr = (r.get("head_repo"), r.get("head_branch"), tuple(r.get("pull_request_bases") or []))
+                guessed += 1
+        out.setdefault(pr, {}).setdefault(r["head_sha"], []).append(r)
+    return out, guessed
+
+
 def cmd_split(a):
-    runs = [r for r in read_runs(a.input) if not a.workflow or r.get("name") == a.workflow]
+    runs = [r for r in read_runs(a.input) if workflow_matches(r, a.workflow)]
     if not runs:
         die("no runs to read")
     # PR wait over successful runs, as compare measures it.
@@ -869,8 +910,21 @@ def cmd_split(a):
     for key, rs in groups.items():
         w = [x for x in (run_wall(r) for r in rs) if x is not None]
         if w:
+            # A group can still hold runs that ran different jobs (a build-and-integration run
+            # and a build-only one both key to build when build is longer): count the sets, as
+            # compare keys them, and give the commonest set's own wait.
+            by_set = {}
+            for r in rs:
+                x = run_wall(r)
+                if x is not None:
+                    js = tuple(sorted("%s / %s" % (r.get("name"), j.get("name")) for j in latest_jobs(r) if executed(j)))
+                    by_set.setdefault(js, []).append(x)
+            top = min(by_set.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+            ties = sum(1 for v in by_set.values() if len(v) == len(top[1])) - 1
             table.append({"longest_job": key, "runs": len(w), "median": median(w), "tail": list(tail(w)),
-                          "share_of_wait": sum(w) / total_wait})
+                          "share_of_wait": sum(w) / total_wait, "job_sets": len(by_set),
+                          "commonest_set": {"jobs": list(top[0]), "runs": len(top[1]), "median": median(top[1]),
+                                            "tied_with": ties}})
     table.sort(key=lambda c: (-c["share_of_wait"], c["longest_job"]))
     out["cohorts"] = table
     if a.cohort:
@@ -888,22 +942,21 @@ def cmd_split(a):
     path_runs = groups[head["longest_job"]] if head else [r for r in runs if r.get("conclusion") == "success"]
     # With several workflows in one file, a pull request waits for all of them:
     # per commit, from the first run's start to the last job done, where every run passed.
-    names = {r.get("name") for r in runs}
-    by_sha = {}
-    for r in runs:
-        if r.get("event") in ("pull_request", "pull_request_target") and r.get("head_sha"):
-            pr = tuple(r.get("pull_requests") or []) or (r.get("head_repo"), r.get("head_branch"))
-            by_sha.setdefault((pr, r["head_sha"]), []).append(r)
-    cross = []
+    names = {wf_key(r) for r in runs}
+    pushes, guessed = pr_pushes(runs)
+    cross, unplaced = [], 0
     if len(names) > 1:
-        for rs in by_sha.values():
+        for rs in (rs for by_head in pushes.values() for rs in by_head.values()):
+            if any(not x.get("path") for x in rs):
+                unplaced += 1  # a run with no workflow file: which workflows ran is unknown
+                continue
             first = {}
             rs = sorted(rs, key=lambda x: ts(x["created_at"]))
             t0 = ts(rs[0]["created_at"])
             for x in rs:
                 # A reopened PR runs again days later: keep each workflow's first run of the day.
                 if ts(x["created_at"]) - t0 <= 86400:
-                    first.setdefault(x.get("name"), x)
+                    first.setdefault(wf_key(x), x)
             rs = list(first.values())
             if len(rs) > 1 and all(x.get("conclusion") == "success" for x in rs):
                 # From the push (creation), so a rerun's extra wait counts.
@@ -911,28 +964,35 @@ def cmd_split(a):
                 ends = [ts(j["completed_at"]) for x in rs for j in latest_jobs(x) if j.get("completed_at")]
                 if ends:
                     cross.append(max(ends) - start)
-    out["workflows"] = sorted(n or "" for n in names)
+    shown_name = {}
+    for r in runs:
+        shown_name.setdefault(r.get("name") or "", set()).add(wf_key(r))
+    out["workflows"] = sorted({(r.get("name") or "") + (" (%s)" % wf_key(r) if len(shown_name[r.get("name") or ""]) > 1
+                                                       else "") for r in runs})
     out["wait_all_workflows_median"] = median(cross) if cross else None
     out["wait_all_workflows_p95"] = pct(cross, 0.95) if cross else None
     out["wait_all_workflows_tail"] = list(tail(cross)) if cross else None
     out["wait_all_workflows_provisional"] = len(cross) < P95_FIRM
     out["wait_all_workflows_commits"] = len(cross)
+    out["wait_all_workflows_unplaced_commits"] = unplaced
     # Runs a day, over the span the file covers: what a saving per run is multiplied by.
     starts = sorted(ts(r["created_at"]) for r in runs if r.get("created_at"))
     span_days = (starts[-1] - starts[0]) / 86400.0 if len(starts) > 1 else 0.0
     out["span_days"] = round(span_days, 1)
     # Pushes a day, not runs: with several workflows in the file, one push starts several runs.
-    # pull_request runs only: their head_sha is the pull request's head commit.
-    commits = {(tuple(r.get("pull_requests") or []) or (r.get("head_repo"), r.get("head_branch")), r.get("head_sha"))
-               for r in runs if r.get("event") == "pull_request"}
+    # Pull-request runs: a pull_request or pull_request_target run's head_sha is the pull
+    # request's head commit (GitHub's GITHUB_SHA for pull_request_target is the base's, but
+    # the run records the head).
+    commits = {(pr, sha) for pr, by_head in pushes.items() for sha in by_head}
     out["pr_commits"] = len(commits)
+    out["pr_runs_keyed_by_branch"] = guessed
     out["runs_per_day"] = round(len(commits) / span_days, 1) if span_days >= 1 and commits else None
 
     # The slowest path: the chain of jobs that decided when each run ended, through called
     # workflows' jobs, split into parts that add up to its wait.
     path = {k: [] for k in PATH_PARTS}
     path_jobs, chains, on_path, ties = {}, {}, {}, 0
-    gate_tails, workers, worker_steps, overlapped = {}, {}, {}, {}
+    gate_tails, workers, worker_steps, overlapped, overlap_secs, worker_secs = {}, {}, {}, {}, {}, {}
     per_job, called = {}, {}
     ok_runs = [r for r in runs if r.get("conclusion") == "success"]
     on_head = {id(r) for r in path_runs}
@@ -959,8 +1019,11 @@ def cmd_split(a):
                 workers[wn] = workers.get(wn, 0) + 1
                 for name, b, d in step_times(worker, a.setup_pattern):
                     worker_steps.setdefault(wn, {}).setdefault((name, b), []).append(d)
-                if steps_overlap(worker):
+                both = overlap_seconds(worker)
+                if both > 0:
                     overlapped[wn] = overlapped.get(wn, 0) + 1
+                    overlap_secs.setdefault(wn, []).append(both)
+                    worker_secs.setdefault(wn, []).append(secs(worker.get("started_at"), worker.get("completed_at")) or 0.0)
         spans = {}
         fresh = {id(j) for j in this_attempt(r)}
         for j in latest_jobs(r):
@@ -1000,6 +1063,7 @@ def cmd_split(a):
     out["gate_ceiling_runs"] = len(every)
     out["last_working_jobs"] = sorted(workers.items(), key=lambda kv: (-kv[1], kv[0]))
     out["last_working_job_steps_overlap"] = overlapped
+    out["last_working_job_steps_overlap_seconds"] = {wn: median(v) for wn, v in overlap_secs.items()}
     out["last_working_job_steps"] = {wn: [{"step": n, "occurrence": k, "bucket": b,
                                            "runs": len(v), "median": median(v)}
                                           for ((n, k), b), v in st.items()] for wn, st in worker_steps.items()}
@@ -1048,14 +1112,7 @@ def cmd_split(a):
     out["wasted_share"] = lost / float(total_min)
 
     # Runs per pull request (pushes that each paid for CI).
-    per_pr = {}
-    for r in runs:
-        if r.get("event") != "pull_request":
-            continue
-        # Fork pull requests come back with no PR number: key them by fork and branch.
-        key = tuple(r.get("pull_requests") or []) or (r.get("head_repo"), r.get("head_branch"))
-        per_pr.setdefault(key, set()).add(r.get("head_sha"))
-    counts = [len(v) for v in per_pr.values()]
+    counts = [len(by_head) for by_head in pushes.values()]
     out["pushes_per_pr_median"] = median(counts)
     out["pushes_per_pr_max"] = max(counts) if counts else None
 
@@ -1139,6 +1196,13 @@ def cmd_split(a):
                   % (len(table) - 6, sum(c["runs"] for c in table[6:])))
         print("  blended, all %d successful runs (mixes these groups; not the wait of any one): median %s, %s %s"
               % (len(walls), fmt(out["wait_median"]), label, fmt(value)))
+    if head and head["job_sets"] > 1:
+        cs = head["commonest_set"]
+        print("  the headline's runs ran %d different sets of jobs (a path filter, an `if:`), so its wait mixes"
+              " them, and so do the slowest path and gates below; the commonest set (%s), %d runs%s: median %s"
+              % (head["job_sets"], ", ".join(cs["jobs"]), cs["runs"],
+                 ", tied with %d other set%s" % (cs["tied_with"], "s" * (cs["tied_with"] > 1)) if cs["tied_with"] else "",
+                 fmt(cs["median"])))
     if len(names) > 1:
         if cross:
             label, value = out["wait_all_workflows_tail"]
@@ -1148,6 +1212,8 @@ def cmd_split(a):
                      " (provisional: under %d commits)" % P95_FIRM if out["wait_all_workflows_provisional"] else ""))
         else:
             print("PR wait across workflows: no commit has passing runs of two or more workflows here")
+        if unplaced:
+            print("  %d commits left out: a run with no workflow file, so which workflows ran is unknown" % unplaced)
     sp, share = out["slowest_path_split"], out["slowest_path_share"]
     print("slowest path%s: the chain of jobs that decided when each run ended, called"
           " workflows' jobs included, read from the jobs' times (check it against `needs:`)."
@@ -1180,8 +1246,10 @@ def cmd_split(a):
     if out["last_working_jobs"]:
         wn = out["last_working_jobs"][0][0]
         print("steps of %s, the last job that did work on the path (median a run, in order)%s:" % (
-            wn, "; in %d runs its steps overlapped (they ran side by side), so they don't add up"
-            % overlapped[wn] if overlapped.get(wn) else ""))
+            wn, "; in %d of its %d runs its steps overlapped (ran side by side), in those runs by a median %s"
+            " of the job's %s, so they don't add up" % (overlapped[wn], workers[wn], fmt(median(overlap_secs[wn])),
+                                                       fmt(median(worker_secs[wn])))
+            if overlapped.get(wn) else ""))
         for st in out["last_working_job_steps"].get(wn, [])[:15]:
             print("  %-8s %-9s %s%s%s" % (fmt(st["median"]), st["bucket"], st["step"][:60],
                                          "" if st["occurrence"] == 1 else " (its #%d)" % st["occurrence"],
@@ -1203,7 +1271,10 @@ def cmd_split(a):
     print("  in runs that failed, timed out or were cancelled: %.0f%%" % (100 * out["wasted_share"]))
     print("  by runner label, unrounded / rounded up (price each label at its provider's rate and rounding): "
           + ", ".join("%s %.1f / %d" % (k, exact_by_label[k], v) for k, v in sorted(by_label.items(), key=lambda kv: -kv[1])))
-    print("pushes per PR: median %g, max %s" % (out["pushes_per_pr_median"], out["pushes_per_pr_max"])
+    print("pushes per PR (distinct head commits seen per pull request): median %g, max %s%s"
+          % (out["pushes_per_pr_median"], out["pushes_per_pr_max"],
+             "; %d runs from forks came with no pull-request number and are keyed by fork, branch and target"
+             " (two pull requests from one branch at one commit count as one)" % guessed if guessed else "")
           if out["pushes_per_pr_max"] else "pushes per PR: no pull-request runs in this file")
     if out["catch_up_known"]:
         print("catch-up runs, by commit message (a merge of another branch in; rebases can't be seen):"

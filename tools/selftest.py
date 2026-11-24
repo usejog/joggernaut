@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("split: runs a day wrong: %r" % clean.get("runs_per_day"))
     second = []
     for row in rows:
-        c = copy.deepcopy(row); c["id"] += 200000; c["name"] = "E2E"
+        c = copy.deepcopy(row); c["id"] += 200000; c["name"] = "E2E"; c["path"] = ".github/workflows/e2e.yml"
         for j in c["jobs"]:
             j["completed_at"] = j["completed_at"].replace("T", "T", 1)
         second.append(c)
@@ -926,6 +926,10 @@ from datetime import datetime as _dt, timezone as _tz
 
 def _at(t):
     return _dt.fromtimestamp(1793000000 + t, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ts_of(stamp):
+    return int(_dt.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc).timestamp()) - 1793000000
 
 
 def _job(name, queued, started, done, setup=10, conclusion="success"):
@@ -2015,10 +2019,12 @@ if mm.run_minutes(two) != 2 or abs(mm.run_minutes(two, True) - 2.0) > 1e-9:
 def _job_steps(spans, end):
     return {"created_at": _at(0), "started_at": _at(0), "completed_at": _at(end), "name": "j",
             "steps": [{"name": n, "started_at": _at(a), "completed_at": _at(b)} for n, a, b in spans]}
-if not mm.steps_overlap(_job_steps([("a", 0, 50), ("b", 20, 60)], 120)):
-    bad.append("steps_overlap: 0-50 and 20-60 overlap")
-if mm.steps_overlap(_job_steps([("a", 0, 50), ("b", 50, 60), ("c", 60, 61)], 120)):
-    bad.append("steps_overlap: steps one after another don't overlap")
+if mm.overlap_seconds(_job_steps([("a", 0, 50), ("b", 20, 60)], 120)) != 30:
+    bad.append("overlap_seconds: 0-50 and 20-60 overlap for 30 s")
+if mm.overlap_seconds(_job_steps([("a", 0, 50), ("b", 50, 60), ("c", 60, 61)], 120)) != 0:
+    bad.append("overlap_seconds: steps one after another don't overlap")
+if mm.overlap_seconds(_job_steps([("a", 0, 60), ("b", 10, 30), ("c", 20, 40)], 120)) != 30:
+    bad.append("overlap_seconds: a three-way overlap counts once")
 got = mm.job_split(_job_steps([("Set up job", 0, 2), ("a", 2, 60), ("b", 2, 60)], 60))
 if got["running"] != 58 or got["setup"] != 2 or got["other"] != 0:
     bad.append("job_split: parallel steps must count elapsed time, not their sum: %r" % got)
@@ -2243,8 +2249,8 @@ with tempfile.TemporaryDirectory() as t:
 got = mm.job_split(_job_steps([("Test", 0, 70)], 60))
 if got["running"] != 60:
     bad.append("job_split: a step's time must be clipped to its job: %r" % got)
-if mm.steps_overlap(_job_steps([("a", 0, 60), ("b", 20, 20)], 60)):
-    bad.append("steps_overlap: a zero-length step overlaps nothing")
+if mm.overlap_seconds(_job_steps([("a", 0, 60), ("b", 20, 20)], 60)):
+    bad.append("overlap_seconds: a zero-length step overlaps nothing")
 ch = [_steps_job("work", 0, 1, [("Test", 100)]), _steps_job("report", 102, 103, [("Set up job", 1), ("Post results", 120)])]
 if mm.tail_gates(_run(0, ch, 0), ch)[0]:
     bad.append("tail_gates: a 120 s step named Post results was taken for runner cleanup")
@@ -2439,6 +2445,114 @@ with tempfile.TemporaryDirectory() as t:
     got = json.loads(r.stdout) if r.returncode == 0 else {"tests": [{}]}
     if got["tests"][0].get("alone_on_pull_requests") != 0:
         bad.append("flaky --runs-dir: a run with no jobs page dropped out of the line: %r\n%s" % (got, r.stderr))
+
+
+
+# split: workflows by file (#7), pull_request_target (#14), mixed headline groups (#23),
+# steps clipped to their job and overlap by how much (#35).
+def _split(t, rows, *flags):
+    open(t + "/runs.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in rows))
+    r = run([M, "split", "--in", t + "/runs.jsonl"] + list(flags))
+    return r
+
+
+with tempfile.TemporaryDirectory() as t:
+    # #7: a.yml and b.yml are both named CI; b fails. With a passing Lint, the commit didn't pass.
+    rows = []
+    for k, (path, name, ok) in enumerate((("a.yml", "CI", True), ("b.yml", "CI", False), ("lint.yml", "Lint", True))):
+        x = _run(k, [_job("test", 100 * k, 100 * k + 1, 100 * k + 60, conclusion="success" if ok else "failure")],
+                 100 * k, name=name)
+        x.update(path=".github/workflows/" + path, conclusion="success" if ok else "failure",
+                 head_sha="%040d" % 7, pull_requests=[7], head_branch="b7")
+        rows.append(x)
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 0 or len(got.get("workflows") or []) != 3:
+        bad.append("split #7: two files named CI, one failing, counted as a passing commit: %r %r"
+                   % (got.get("wait_all_workflows_commits"), got.get("workflows")))
+    # #7: a commit with a run that names no workflow file is left out, not counted as two workflows.
+    rows2 = copy.deepcopy(rows[:1]) + copy.deepcopy(rows[:1])
+    rows2[1].update(id=rows2[1]["id"] + 50, created_at=_at(3600), run_started_at=_at(3600))
+    del rows2[1]["path"]
+    got = json.loads(_split(t, rows2, "--json").stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 0 or got.get("wait_all_workflows_unplaced_commits") != 1:
+        bad.append("split #7: a run with no workflow file made a second workflow: %r %r"
+                   % (got.get("wait_all_workflows_commits"), got.get("wait_all_workflows_unplaced_commits")))
+    # #14: forks. A numbered run and an unnumbered one of the same fork, branch and commit are
+    # one pull request; two unnumbered pull requests from one branch into two bases are two.
+    rows = []
+    for i, (prs, base, sha) in enumerate((([5], ["main"], 1), ([], ["main"], 1), ([], ["main"], 2),
+                                          ([], ["release"], 2))):
+        x = _run(i, [_job("test", 3000 * i, 3000 * i + 1, 3000 * i + 60)], 3000 * i)
+        x.update(head_repo="fork/r", head_branch="fix", head_sha="%040d" % sha, pull_requests=prs,
+                 pull_request_bases=base)
+        rows.append(x)
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    if got.get("pr_commits") != 3 or got.get("pr_runs_keyed_by_branch") != 2:
+        bad.append("split #14: fork runs keyed wrong: %r %r" % (got.get("pr_commits"), got.get("pr_runs_keyed_by_branch")))
+    # #14: a repository whose pull-request workflow runs on pull_request_target alone.
+    rows = []
+    for i in range(6):
+        x = _run(i, [_job("test", 3000 * i, 3000 * i + 1, 3000 * i + 60)], 3000 * i * 20)
+        x["event"] = "pull_request_target"
+        x["pull_requests"] = [i % 3]
+        rows.append(x)
+    r = _split(t, rows, "--json")
+    got = json.loads(r.stdout or "{}")
+    if got.get("pr_commits") != 6 or got.get("pushes_per_pr_max") != 2:
+        bad.append("split #14: pull_request_target runs weren't pull-request runs: %r %r"
+                   % (got.get("pr_commits"), got.get("pushes_per_pr_max")))
+    # #23: every run's longest job is build; three of six also ran lint. One headline group,
+    # two job sets: said so, with the commonest set's median.
+    rows = []
+    for i in range(6):
+        t0 = 4000 * i
+        jobs = [_job("build", t0, t0 + 1, t0 + 600 + i)]
+        if i % 2:
+            jobs.append(_job("lint", t0, t0 + 1, t0 + 700 + i))
+            jobs[-1]["name"] = "lint"
+        rows.append(_run(i, jobs, t0))
+    for row in rows:  # make build the longest job by median: lint runs shorter
+        for j in row["jobs"]:
+            if j["name"] == "lint":
+                j["completed_at"] = _at(_ts_of(j["started_at"]) + 20)
+                j["steps"][-1]["completed_at"] = j["completed_at"]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    text = _split(t, rows).stdout
+    head = (got.get("cohorts") or [{}])[0]
+    if head.get("job_sets") != 2 or (head.get("commonest_set") or {}).get("runs") != 3 \
+            or (head.get("commonest_set") or {}).get("tied_with") != 1 or len(got.get("cohorts") or []) != 1 \
+            or "ran 2 different sets of jobs" not in text or "tied with 1 other set" not in text:
+        bad.append("split #23: a headline group mixing two job sets wasn't flagged: %r\n%s" % (head, text))
+    # #35: a step stamped 10 s past its 60 s job shows clipped in the step table; a one-second
+    # step inside another sets the overlap flag, and the amount says it is one second.
+    rows = []
+    for i in range(5):
+        t0 = 5000 * i
+        j = _job("test", t0, t0, t0 + 60)
+        j["steps"] = [{"name": "Set up job", "conclusion": "success", "started_at": _at(t0), "completed_at": _at(t0 + 5)},
+                      {"name": "Run tests", "conclusion": "success", "started_at": _at(t0 + 5), "completed_at": _at(t0 + 70)},
+                      {"name": "Note", "conclusion": "success", "started_at": _at(t0 + 20), "completed_at": _at(t0 + 21)}]
+        rows.append(_run(i, [j], t0))
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    text = _split(t, rows).stdout
+    steps = {x["step"]: x["median"] for x in (got.get("last_working_job_steps") or {}).get("test", [])}
+    if steps.get("Run tests") != 55 or (got.get("last_working_job_steps_overlap_seconds") or {}).get("test") != 1 \
+            or "in 5 of its 5 runs its steps overlapped" not in text:
+        bad.append("split #35: steps not clipped to their job, or the overlap not measured: %r %r\n%s"
+                   % (steps, got.get("last_working_job_steps_overlap_seconds"), text))
+    # Two steps that overlap only after the job ended don't overlap in it; an untimed first
+    # "Test" leaves the second as its #2.
+    for row in rows:
+        j = row["jobs"][0]
+        t0 = _ts_of(j["started_at"])
+        j["steps"] = [{"name": "Set up job", "conclusion": "success", "started_at": _at(t0), "completed_at": _at(t0 + 5)},
+                      {"name": "Test", "conclusion": "skipped", "started_at": None, "completed_at": None},
+                      {"name": "Test", "conclusion": "success", "started_at": _at(t0 + 5), "completed_at": _at(t0 + 70)},
+                      {"name": "Late", "conclusion": "success", "started_at": _at(t0 + 62), "completed_at": _at(t0 + 69)}]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    occ = [(x["step"], x["occurrence"]) for x in (got.get("last_working_job_steps") or {}).get("test", [])]
+    if ("Test", 2) not in occ or ("Test", 1) in occ or (got.get("last_working_job_steps_overlap") or {}).get("test"):
+        bad.append("split #35: occurrence or out-of-job overlap wrong: %r %r" % (occ, got.get("last_working_job_steps_overlap")))
 
 
 # every check.py fails on its untouched sample (the planted cause is there)
