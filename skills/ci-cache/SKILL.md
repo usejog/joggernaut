@@ -139,16 +139,23 @@ in `references/measuring.md`.
 4. **Change one key or step per pull request.** Show the diff, the hit rate
    before, and why the new key will hit. Never change what the build or the
    tests do. A cache change must never make a job skip work it would
-   otherwise do (no "skip tests on cache hit"). Some caches also replay test
-   results: Go's build cache marks unchanged packages' tests `(cached)` and
-   doesn't run them (Go's docs), and any tool that caches task results can
-   do the same: check its docs for a test cache. A Docker layer cache can
-   too: a cached layer whose `RUN` runs the tests doesn't run them again. On
-   the gate that decides a merge, tests must run: add `-count=1` (Go's
-   documented way to turn test caching off) to the existing `go test`
-   command, keeping its package arguments, keep test commands out of cached
-   build layers, leave test-result caching off there, and check in a warm
-   run's log that the tests ran.
+   otherwise do (no "skip tests on cache hit"). Some caches replay test
+   results, and whether that's sound depends on the key. Go's test cache
+   reuses a result only for the same test binary and cacheable flags, and
+   only if the files within the module and the environment variables the
+   test consulted are unchanged (Go's docs). So a `(cached)` result is the
+   result the test would give, unless the test depends on something
+   outside the module: a network service, a database, files elsewhere on
+   the runner. Don't add `-count=1` by default: for tests that depend only on
+   the module and their environment, it reruns unchanged tests and makes CI
+   slower without making it more correct. If you find tests that depend on outside state, name them and
+   leave the choice to a person. The same holds for any tool whose task cache is keyed on all of
+   a task's inputs; check its docs. What breaks a check is a cache whose key
+   misses inputs: tests skipped on a hit keyed on a branch or a lockfile
+   alone, or a Docker layer whose `RUN` runs tests that read anything
+   outside that layer's inputs. Never add such a cache, and report any you
+   find. If a team wants uncached tests on its merge gate anyway, that's a
+   person's call, with the measured cost.
 5. **Prove it.** The first run after a key change may be cold, or restore
    only a partial match; the cache lines say which. Measure as `references/measuring.md`
    says, over all successful runs, and report the hit rate before and after
