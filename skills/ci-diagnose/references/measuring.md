@@ -187,10 +187,10 @@ verdict ends in `_work_differs`, and `work_sets` gives the count of sets a
 side. Where a side holds more than one set, a median moves with the mix:
 compare runs that did the same work, or report the timings as unverified;
 don't build files that drop rows (the failure rate must read every run).
-Where each side holds one set but not the same one, the change itself
-changed the work (it added, dropped or renamed a step): as with
-`_jobs_changed`, the verdict holds only if the workflow's diff explains
-every difference. A test's name includes its report's path inside the run's
+Where each side holds one set but not the same one, the work changed
+between the sides (the change added, dropped or renamed a step, or the pull
+requests in each window differ): as with `_jobs_changed`, the verdict holds
+only if the workflow's diff explains every difference. A test's name includes its report's path inside the run's
 folder, as in `tests`, so save each run's reports under the same names (not
 named by run id or commit), and a step named with a per-run expression
 makes each run its own set. A step a cache hit skips is the cache's

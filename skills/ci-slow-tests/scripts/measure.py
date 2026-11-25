@@ -2058,9 +2058,9 @@ def cmd_compare(a):
                                % (where, "; ".join("%s: %d sets before, %d after" % (k, len(sets[k][0]), len(sets[k][1]))
                                                    for k in within)))
         if across:
-            res["verdict"] += ("; but the %s inside %s changed with the change (one set a side, not the same): a"
-                               " speed verdict holds only if the workflow's diff explains every difference;"
-                               " otherwise the work changed, not its speed" % (" and ".join(across), where))
+            res["verdict"] += ("; but the %s inside %s differ between the sides (one set a side, not the same):"
+                               " the change, or the pull requests in each window, changed the work; a speed verdict"
+                               " holds only if the workflow's diff explains every difference" % (" and ".join(across), where))
     if a.end and comparable:
         # Beside a job's end on the run's clock, its own duration in the same runs (#36): an end
         # that moved while the job's own time didn't moved with what ran before it.

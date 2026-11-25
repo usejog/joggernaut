@@ -3288,12 +3288,13 @@ with tempfile.TemporaryDirectory() as t:
     v, r = _cmp(t, before, after, "--job", "test")
     v2, r2 = _cmp(t, before, steps(side(400, 50), skip_at=(2, "site")), "--job", "test")
     if v.get("verdict_code") != "faster" or v2.get("verdict_code") != "faster_work_differs" \
-            or v2.get("work_sets", {}).get("steps") != [1, 2] or "changed with the change" in v2.get("verdict", ""):
+            or v2.get("work_sets", {}).get("steps") != [1, 2] or "differ between the sides" in v2.get("verdict", ""):
         bad.append("compare #36: a step skipped in one timed run: %r %r" % (v.get("verdict_code"), v2))
     # Workload review: one set of steps a side but not the same (the change added or dropped a
     # step) is the workflow's diff to explain, as for jobs; with --job and over every job.
-    every_skips = lambda rows: steps(rows, skip_at=None) and [
-        dict(x, jobs=[dict(x["jobs"][0], steps=x["jobs"][0]["steps"][:1])]) for x in rows]
+    def every_skips(rows):
+        # Every run of the side runs only the first step: one set a side.
+        return [dict(x, jobs=[dict(x["jobs"][0], steps=x["jobs"][0]["steps"][:1])]) for x in steps(rows)]
     for flags in (("--job", "test"), ()):
         v, r = _cmp(t, before, every_skips(side(400, 50)), *flags)
         if v.get("verdict_code") != "faster_work_differs" or v.get("work_sets", {}).get("steps") != [1, 1] \
@@ -3321,6 +3322,14 @@ with tempfile.TemporaryDirectory() as t:
     if v.get("verdict_code") != "faster" or v2.get("verdict_code") != "faster_work_differs" \
             or v2.get("work_sets", {}).get("tests") != [1, 2] or "error" not in v3 or "no JUnit report" not in r3.stderr:
         bad.append("compare #32: --tests: %r %r %r" % (v.get("verdict_code"), v2.get("verdict_code"), v3))
+    # One set of tests a side, not the same: qualified as for steps, naming the tests.
+    reports(before)
+    for x in after:
+        open("%s/rep/%d/r.xml" % (t, x["id"]), "w").write(xml(["a", "b", "c"]))
+    v5, r5 = _cmp(t, before, after, "--job", "test", "--tests", t + "/rep")
+    if v5.get("verdict_code") != "faster_work_differs" or v5.get("work_sets", {}).get("tests") != [1, 1] \
+            or "tests inside job test differ between the sides" not in v5.get("verdict", ""):
+        bad.append("compare #32: one set of tests a side, not the same: %r" % v5)
     # #36: --end gives the job's own duration in the same runs beside its end.
     v, r = _cmp(t, before, after, "--job", "test", "--end")
     if v.get("own_duration_median_before") != 102.5 or v.get("own_duration_median_after") != 52.5 \
