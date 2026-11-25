@@ -3299,6 +3299,17 @@ with tempfile.TemporaryDirectory() as t:
     if v.get("own_duration_median_before") != 102.5 or v.get("own_duration_median_after") != 52.5 \
             or "own duration in the same runs" not in v.get("verdict", ""):
         bad.append("compare #36: --end without the job's own duration: %r" % v)
+    # Astra (workload round 1): the own duration is hidden with the timings below enough runs,
+    # and a timed run whose reports ran only skipped tests is refused under --tests.
+    v, r = _cmp(t, before[:1], after[:1], "--job", "test", "--end")
+    if v.get("verdict_code") != "not_enough_runs" or v.get("own_duration_median_before") is not None:
+        bad.append("compare #36: --end's own duration shown below enough runs: %r" % v)
+    open("%s/rep/%d/r.xml" % (t, after[0]["id"]), "w").write(
+        '<testsuite name="s" tests="1"><testcase classname="c" name="a"><skipped/></testcase></testsuite>')
+    reports(before)
+    v4, r4 = _cmp(t, before, after, "--job", "test", "--tests", t + "/rep")
+    if "error" not in v4 or "ran no test" not in r4.stderr:
+        bad.append("compare #32: --tests read a report of skipped tests alone: %r %s" % (v4, r4.stderr[-200:]))
 
 # compare, #46 review: with --ran, a run whose --ran job the queue cancelled (it asked for a
 # runner and never got one) is still read by the runner checks, as main read it: a test leg

@@ -1967,8 +1967,12 @@ def cmd_compare(a):
             die("--tests: no JUnit report in %s for timed run %s; every timed run needs its own, or leave"
                 " --tests out" % (folder, r["id"]))
         found, _, _ = junit_results(folder)
-        return tuple(sorted((t, n) for t, n in ((t, sum(1 for o in outs if o in ("passed", "failed")))
-                                                for t, outs in found.items()) if n))
+        ran = tuple(sorted((t, n) for t, n in ((t, sum(1 for o in outs if o in ("passed", "failed")))
+                                               for t, outs in found.items()) if n))
+        if not ran:
+            # Only skipped tests (or none): nothing says which tests did the work.
+            die("--tests: the JUnit reports in %s ran no test for timed run %s" % (folder, r["id"]))
+        return ran
     inner = [("steps", steps_of)] + ([("tests", tests_of)] if a.tests else [])
     res["work_sets"] = {k: [len({f(r, j) for r, _, j in tb}), len({f(r, j) for r, _, j in ta})]
                         for k, f in inner} if comparable else {}
@@ -1990,7 +1994,8 @@ def cmd_compare(a):
     if a.end and comparable:
         # Beside a job's end on the run's clock, its own duration in the same runs (#36): an end
         # that moved while the job's own time didn't moved with what ran before it.
-        own = lambda tr: median([secs(j.get("started_at"), j.get("completed_at")) for _, _, j in tr])
+        own = lambda tr: median([d for d in (secs(j.get("started_at"), j.get("completed_at")) for _, _, j in tr)
+                                 if d is not None])
         res["own_duration_median_before"], res["own_duration_median_after"] = own(tb), own(ta)
     if (a.end or a.ran) and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
         # A job's end on the run's clock moves with which runs reached it, their queue order
@@ -2017,7 +2022,8 @@ def cmd_compare(a):
         for k in ("before_median", "after_median", "before_p95", "after_p95", "before_tail", "after_tail",
                   "runner_minutes_median_before", "runner_minutes_median_after",
                   "runner_minutes_exact_median_before", "runner_minutes_exact_median_after",
-                  "runner_minutes_a_day_before", "runner_minutes_a_day_after"):
+                  "runner_minutes_a_day_before", "runner_minutes_a_day_after",
+                  "own_duration_median_before", "own_duration_median_after"):
             res[k] = None
     if a.json:
         print(json.dumps(res, indent=2))
