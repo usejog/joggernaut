@@ -902,7 +902,8 @@ def cmd_split(a):
     # GitHub's run listing can give a file with its ref (".github/workflows/build.yml@main").
     for r in every:
         if r.get("path"):
-            r["path"] = re.sub(r"(\.ya?ml)@.*$", r"\1", r["path"])
+            # (Not when what follows is itself a workflow file name, which is a legal file name.)
+            r["path"] = re.sub(r"(\.ya?ml)@(?!.*\.ya?ml$).*$", r"\1", r["path"])
     # A run saved with no file but with its workflow's id takes the file another run of that
     # id names.
     id_path = {r["workflow_id"]: r["path"] for r in every if r.get("path") and r.get("workflow_id") is not None}
@@ -917,9 +918,10 @@ def cmd_split(a):
     by_file = bool(a.workflow) and a.workflow in files
     runs = [r for r in every if not a.workflow or (os.path.basename(r.get("path") or "") == a.workflow
                                                      if by_file else r.get("name") == a.workflow)]
-    # By file, a run saved with no file but named so can't be placed: it still counts (its
-    # failure could be this workflow's), and is said first.
-    unplaced_runs = [r for r in every if by_file and not r.get("path") and r.get("name") == a.workflow]
+    # By file, a run saved with no file but with one of that file's display names can't be
+    # placed: it still counts (its failure could be this workflow's), and is said first.
+    shown = {r.get("name") for r in runs} | {a.workflow}
+    unplaced_runs = [r for r in every if by_file and not r.get("path") and r.get("name") in shown]
     runs += unplaced_runs
     if not runs:
         die("no runs to read")
@@ -994,11 +996,12 @@ def cmd_split(a):
     # A run with no file beside runs with one could be another workflow, so look per commit.
     # Checks are (workflow, event) pairs, as each commit's are counted below.
     checks_ = {(wf_key(r), r.get("event")) for r in runs if r.get("event") in PR_EVENTS}
-    # A commit passes only when every pull-request run of it passed, in any pull request or
+    # A commit passes only when every run of it passed (a push run's checks show on the pull
+    # request's head commit too), in any pull request or
     # branch it was seen under (a run fetched after its pull request closed is keyed by branch),
     # not only each check's first: a failure a later run, or a run filed under the same check,
     # showed still counts.
-    red = {r.get("head_sha") for r in runs if r.get("event") in PR_EVENTS and r.get("conclusion") != "success"}
+    red = {r.get("head_sha") for r in runs if r.get("conclusion") != "success"}  # any event: a push's checks show too
     if len(checks_) > 1 or (any(placed_wf(r) for r in runs) and not all(placed_wf(r) for r in runs)):
         for sha, rs in ((sha, rs) for by_head in pushes.values() for sha, rs in by_head.items()):
             failed = sha in red
@@ -1228,7 +1231,7 @@ def cmd_split(a):
               " %d cancelled, left out" % (passed, len(ended), 100 * (out["pass_rate"] or 0),
                                            out["passed_after_rerun"], out["cancelled_runs"]))
     if unplaced_runs:
-        print("%d runs named %s have no workflow file saved, so they can't be told apart from another file's:"
+        print("%d runs named as %s's runs are have no workflow file saved, so they can't be told apart from another file's:"
               " counted with it, and no commit they ran on is in the wait across workflows (fetch again to"
               " save it)" % (len(unplaced_runs), a.workflow))
     if not ended:

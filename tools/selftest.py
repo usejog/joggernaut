@@ -2614,7 +2614,7 @@ with tempfile.TemporaryDirectory() as t:
         rows.append(x)
     got = json.loads(_split(t, rows, "--json", "--workflow", "ci.yml").stdout or "{}")
     text = _split(t, rows, "--workflow", "ci.yml").stdout
-    if not text.startswith("2 runs named ci.yml"):
+    if not text.startswith("2 runs named as ci.yml's runs are"):
         bad.append("split: the runs with no file should be said first\n" + text)
     # ... and with the workflow's id saved, they take its file: 1 of 3 passed, as before.
     for x in rows:
@@ -2626,7 +2626,7 @@ with tempfile.TemporaryDirectory() as t:
     # By file, runs named so with no file still count (their failures could be this workflow's,
     # as main counts them by name), and it says so first. #47 review.
     if (got.get("passed_runs"), got.get("ended_runs"), got.get("runs_named_without_file")) != (1, 3, 2) \
-            or "2 runs named ci.yml have no workflow file saved" not in text:
+            or "2 runs named as ci.yml's runs are have no workflow file saved" not in text:
         bad.append("split: --workflow by file should count runs named so with no file, and say so first: %r\n%s"
                    % ((got.get("passed_runs"), got.get("ended_runs"), got.get("runs_named_without_file")), text))
     rows = [_run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 60 + 540 * k)], 9000 * k) for k in range(2)]
@@ -2716,6 +2716,22 @@ with tempfile.TemporaryDirectory() as t:
     if (a_, b_, c_) != (0, 0, 0):
         bad.append("split: a late, same-check or other pull request's failed run left a commit all-passed: %r %r %r"
                    % (a_, b_, c_))
+    # #47 review, round 2: a failed push run of the commit fails it (its checks show on the pull
+    # request); under --workflow FILE a run with no file but one of that file's display names
+    # counts; a file named with an at sign and a second workflow file name stays its own file.
+    push_fail = [dict(late[0], id=95, pull_requests=[45], head_sha="%040d" % 45),
+                 dict(late[1], id=96, pull_requests=[45], head_sha="%040d" % 45),
+                 dict(late[1], id=97, event="push", pull_requests=[], head_sha="%040d" % 45, conclusion="failure")]
+    d_ = json.loads(_split(t, push_fail, "--json").stdout or "{}").get("wait_all_workflows_commits")
+    no_file = [dict(late[1], id=98), dict(late[1], id=99, conclusion="failure", name="CI")]
+    del no_file[1]["path"]
+    e_ = json.loads(_split(t, no_file, "--json", "--workflow", "ci.yml").stdout or "{}")
+    nightly = [dict(late[1], id=100, conclusion="failure"),
+               dict(late[1], id=101, name="Nightly", path=".github/workflows/ci.yml" + "@" + "nightly.yml")]
+    f_ = json.loads(_split(t, nightly, "--json", "--workflow", "ci.yml").stdout or "{}")
+    if d_ != 0 or (e_.get("passed_runs"), e_.get("ended_runs")) != (1, 2) or (f_.get("passed_runs"), f_.get("ended_runs")) != (0, 1):
+        bad.append("split: a push run's failure, a run with no file, or an at-sign file name: %r %r %r"
+                   % (d_, (e_.get("passed_runs"), e_.get("ended_runs")), (f_.get("passed_runs"), f_.get("ended_runs"))))
     # Pushes per PR: a run keyed by branch on a commit a numbered run counts isn't another PR.
     pp = []
     for k, (sha, prs, ev) in enumerate(((1, [42], "pull_request"), (2, [42], "pull_request"), (2, [], "pull_request_target"))):
