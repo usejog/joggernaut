@@ -3850,6 +3850,15 @@ with tempfile.TemporaryDirectory() as t:
                                  _J("lint", 0, 5, labels=("L",), group=None)]) for i in range(6)], "--job", "test")
     if "error" not in v or "runner group 1" not in r.stderr or "runner group 2" not in r.stderr:
         bad.append("compare #50: an unknown group on lint hid test's move between groups: %r" % (v.get("verdict") or r.stderr))
+    # ... and when the measured job's own group is unknown somewhere, the count says how many of
+    # the jobs checked have none (lint's aren't checked).
+    lint = lambda: _J("lint", 0, 5, labels=("L",), group=None)
+    rb_ = [_cr(63500 + i, [_J("test", 0, 100 + i, labels=("L",), group=1), lint()]) for i in range(6)]
+    ra_ = [_cr(64500 + i, [_J("test", 0, 50 + i, labels=("L",), group=None if i == 0 else 1), lint()]) for i in range(6)]
+    _cmp(t, rb_, ra_)
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--job", "test"])
+    if "since 1 of the 12 jobs read have none saved" not in r.stdout:
+        bad.append("compare #50: the unknown-group count mixed checked and unchecked jobs: %s%s" % (r.stdout[-500:], r.stderr[-300:]))
     # #50: a move between groups names the run each was first seen in, on both sides.
     v, r = _cmp(t, [_cr(65000 + i, [_J("test", 0, 100 + i, labels=("L",), group=1)]) for i in range(6)],
                 [_cr(66000 + i, [_J("test", 0, 50 + i, labels=("L",), group=2)]) for i in range(6)], "--label", "L")
@@ -3888,6 +3897,12 @@ with tempfile.TemporaryDirectory() as t:
     notes = " ".join(json.loads(r.stdout).get("notes", [])) if r.stdout.startswith("{") else ""
     if "numbers blanked" not in notes or "/opt/actions/work/ before, /srv/runner-3/_work/ after" not in notes:
         bad.append("tests #49: no note for blanked suite-error numbers or a moved checkout: %s%s" % (r.stdout[-600:], r.stderr[-300:]))
+    # Paths that differ only in their separators name no other folder.
+    junit(t + "/jw", "C:\\w\\r", None)
+    junit(t + "/jv", "C:/w/r", None)
+    r = run([M, "tests", "--before", t + "/jw", "--after", t + "/jv", "--json"])
+    if "( before,  after)" in r.stdout or "folder above them" in r.stdout:
+        bad.append("tests #49: a note for paths that differ only in separators: %s" % r.stdout[-400:])
     junit(t + "/jc", "/opt/actions/work/r/r", None)
     r = run([M, "tests", "--before", t + "/jc", "--after", t + "/jc", "--json"])
     if r.returncode or json.loads(r.stdout).get("notes"):

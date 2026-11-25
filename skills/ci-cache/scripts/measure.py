@@ -254,8 +254,8 @@ def check_rate():
 
 # The kind of each field a record fetch writes can hold (record): text, a whole number, a
 # timestamp, a list of one of those, or a list. A null passes (GitHub can leave a field out),
-# except for an id (a run's must be there; a job's, when there, tells it from the others) and
-# for the fields read with a default when absent, which present must hold one.
+# except in a run's id, which must be there, and in the fields read with a default when absent
+# (or, for a job's id, told apart from other jobs by it), which present must hold one.
 TEXT, NUMBER, WHEN = "text", "number", "timestamp"
 RUN_KINDS = {"name": TEXT, "path": TEXT, "event": TEXT, "head_branch": TEXT, "head_sha": TEXT, "head_message": TEXT,
              "head_repo": TEXT, "conclusion": TEXT, "status": TEXT, "fetch_window": TEXT, "id": NUMBER,
@@ -265,7 +265,7 @@ JOB_KINDS = {"name": TEXT, "conclusion": TEXT, "status": TEXT, "runner_name": TE
              "id": NUMBER, "run_attempt": NUMBER, "runner_group_id": NUMBER, "created_at": WHEN, "started_at": WHEN,
              "completed_at": WHEN, "labels": [TEXT], "steps": list}
 STEP_KINDS = {"name": TEXT, "conclusion": TEXT, "status": TEXT, "number": NUMBER, "started_at": WHEN, "completed_at": WHEN}
-NOT_NULL = {"run_attempt", "jobs", "steps"}
+NOT_NULL = {"run_attempt", "jobs", "steps", "id"}
 
 
 def of_kind(v, kind):
@@ -300,7 +300,7 @@ def shape_problem(r):
     def check(rec, kinds, prefix):
         for k, kind in kinds.items():
             v = rec.get(k)
-            if (k in NOT_NULL and k in rec and v is None) or (k == "id" and v is None and (k in rec or not prefix)):
+            if (k in NOT_NULL and k in rec and v is None) or (k == "id" and v is None and not prefix):
                 bad.append(prefix + k)
             elif not of_kind(v, kind):
                 (unreadable if kind == WHEN and isinstance(v, str) else bad).append(prefix + k)
@@ -1775,7 +1775,8 @@ def cmd_compare(a):
     checked_job = lambda j: not a.job or a.end or j.get("name") == a.job
     read = list({j.get("id", id(j)): j for r in selected(rb) + selected(ra) + routed(rb) + routed(ra)
                  for j in latest_jobs(r) if on_a_runner(j)}.values())
-    unknown = sum(1 for j in read if checked_job(j) and j.get("runner_group_id") is None)
+    checked_jobs = [j for j in read if checked_job(j)]
+    unknown = sum(1 for j in checked_jobs if j.get("runner_group_id") is None)
     groups = bool(read) and not unknown
     # Labels as before, every job that asked for a runner; groups only for jobs that got one.
     key = lambda j: (runner_key(j), None)
@@ -2304,7 +2305,7 @@ def cmd_compare(a):
     if not groups:
         print("runner groups: not compared, since %d of the %d jobs read have none saved (a file from an older"
               " measure.py, or none reported), so a shift between groups that share these labels can't be"
-              " seen; fetch again with this measure.py to check them" % (unknown, len(read)))
+              " seen; fetch again with this measure.py to check them" % (unknown, len(checked_jobs)))
     print("cancelled runs, in neither the timings nor the failure rate: before %d of %d, after %d of %d%s"
           % (res["cancelled_before"] + res["cancelled_after"] + (
               " (a larger share after: slow runs being cancelled can pass for a speedup; say so)"
@@ -2539,7 +2540,8 @@ def checkout_moved(before, after):
             while n < min(len(split(p)), len(split(q))) and split(p)[-n - 1] == split(q)[-n - 1]:
                 n += 1
             cut = lambda x: x[:len(x) - len("/".join(split(x)[-n:]))]
-            return cut(p), cut(q)
+            if cut(p) and cut(q):
+                return cut(p), cut(q)
     return None
 
 

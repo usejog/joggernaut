@@ -362,7 +362,7 @@ def gen_split(rng, seed):
 
 
 def gen_steps(rng, s, e):
-    """None, or a job's steps: set up, the work (an install that may overlap it), clean up; one
+    """No steps, or a job's: set up, the work (an install that may overlap it), clean up; one
     can run past the job's end or have no times."""
     if rng.random() < 0.4:
         return []
