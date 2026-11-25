@@ -1412,6 +1412,9 @@ def timed_runs(runs, a, side, excluded, keep=None):
                     j = js[0]
                     if j.get("conclusion") != "success":
                         why = "job %s" % j.get("conclusion")
+                    elif not executed(j):
+                        # No start time: main never took it for a run that ran the job.
+                        why = "job %s has no start time" % a.job
                     elif a.end:
                         # On the run's clock: from the run's start to this job's end, so its
                         # queue and every job before it on its path count.
@@ -1512,9 +1515,10 @@ def cmd_compare(a):
     # still shows where the push was sent), or with got, where it got one.
     ran_any2 = lambda r, got=False: any(j.get("name") == a.ran and (on_a_runner(j) if got else executed(j))
                                         for j in r.get("jobs", []))
-    # --ran's timed workload: runs where that job got a runner (a job cancelled in the queue didn't run).
-    # By the final attempt, as main read it (a timed run is never a rerun).
-    ran_job = (lambda r: any(j.get("name") == a.ran for j in latest_jobs(r) if on_a_runner(j))) if a.ran else None
+    # --ran's timed runs: as main chose them, where that job ran (not skipped, with a start time)
+    # in the final attempt. Choosing fewer, say only jobs that got a runner, could leave out
+    # the run main refuses on.
+    ran_job = (lambda r: any(j.get("name") == a.ran for j in latest_jobs(r) if executed(j))) if a.ran else None
     excluded = []
     # The timed runs, chosen once: the job sets, the runner checks over the timed runs and
     # the timings read this; the failure, cancellation and reach checks read every run.
@@ -2183,10 +2187,18 @@ def junit_results(path):
           suite_path = [s.get("name") or "" for s in chain]
           suite_file = next((s.get("file") for s in reversed(chain) if s.get("file")), "")
           # Errors on the suite itself are counted apart from tests (they aren't tests that ran),
-          # by kind, so one kind replacing another shows.
+          # by kind and message, so one replacing another of the same type (a cleanup error for
+          # a collection error) shows; numbers in the message (times, ids) are blanked.
           for c in suite:
               if local(c.tag) in FAILED_TAGS:
-                  k = json.dumps([where, suite_path, suite_file, local(c.tag), c.get("type") or ""])
+                  # The message, else the whole text (a traceback's error line can be followed by
+                  # notes). Addresses and numbers blanked (times, ids, line numbers); a text that
+                  # differs otherwise, a temporary path say, counts as another error: the cautious
+                  # side for `tests`. Keyed by a short hash, never shown: it can hold a secret.
+                  msg = (c.get("message") or (c.text or "")).strip()
+                  msg = re.sub(r"0[xX][0-9a-fA-F]+|\d+(?:\.\d+)*(?:[eE][-+]?\d+)?", "#", " ".join(msg.split()))
+                  msg = "message %s" % hashlib.sha256(msg.encode()).hexdigest()[:8] if msg else ""
+                  k = json.dumps([where, suite_path, suite_file, local(c.tag), c.get("type") or "", msg])
                   errs[k] = errs.get(k, 0) + 1
           for tc in [c for c in suite if local(c.tag) == "testcase"]:
             cases += 1
@@ -2219,10 +2231,12 @@ def junit_results(path):
 
         containers = [x for x in root.iter() if local(x.tag) in ("testsuite", "testsuites")]
         for e in containers:
+            # The container's whole ancestry, each with the file it names: same-name suites
+            # under parents that name different files are different containers.
             chain, x = [], e
             while x is not None:
                 if local(x.tag) in ("testsuite", "testsuites"):
-                    chain.append(x.get("name") or local(x.tag))
+                    chain.append([x.get("name") or local(x.tag), x.get("file") or ""])
                 x = parent.get(x)
             path_ = chain[::-1]
             efile = e.get("file") or ""
@@ -2254,6 +2268,8 @@ def junit_results(path):
 def show_test(t):
     parts = json.loads(t)
     where, suites = parts[0], parts[1]
+    # A container in a declared-totals key is [name, file]: shown with its file.
+    suites = [x if isinstance(x, str) else x[0] + (" [%s]" % x[1] if x[1] else "") for x in suites]
     return "::".join(x for x in [where, "/".join(suites)] + parts[2:] if x)
 
 
