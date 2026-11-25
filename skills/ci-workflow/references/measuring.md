@@ -159,7 +159,9 @@ with counts, so matrix legs count):
   sides (its `if:` and path filters unchanged, and about the same share of
   runs running it; `compare` prints the counts and qualifies a change
   beyond chance) and the same kind of pushes reach the measured runner
-  (routing unchanged); otherwise report it as unverified. `--ran JOB` times whole runs that ran that job (it must
+  (routing unchanged: `compare` counts the runs that ran it off the
+  runner and qualifies a change beyond chance); otherwise report it as
+  unverified. `--ran JOB` times whole runs that ran that job (it must
   leave one set a side), a descriptive reading only (`ran_descriptive`,
   the reading in `reading`): which runs ran a job can change with the
   change itself (a path filter moved from slow pushes to fast ones keeps
@@ -201,6 +203,35 @@ descriptive only (`end_descriptive`; the reading itself is in `--json` as
 order and their runners, more than any check can pin down. Report it beside
 the job's own duration (`--job` alone) and the whole run's wait, which give
 the verdict.
+
+Where the pushes ran matters as much as what they ran. `compare` keys a
+runner by its labels and its runner group (two self-hosted groups can share
+every label; `fetch` saves each job's group). Groups are compared only when
+every job read that got a runner has a known one: with any unknown (a file
+from an older version, a group GitHub didn't report) the runners compare by
+labels alone, and `compare` says so. Without `--label`, the runners of
+every run in each file must match, any outcome, as they always had to, and
+so must those of the selected runs (the workflow, event and base, and with
+`--ran` the runs where that job asked for a runner), groups included: a
+narrower selection never hides a runner the file shows. Each job must have run on one runner, the same on both sides, read
+over every green run of the selection, reruns included, not only the timed
+ones (a canary that fails on one pool keeps those runs from being timed, so
+which pushes went there decides which are timed, and leaving reruns' pools
+out would let what gets rerun choose them); a job cancelled before it got a
+runner says nothing about runners and is left out. So a green rerun on a
+spare pool refuses a comparison: the refusal names the first run seen on
+each runner (and whether it was a rerun); if a spare pool was only a retry's,
+measure a period without it. With `--label`, it
+also counts, of the runs that ran the job (or any job) in any attempt, those
+whose first attempt didn't run it on that runner (it ran elsewhere, or only
+on a retry); a change beyond chance either way ends a faster or mixed
+verdict in `_routing_changed`, and any such run means the verdict holds only
+if the same pushes reach the runner on both sides, which counts can't show.
+`--job` times the job's own duration even when another job in the run
+failed (dropping those runs would let a failure pattern choose the timed
+ones), unless a job of the same name failed (another matrix leg); it counts
+them, and a job that failed before the timed one started (it could have been
+its input) ends the verdict in `_after_failed_job`.
 
 `compare` needs at least 5 successful comparable runs a side. Those are the
 runs it times; `--label`, `--job` and `--cache` choose them. The failure rate

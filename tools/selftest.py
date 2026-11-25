@@ -2563,6 +2563,599 @@ with tempfile.TemporaryDirectory() as t:
 
 
 
+# compare: who is timed, and the runner checks (#11, #12, #13, #35, #39).
+def _J(name, at, secs, labels=("self-hosted", "std"), conclusion="success", group=None, attempt=1):
+    return dict(name=name, at=at, secs=secs, labels=list(labels), conclusion=conclusion, group=group, attempt=attempt)
+
+
+def _cr(rid, specs, conclusion="success", attempt=1, base="main", groups=True):
+    t0 = rid * 5000
+    jobs = []
+    for k, x in enumerate(specs):
+        j = {"id": rid * 100 + k, "name": x["name"], "run_attempt": x["attempt"], "conclusion": x["conclusion"],
+             "created_at": _at(t0 + x["at"]), "started_at": _at(t0 + x["at"]),
+             "completed_at": _at(t0 + x["at"] + x["secs"]), "labels": x["labels"], "runner_name": "r", "steps": []}
+        if groups:
+            j["runner_group_id"], j["runner_group_name"] = x["group"], None if x["group"] is None else "g%d" % x["group"]
+        jobs.append(j)
+    return {"id": rid, "name": "CI", "path": ".github/workflows/ci.yml", "event": "pull_request",
+            "head_branch": "b%d" % rid, "head_sha": "%040d" % rid, "run_attempt": attempt, "head_message": "Fix",
+            "head_repo": "o/r", "conclusion": conclusion, "created_at": _at(t0), "run_started_at": _at(t0),
+            "updated_at": _at(t0 + 3000), "pull_requests": [rid], "pull_request_bases": [base], "jobs": jobs}
+
+
+def _cmp(t, before, after, *flags):
+    for name, rows in (("b", before), ("a", after)):
+        open(os.path.join(t, name), "w").write("".join(json.dumps(x) + "\n" for x in rows))
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--json"] + list(flags))
+    return (json.loads(r.stdout) if r.returncode == 0 else {"error": r.stderr}), r
+
+
+with tempfile.TemporaryDirectory() as t:
+    # #11: a sibling that failed before the timed job started could have been its input: the
+    # verdict is qualified, and the failed runs among the timed ones are counted. One that
+    # failed after it started is counted, and the verdict stands.
+    for when, want in ((0, "_after_failed_job"), (30, "")):
+        sides = []
+        for base_id, secs in ((1000, 100), (2000, 50)):
+            rows = [_cr(base_id + i, [_J("test", 10, secs + i)]) for i in range(4)]
+            rows.append(_cr(base_id + 4, [_J("lint", when, 5, conclusion="failure"), _J("test", 10, secs + 4)]))
+            sides.append(rows)
+        v, r = _cmp(t, sides[0], sides[1], "--job", "test", "--label", "self-hosted")
+        code = v.get("verdict_code") or ""
+        if not code.startswith("faster") or ("_after_failed_job" in code) != bool(want) \
+                or v.get("timed_with_failed_job") != [[1, 5], [1, 5]]:
+            bad.append("compare #11: a sibling failing at %ds: %r %r\n%s" % (when, code, v.get("timed_with_failed_job"),
+                                                                           r.stdout[-600:] + r.stderr))
+    # A green rerun whose second attempt ran on another pool.
+    before = [_cr(3000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
+    after = [_cr(4000 + i, [_J("test", 0, 50 + i)]) for i in range(5)]
+    after.append(_cr(4005, [_J("test", 0, 60, conclusion="failure"),
+                            _J("test", 100, 60, labels=("self-hosted", "spare"), attempt=2)], attempt=2))
+    # (#13 stays a refusal: leaving reruns' pools out lets what gets rerun choose the timed
+    # runs, as five review rounds showed; the refusal names the run, so a person can judge.)
+    v, r = _cmp(t, before, after, "--label", "self-hosted")
+    if "error" not in v or "run 4005, a rerun" not in r.stderr:
+        bad.append("compare #13: a rerun on another pool should refuse, naming the run: %r" % (v.get("verdict") or r.stderr))
+    # The red-team's swap: a canary that fails on the experimental pool keeps those runs from
+    # being timed; fast pushes went there before, slow ones after. Still refused.
+    def canary(base_id, exp_fast):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            exp = fast == exp_fast
+            rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100),
+                                          _J("canary", 0, 5, labels=("self-hosted", "exp" if exp else "std"),
+                                             conclusion="failure" if exp else "success")]))
+        return rows
+    v, r = _cmp(t, canary(5000, True), canary(6000, False), "--label", "self-hosted")
+    if "error" not in v or "different runners" not in r.stderr:
+        bad.append("compare: a canary routing swap passed for a speedup: %r" % v.get("verdict"))
+    # #12: two runner groups share every label; the mix moves from the slow group to the fast.
+    def grouped(base_id, slow, keep=True):
+        return [_cr(base_id + i, [_J("test", 0, 90 if i < slow else 30, labels=("self-hosted",),
+                                     group=1 if i < slow else 2)], groups=keep) for i in range(30)]
+    v, r = _cmp(t, grouped(7000, 25), grouped(8000, 5), "--label", "self-hosted")
+    if "error" not in v or "runner group" not in r.stderr:
+        bad.append("compare #12: a shift between runner groups passed: %r" % v.get("verdict"))
+    # ... and with the groups unsaved (older files), labels alone, and it says so.
+    v, r = _cmp(t, grouped(7000, 25, False), grouped(8000, 5, False), "--label", "self-hosted")
+    if v.get("runner_groups_checked") is not False:
+        bad.append("compare #12: files without runner groups weren't flagged: %r" % v)
+    # #39: another base branch's runs on another runner still refuse --base main, as before:
+    # the label check never reads fewer runs than every run of each file.
+    before = [_cr(9000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
+    before += [_cr(9100 + i, [_J("test", 0, 300, labels=("self-hosted", "old"))], base="release") for i in range(3)]
+    after = [_cr(9200 + i, [_J("test", 0, 50 + i)]) for i in range(5)]
+    v, r = _cmp(t, before, after, "--base", "main")
+    if "error" not in v or "before only: old,self-hosted" not in r.stderr:
+        bad.append("compare #39: another branch's runner no longer refused --base main: %r" % (v.get("verdict") or v))
+    # #39: a job new after the change is not enough runs, not a runner change.
+    before = [_cr(9300 + i, [_J("build", 0, 100)]) for i in range(5)]
+    after = [_cr(9400 + i, [_J("build", 0, 100), _J("lint", 0, 20)]) for i in range(4)]
+    v, r = _cmp(t, before, after, "--ran", "lint", "--job", "lint")
+    if v.get("verdict_code") != "not_enough_runs":
+        bad.append("compare #39: a new job should be not enough runs: %r" % (v.get("verdict") or v))
+    # #39: routing behind --job --label (and whole runs): which runs reach the runner moved.
+    for flags in (["--job", "test", "--label", "fast"], ["--label", "fast"]):
+        def routed(base_id, off, secs):
+            return [_cr(base_id + i, [_J("test", 0, secs + i % 3,
+                                         labels=("self-hosted", "slow" if i < off else "fast"))]) for i in range(30)]
+        v, r = _cmp(t, routed(10000, 2, 100), routed(11000, 25, 50), *flags)
+        if "_routing_changed" not in (v.get("verdict_code") or ""):
+            bad.append("compare #39: routing moved off the runner under %s: %r" % (flags, v.get("verdict") or v))
+    # Review cases. A failed leg of the same name rules the run out under --job (main's
+    # guard): the slow workload on L before and the fast after, the other leg failing.
+    def legs(base_id, slow_on_l):
+        rows = []
+        for i in range(5):
+            l_secs, m_secs = (100, 10) if slow_on_l else (10, 100)
+            rows.append(_cr(base_id + i, [_J("test", 0, l_secs + i, labels=("self-hosted", "L")),
+                                          _J("test", 0, m_secs + i, labels=("self-hosted", "M"), conclusion="failure")]))
+        return rows
+    v, r = _cmp(t, legs(14000, True), legs(15000, False), "--job", "test", "--label", "L")
+    if v.get("verdict_code") != "not_enough_runs":
+        bad.append("compare: a failed same-name leg let a swap pass under --job: %r" % (v.get("verdict") or v))
+    # A run that failed on M and passed on a retry on L is a rerun: not timed, and not read by
+    # the runner-set check (its first attempt counts in the routing count).
+    before = [_cr(16000 + i, [_J("test", 0, 100 + i, labels=("self-hosted", "L"))]) for i in range(5)]
+    after = [_cr(17000 + i, [_J("test", 0, 50 + i, labels=("self-hosted", "L"))]) for i in range(5)]
+    after.append(_cr(17005, [_J("test", 0, 50, labels=("self-hosted", "M"), conclusion="failure"),
+                             _J("test", 100, 50, labels=("self-hosted", "L"), attempt=2)], attempt=2))
+    v, r = _cmp(t, before, after, "--label", "L")
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare: a retry on L refused whole runs under --label: %r" % (v.get("verdict") or v))
+    # A green rerun whose first attempt stopped at a failed build (test skipped) doesn't refuse
+    # whole runs over build and test.
+    def bt(rid, secs, attempt=1):
+        jobs = [_J("build", 0, 10, labels=("ubuntu-latest",)), _J("test", 10, secs, labels=("macos-latest",))]
+        return _cr(rid, jobs)
+    before = [bt(18000 + i, 100 + i) for i in range(6)]
+    after = [bt(19000 + i, 50 + i) for i in range(6)]
+    after.append(_cr(19006, [_J("build", 0, 10, labels=("ubuntu-latest",), conclusion="failure"),
+                             _J("build", 100, 10, labels=("ubuntu-latest",), attempt=2),
+                             _J("test", 110, 50, labels=("macos-latest",), attempt=2)], attempt=2))
+    v, r = _cmp(t, before, after)
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare: a rerun with a partial first attempt refused whole runs: %r" % (v.get("verdict") or v))
+    # A job cancelled while it waited (a start time, no runner) says nothing about runners.
+    before = [_cr(20000 + i, [_J("test", 0, 100 + i, labels=("ubuntu-latest",), group=1)]) for i in range(6)]
+    gone = _cr(20006, [_J("test", 0, 1, labels=("ubuntu-latest",), conclusion="cancelled")], conclusion="cancelled")
+    gone["jobs"][0]["runner_name"] = None
+    after = [_cr(21000 + i, [_J("test", 0, 50 + i, labels=("ubuntu-latest",), group=1)]) for i in range(6)]
+    for flags in ((), ("--job", "test")):
+        v, r = _cmp(t, before + [gone], after, *flags)
+        if not (v.get("verdict_code") or "").startswith("faster"):
+            bad.append("compare: a job cancelled before it got a runner refused %s: %r" % (flags, v.get("verdict") or v))
+    # --ran with the named job present but never timable: not enough runs, not "no run ran it".
+    two = lambda rid: _cr(rid, [_J("test", 0, 100), _J("test", 0, 90)])
+    v, r = _cmp(t, [two(22000 + i) for i in range(5)], [two(23000 + i) for i in range(5)], "--ran", "test", "--job", "test")
+    if v.get("verdict_code") != "not_enough_runs":
+        bad.append("compare --ran: a present but ambiguous job should be not enough runs: %r" % (v.get("verdict") or v))
+    # One legacy row on another branch doesn't switch off the group check for --base main.
+    legacy = _cr(7999, [_J("test", 0, 50, labels=("self-hosted",))], base="release", groups=False)
+    v, r = _cmp(t, grouped(7000, 25) + [legacy], grouped(8000, 5), "--label", "self-hosted", "--base", "main")
+    if "error" not in v or "runner group" not in r.stderr:
+        bad.append("compare #12: a legacy row elsewhere hid a group swap: %r" % v.get("verdict"))
+    # Routing: pushes that first reached test on a retry count as off the runner.
+    def retried(base_id, after):
+        # Before: the fast pushes ran test on L, then a later job failed and was retried.
+        # After: the slow pushes' build failed first, so they reached test only on the retry.
+        rows = []
+        for i in range(20):
+            fast = i < 10
+            secs = 10 if fast else 100
+            if not after and fast:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "L")),
+                                              _J("deploy", 20, 5, labels=("self-hosted", "L"), conclusion="failure"),
+                                              _J("deploy", 50, 5, labels=("self-hosted", "L"), attempt=2)], attempt=2))
+            elif after and not fast:
+                rows.append(_cr(base_id + i, [_J("build", 0, 5, labels=("self-hosted", "L"), conclusion="failure"),
+                                              _J("build", 50, 5, labels=("self-hosted", "L"), attempt=2),
+                                              _J("test", 60, secs, labels=("self-hosted", "L"), attempt=2)], attempt=2))
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "L"))]))
+        return rows
+    v, r = _cmp(t, retried(24000, False), retried(25000, True), "--job", "test", "--label", "L")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare #39: pushes first reaching test on a retry weren't counted: %r %r"
+                   % (v.get("verdict") or v, (v.get("off_runner_before"), v.get("off_runner_after"))))
+    # Routing the other way (more runs on L after), and a matrix with a leg on L in every run.
+    v, r = _cmp(t, routed(26000, 25, 100), routed(27000, 2, 50), "--job", "test", "--label", "fast")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare #39: more runs reaching the runner after wasn't qualified: %r" % (v.get("verdict") or v))
+    mat = lambda base_id, secs: [_cr(base_id + i, [_J("test", 0, secs + i, labels=("self-hosted", "fast")),
+                                                  _J("test", 0, 300, labels=("self-hosted", "slow"))]) for i in range(6)]
+    v, r = _cmp(t, mat(28000, 100), mat(29000, 50), "--job", "test", "--label", "fast")
+    if v.get("off_runner_before") != [0, 6] or not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare #39: a matrix leg on the runner in every run counted as off it: %r %r"
+                   % (v.get("off_runner_before"), v.get("verdict")))
+    # Round 2. A pool where test fails and passes on a retry: fast pushes there before, slow
+    # after. The reruns' first attempts show test on two pools: refused.
+    def pool_retry(base_id, exp_fast):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            secs = 10 if fast else 100
+            if fast == exp_fast:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "exp"), conclusion="failure"),
+                                              _J("test", 200, secs, labels=("self-hosted", "exp"), attempt=2)], attempt=2))
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "std"))]))
+        return rows
+    for flags in (("--label", "self-hosted"), ("--job", "test", "--label", "self-hosted")):
+        v, r = _cmp(t, pool_retry(30000, True), pool_retry(31000, False), *flags)
+        if "error" not in v:
+            bad.append("compare: a pool reached through reruns hid a swap under %s: %r" % (flags, v.get("verdict")))
+    # Jobs cancelled in the queue never got a runner: they aren't routing evidence either way.
+    def queued(base_id, after):
+        rows = [_cr(base_id + i, [_J("test", 0, 100 if i < 25 else 10,
+                                     labels=("self-hosted", "M" if after and i < 25 else "L"))]) for i in range(30)]
+        for i in range(25):
+            c = _cr(base_id + 100 + i, [_J("test", 0, 1, labels=("self-hosted", "L"), conclusion="cancelled")],
+                    conclusion="cancelled")
+            if not after:
+                c["jobs"][0]["runner_name"] = None
+            rows.append(c)
+        return rows
+    v, r = _cmp(t, queued(32000, False), queued(33000, True), "--job", "test", "--label", "L")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare: cancellations in the queue masked a move off the runner: %r %r"
+                   % (v.get("verdict"), (v.get("off_runner_before"), v.get("off_runner_after"))))
+    calm = lambda base_id, n_q, secs: ([_cr(base_id + i, [_J("test", 0, secs + i % 3, labels=("ubuntu-latest",))])
+                                        for i in range(20)]
+                                       + [_cr(base_id + 100 + i, [_J("test", 0, 1, labels=("ubuntu-latest",),
+                                                                     conclusion="cancelled")], conclusion="cancelled")
+                                          for i in range(n_q)])
+    b_, a_ = calm(34000, 1, 100), calm(35000, 8, 50)
+    for x in b_ + a_:
+        if x["conclusion"] == "cancelled":
+            x["jobs"][0]["runner_name"] = None
+    v, r = _cmp(t, b_, a_, "--job", "test", "--label", "ubuntu-latest")
+    if "_routing_changed" in (v.get("verdict_code") or ""):
+        bad.append("compare: jobs cancelled in the queue counted as run elsewhere: %r" % v.get("verdict"))
+    # --end: only the timed job says where it ran; build on L in every run stands in for nothing.
+    def ended(base_id, l_slow):
+        rows = []
+        for i in range(20):
+            slow = i < 15
+            rows.append(_cr(base_id + i, [_J("build", 0, 5, labels=("self-hosted", "L")),
+                                          _J("test", 5, 90 if slow else 10,
+                                             labels=("self-hosted", "L" if slow == l_slow else "X"))]))
+        return rows
+    v, r = _cmp(t, ended(36000, True), ended(37000, False), "--job", "test", "--end", "--label", "L")
+    if "_routing_changed" not in (v.get("reading_code") or ""):
+        bad.append("compare --end: a sibling on the runner hid the timed job moving off it: %r %r"
+                   % (v.get("reading_code"), (v.get("off_runner_before"), v.get("off_runner_after"))))
+    # One row with no saved group doesn't hide the groups the others show.
+    mixed_b = grouped(38000, 25)
+    del mixed_b[0]["jobs"][0]["runner_group_id"]
+    v, r = _cmp(t, mixed_b, [_cr(39000 + i, [_J("test", 0, 30, labels=("self-hosted",), group=2)]) for i in range(30)],
+                "--label", "self-hosted")
+    # (Groups count only when every job read has a known one: here one doesn't, so labels
+    # alone, and the output says groups weren't compared.)
+    if not (v.get("verdict_code") or "").startswith("faster") or v.get("runner_groups_checked") is not False:
+        bad.append("compare #12: one row without a group should compare labels alone, and say so: %r"
+                   % (v.get("verdict") or v))
+    # Round 3. Whole runs: a canary failing in group 2 (same labels), on the fast pushes
+    # before and the slow after; the runner sets differ by group.
+    def canary_group(base_id, fast_canary):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            jobs = [_J("test", 0, 10 if fast else 100, labels=("self-hosted", "L"), group=1)]
+            if fast == fast_canary:
+                jobs.append(_J("canary", 0, 5, labels=("self-hosted", "L"), group=2, conclusion="failure"))
+            rows.append(_cr(base_id + i, jobs))
+        return rows
+    v, r = _cmp(t, canary_group(40000, True), canary_group(41000, False), "--label", "L")
+    if "error" not in v or "different sets of runners" not in r.stderr:
+        bad.append("compare: runner groups of differently named jobs were lost for whole runs: %r" % (v.get("verdict") or r.stderr))
+    # A group change seen only on failed runs, without --label: refused, as for labels.
+    def failed_groups(base_id, fail_fast, fail_group):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            if fast == fail_fast:
+                rows.append(_cr(base_id + i, [_J("test", 0, 5, labels=("self-hosted", "L"), group=fail_group,
+                                                 conclusion="failure")], conclusion="failure"))
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100, labels=("self-hosted", "L"), group=1)]))
+        return rows
+    v, r = _cmp(t, failed_groups(42000, True, 2), failed_groups(43000, False, 3), "--job", "test")
+    if "error" not in v or "runner group 2" not in r.stderr:
+        bad.append("compare: a group change on failed runs passed without --label: %r" % (v.get("verdict") or r.stderr))
+    # --end --label L: a rerun that first failed on M and was retried on L (after) or M
+    # (before) is the routing count's, not a refusal.
+    def end_retry(base_id, retry_on):
+        rows = [_cr(base_id + i, [_J("build", 0, 5, labels=("L",)), _J("test", 5, (100 if retry_on == "M" else 50) + i,
+                                                                      labels=("L",))]) for i in range(6)]
+        rows.append(_cr(base_id + 6, [_J("build", 0, 5, labels=("L",)),
+                                      _J("test", 5, 50, labels=("M",), conclusion="failure"),
+                                      _J("test", 100, 50, labels=(retry_on,), attempt=2)], attempt=2))
+        return rows
+    v, r = _cmp(t, end_retry(44000, "M"), end_retry(45000, "L"), "--job", "test", "--end", "--label", "L")
+    if v.get("verdict_code") != "end_descriptive":
+        bad.append("compare --end: a retry on L refused: %r" % (v.get("verdict") or v))
+    # A job that moved wholly from group 0 to group 7 is refused (0 is a group id).
+    v, r = _cmp(t, [_cr(46000 + i, [_J("test", 0, 100 + i, labels=("L",), group=0)]) for i in range(6)],
+                [_cr(47000 + i, [_J("test", 0, 50 + i, labels=("L",), group=7)]) for i in range(6)], "--label", "L")
+    if "error" not in v or "L (runner group 0) before and L (runner group 7) after" not in r.stderr:
+        bad.append("compare #12: a move from group 0 to group 7 passed: %r" % (v.get("verdict") or r.stderr))
+    # Round 4. A canary on another pool fails and is retried there: the reruns' first attempts
+    # show the extra pool, on the fast pushes before and the slow after. Refused.
+    def canary_rerun(base_id, fast_canary):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            secs = 10 if fast else 100
+            if fast == fast_canary:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "std")),
+                                              _J("canary", 0, 5, labels=("self-hosted", "exp"), conclusion="failure"),
+                                              _J("test", 200, secs, labels=("self-hosted", "std"), attempt=2),
+                                              _J("canary", 200, 5, labels=("self-hosted", "exp"), attempt=2)], attempt=2))
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("self-hosted", "std"))]))
+        return rows
+    v, r = _cmp(t, canary_rerun(48000, True), canary_rerun(49000, False), "--label", "self-hosted")
+    if "error" not in v:
+        bad.append("compare: a pool seen only in reruns' first attempts passed for whole runs: %r" % v.get("verdict"))
+    # One null group id is unknown, not another runner.
+    b_ = [_cr(50000 + i, [_J("test", 0, 100 + i, labels=("L",), group=1)]) for i in range(6)]
+    a_ = [_cr(51000 + i, [_J("test", 0, 50 + i, labels=("L",), group=None if i == 0 else 1)]) for i in range(6)]
+    v, r = _cmp(t, b_, a_, "--label", "L")
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare: one null runner group refused whole runs: %r" % (v.get("verdict") or v))
+    # --end without --label: a helper always on M doesn't hide test moving to M on failed runs.
+    def helper(base_id, fail_fast, after=False):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            if fast == fail_fast:
+                rows.append(_cr(base_id + i, [_J("helper", 0, 5, labels=("M",)),
+                                              _J("test", 5, 5, labels=("L" if after else "M",), conclusion="failure")], conclusion="failure"))
+            else:
+                rows.append(_cr(base_id + i, [_J("helper", 0, 5, labels=("M",)),
+                                              _J("test", 5, 10 if fast else 100, labels=("L",))]))
+        return rows
+    v, r = _cmp(t, helper(52000, True), helper(53000, False, True), "--job", "test", "--end")
+    if "error" not in v:
+        bad.append("compare --end: a helper's runner hid the timed job's change: %r" % v.get("verdict"))
+    # --end --label L: an earlier same-name job moving from M to N is refused.
+    def earlier(base_id, pool, secs):
+        return [_cr(base_id + i, [_J("helper-m", 0, 1, labels=("M",)), _J("helper-n", 0, 1, labels=("N",)),
+                                  _J("test", 1, secs, labels=(pool,)), _J("test", 1 + secs, 10, labels=("L",))])
+                for i in range(6)]
+    v, r = _cmp(t, earlier(54000, "M", 90), earlier(55000, "N", 5), "--job", "test", "--end", "--label", "L")
+    if "error" not in v:
+        bad.append("compare --end --label: an earlier same-name job's move passed: %r" % (v.get("reading") or v.get("verdict")))
+    # An older before file (no group fields) against a newer after file: labels alone, a verdict,
+    # and the note.
+    old_b = [_cr(56000 + i, [_J("build", 0, 5, labels=("ubuntu-latest",)), _J("test", 5, 100 + i, labels=("macos-latest",))],
+                 groups=False) for i in range(6)]
+    new_a = [_cr(57000 + i, [_J("build", 0, 5, labels=("ubuntu-latest",), group=0),
+                             _J("test", 5, 50 + i, labels=("macos-latest",), group=0)]) for i in range(6)]
+    v, r = _cmp(t, old_b, new_a)
+    text = run([M, "compare", "--before", t + "/b", "--after", t + "/a"]).stdout
+    if not (v.get("verdict_code") or "").startswith("faster") or "runner groups: not compared" not in text:
+        bad.append("compare: an older before file refused, or no note: %r\n%s" % (v.get("verdict") or v, text))
+    # Round 6. Jobs cancelled in the queue still show which runner the push asked for: fast
+    # pushes asked for M before, slow ones for N after. Refused, as before.
+    def asked(base_id, fast_pool):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            if fast == (fast_pool == "M"):
+                c = _cr(base_id + i, [_J("test", 0, 1, labels=(fast_pool,), conclusion="cancelled")], conclusion="cancelled")
+                c["jobs"][0]["runner_name"] = None
+                rows.append(c)
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100, labels=("L",))]))
+        return rows
+    v, r = _cmp(t, asked(60000, "M"), asked(61000, "N"), "--job", "test")
+    if "error" not in v:
+        bad.append("compare: the runners queued jobs asked for were ignored: %r" % v.get("verdict"))
+    # Two jobs named test (ambiguous to time) still count in the --end job-set check.
+    def twin(base_id, fast_twin):
+        return [_cr(base_id + i, [_J("test", 0, 10 if i < 12 else 100, labels=("L",))]
+                    + ([_J("test", 0, 10 if i < 12 else 100, labels=("L",))] if (i < 12) == fast_twin else []))
+                for i in range(24)]
+    v, r = _cmp(t, twin(62000, True), twin(63000, False), "--job", "test", "--end", "--label", "L")
+    if "error" not in v:
+        bad.append("compare --end: runs left out as ambiguous dropped out of the job-set check: %r" % v.get("reading"))
+    # One unknown group: groups aren't compared, so a known group seen only before refuses nothing.
+    b_ = [_cr(64000 + i, [_J("test", 0, 100 + i, labels=("L",), group=1)]) for i in range(6)]
+    b_.append(_cr(64006, [_J("test", 0, 5, labels=("L",), group=2, conclusion="failure")], conclusion="failure"))
+    a_ = [_cr(65000 + i, [_J("test", 0, 50 + i, labels=("L",), group=1)]) for i in range(6)]
+    a_.append(_cr(65006, [_J("test", 0, 5, labels=("L",), group=None, conclusion="failure")], conclusion="failure"))
+    v, r = _cmp(t, b_, a_, "--job", "test")
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare: one unknown group made a group change: %r" % (v.get("verdict") or v))
+    # --ran gate: a gate cancelled in the queue never ran, so its run isn't in the workload.
+    def gated(base_id, off):
+        rows = [_cr(base_id + i, [_J("gate", 0, 1, labels=("L",)), _J("test", 1, 100 - 50 * (off == "M") + i, labels=("L",))])
+                for i in range(6)]
+        for i in range(12):
+            g = _J("gate", 0, 1, labels=("L",), conclusion="cancelled")
+            x = _cr(base_id + 100 + i, [g, _J("test", 1, 5, labels=(off,))])
+            x["jobs"][0]["runner_name"] = None
+            rows.append(x)
+        return rows
+    v, r = _cmp(t, gated(66000, "L"), gated(67000, "M"), "--ran", "gate", "--job", "test", "--label", "L")
+    if "_routing_changed" in (v.get("reading_code") or ""):
+        bad.append("compare --ran: runs outside the workload moved the routing count: %r %r"
+                   % (v.get("off_runner_before"), v.get("off_runner_after")))
+    # Round 7. --ran gate: pushes whose gate was cancelled in the queue are no part of the
+    # workload, timed or checked.
+    def gate_q(base_id, q_secs, fail_pool):
+        rows = [_cr(base_id + i, [_J("gate", 0, 1, labels=("L",)), _J("test", 1, 70, labels=("L",))]) for i in range(6)]
+        for i in range(12):
+            x = _cr(base_id + 100 + i, [_J("gate", 0, 1, labels=("L",), conclusion="cancelled"), _J("test", 1, q_secs, labels=("L",))])
+            x["jobs"][0]["runner_name"] = None
+            rows.append(x)
+        x = _cr(base_id + 200, [_J("gate", 0, 1, labels=("L",), conclusion="cancelled"),
+                                _J("test", 1, 5, labels=(fail_pool,), conclusion="failure")], conclusion="failure")
+        x["jobs"][0]["runner_name"] = None
+        rows.append(x)
+        return rows
+    v, r = _cmp(t, gate_q(68000, 100, "M"), gate_q(69000, 10, "N"), "--ran", "gate", "--job", "test")
+    if (v.get("reading_code") or "").startswith("faster"):
+        bad.append("compare --ran: pushes outside the workload were timed: %r" % v.get("reading"))
+    # A canary that asked for L and was cancelled before getting a runner adds no runner set.
+    def q_canary(base_id, secs):
+        rows = [_cr(base_id + i, [_J("test", 0, secs + i, labels=("L",), group=1),
+                                  _J("canary", 0, 1, labels=("L",), group=1)]) for i in range(6)]
+        c = _cr(base_id + 6, [_J("test", 0, secs, labels=("L",), group=1), _J("canary", 0, 1, labels=("L",), conclusion="cancelled")])
+        c["jobs"][1]["runner_name"] = None
+        return rows + [c]
+    v, r = _cmp(t, q_canary(70000, 100), q_canary(71000, 50), "--label", "L")
+    if not (v.get("verdict_code") or "").startswith("faster"):
+        bad.append("compare: a canary cancelled in the queue made a runner set: %r" % (v.get("verdict") or v))
+    # A job with no labels that ran in group 1 before and group 2 after: refused.
+    v, r = _cmp(t, [_cr(72000 + i, [_J("test", 0, 100 + i, labels=(), group=1)]) for i in range(6)],
+                [_cr(73000 + i, [_J("test", 0, 10 + i, labels=(), group=2)]) for i in range(6)], "--job", "test")
+    if "error" not in v:
+        bad.append("compare #12: a label-less job's group change passed: %r" % v.get("verdict"))
+    # Round 8. Neutral runs still show which runner pushes asked for.
+    def neutral(base_id, n_pool):
+        return [_cr(base_id + i, [_J("test", 0, 10 if i < 12 else 100, labels=((n_pool,) if (i < 12) == (n_pool == "M") else ("L",)),
+                                     conclusion="neutral" if (i < 12) == (n_pool == "M") else "success")],
+                    conclusion="neutral" if (i < 12) == (n_pool == "M") else "success") for i in range(24)]
+    v, r = _cmp(t, neutral(74000, "M"), neutral(75000, "N"), "--job", "test")
+    if "error" not in v:
+        bad.append("compare: neutral runs' runners were ignored: %r" % v.get("verdict"))
+    # --ran gate: failures counted among the runs where gate got a runner, not where it was queued.
+    def gate_fail(base_id, after):
+        rows = []
+        for i in range(24):
+            kind = "fast" if i < 6 else "slow" if i < 12 else "fail"
+            got = (kind == "slow") if not after else kind in ("fast", "fail")
+            g = _J("gate", 0, 1, labels=("L",), conclusion="success" if got else "cancelled")
+            x = _cr(base_id + i, [g, _J("test", 1, 10 if kind == "fast" else 100, labels=("L",),
+                                        conclusion="failure" if kind == "fail" else "success")],
+                    conclusion="failure" if kind == "fail" else "success")
+            if not got:
+                x["jobs"][0]["runner_name"] = None
+            rows.append(x)
+        return rows
+    v, r = _cmp(t, gate_fail(76000, False), gate_fail(77000, True), "--ran", "gate", "--job", "test")
+    if v.get("verdict_code") != "not_valid":
+        bad.append("compare --ran: a rise in failures where the job ran was hidden: %r %r"
+                   % (v.get("verdict") or v, (v.get("failed_before_job"), v.get("failed_after_job"))))
+    # --ran gate: a rerun whose retried gate was cancelled in the queue still shows the pool its
+    # first attempt used.
+    def gate_retry(base_id, fast_spare):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            secs = 10 if fast else 100
+            if fast == fast_spare:
+                g2 = _J("gate", 150, 1, labels=("self-hosted", "std"), conclusion="cancelled", attempt=2)
+                x = _cr(base_id + i, [_J("gate", 0, 1, labels=("self-hosted", "std")),
+                                      _J("test", 1, secs, labels=("self-hosted", "spare"), conclusion="failure"),
+                                      g2, _J("test", 200, secs, labels=("self-hosted", "spare"), attempt=2)], attempt=2)
+                x["jobs"][2]["runner_name"] = None
+            else:
+                x = _cr(base_id + i, [_J("gate", 0, 1, labels=("self-hosted", "std")),
+                                      _J("test", 1, secs, labels=("self-hosted", "std"))])
+            rows.append(x)
+        return rows
+    v, r = _cmp(t, gate_retry(78000, True), gate_retry(79000, False), "--ran", "gate", "--job", "test", "--label", "self-hosted")
+    if "error" not in v:
+        bad.append("compare --ran: a queued gate on a retry hid the pool: %r" % (v.get("reading") or v.get("verdict")))
+    # Round 9. Fail-fast cancels test (b) while it waits, on six new failures after: the runs
+    # where it asked for a runner fail more after, so not valid, as before.
+    def failfast(base_id, n_ff, n_docs):
+        rows = [_cr(base_id + i, [_J("test (a)", 0, 50, labels=("L",)), _J("test (b)", 0, (100 if base_id < 81000 else 50) + i % 3, labels=("L",))])
+                for i in range(20)]
+        rows += [_cr(base_id + 100 + i, [_J("docs", 0, 5, labels=("L",), conclusion="failure")], conclusion="failure")
+                 for i in range(n_docs)]
+        for i in range(n_ff):
+            x = _cr(base_id + 200 + i, [_J("test (a)", 0, 5, labels=("L",), conclusion="failure"),
+                                        _J("test (b)", 0, 1, labels=("L",), conclusion="cancelled")], conclusion="failure")
+            x["jobs"][1]["runner_name"] = None
+            rows.append(x)
+        return rows
+    v, r = _cmp(t, failfast(80000, 0, 10), failfast(81000, 6, 4), "--job", "test (b)")
+    if v.get("verdict_code") != "not_valid":
+        bad.append("compare: failures that cancelled the job in the queue left its workload: %r" % (v.get("verdict") or v))
+    # Round 10. A first attempt that made no jobs ran nothing on L: off the runner.
+    def jobless(base_id, after):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            secs = 10 if fast else 100
+            if (not after and fast):
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("L",), conclusion="failure"),
+                                              _J("test", 200, secs, labels=("L",), attempt=2)], attempt=2))
+            elif after and not fast:
+                rows.append(_cr(base_id + i, [_J("test", 200, secs, labels=("L",), attempt=2)], attempt=2))
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, secs, labels=("L",))]))
+        return rows
+    v, r = _cmp(t, jobless(82000, False), jobless(83000, True), "--job", "test", "--label", "L")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare: a jobless first attempt counted as on the runner: %r %r"
+                   % (v.get("verdict"), (v.get("off_runner_before"), v.get("off_runner_after"))))
+    # Without --label, the refusal names the run that showed the other runner.
+    b_ = [_cr(84000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
+    a_ = [_cr(85000 + i, [_J("test", 0, 50 + i)]) for i in range(5)]
+    a_.append(_cr(85205, [_J("test", 0, 60, conclusion="failure"),
+                          _J("test", 100, 60, labels=("self-hosted", "spare"), attempt=2)], attempt=2))
+    v, r = _cmp(t, b_, a_, "--job", "test")
+    if "error" not in v or "run 85205, a rerun" not in r.stderr:
+        bad.append("compare: the label refusal didn't name the run: %r" % (r.stderr or v))
+    # Round 12. --cache hit doesn't hide a runner seen only on cache misses.
+    hits = {}
+    def cached(base_id, after):
+        rows = []
+        for i in range(32):
+            fast = i < 24
+            hits[str(base_id + i)] = "hit" if (not fast or after) else "miss"
+            rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100, labels=("L" if (not fast or after) else "M",))]))
+        return rows
+    b_, a_ = cached(86000, False), cached(87000, True)
+    open(t + "/cache.json", "w").write(json.dumps(hits))
+    v, r = _cmp(t, b_, a_, "--job", "test", "--cache", "hit", "--cache-state", t + "/cache.json")
+    if "error" not in v:
+        bad.append("compare --cache: a runner seen only on misses was hidden: %r" % v.get("verdict"))
+    # Routing within the selected cache state: hits reach L slow before and fast after, misses
+    # the other way; pooled, the counts match.
+    hits2 = {}
+    def routed_cache(base_id, after):
+        rows = []
+        for i in range(60):
+            hit = i < 30
+            slow = (i % 30) < 25
+            on_l = (slow != after) if hit else (slow == after)
+            hits2[str(base_id + i)] = "hit" if hit else "miss"
+            rows.append(_cr(base_id + i, [_J("test", 0, 100 if slow else 10, labels=("L" if on_l else "M",))]))
+        return rows
+    b_, a_ = routed_cache(88000, False), routed_cache(89000, True)
+    open(t + "/cache2.json", "w").write(json.dumps(hits2))
+    v, r = _cmp(t, b_, a_, "--job", "test", "--label", "L", "--cache", "hit", "--cache-state", t + "/cache2.json")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare --cache: routing among the selected cache state was pooled away: %r %r"
+                   % (v.get("verdict"), (v.get("off_runner_before"), v.get("off_runner_after"))))
+    # Routing that also moved pushes from misses to hits: counted over every state too.
+    hits3 = {}
+    def moved_state(base_id, after):
+        rows = []
+        for i in range(32):
+            fast = i < 24
+            hits3[str(base_id + i)] = "hit" if (after or not fast) else "miss"
+            rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100, labels=("L" if (after or not fast) else "M",))]))
+        return rows
+    b_, a_ = moved_state(90000, False), moved_state(91000, True)
+    open(t + "/cache3.json", "w").write(json.dumps(hits3))
+    v, r = _cmp(t, b_, a_, "--job", "test", "--label", "L", "--cache", "hit", "--cache-state", t + "/cache3.json")
+    if "_routing_changed" not in (v.get("verdict_code") or ""):
+        bad.append("compare --cache: a move onto the runner that changed cache state wasn't counted: %r" % v.get("verdict"))
+    # --ran test: requests the queue cancelled still show the runner the pushes were sent to.
+    def ran_q(base_id, q_pool):
+        rows = []
+        for i in range(24):
+            fast = i < 12
+            if fast == (q_pool == "M"):
+                c = _cr(base_id + i, [_J("test", 0, 1, labels=(q_pool,), conclusion="cancelled")], conclusion="cancelled")
+                c["jobs"][0]["runner_name"] = None
+                rows.append(c)
+            else:
+                rows.append(_cr(base_id + i, [_J("test", 0, 10 if fast else 100, labels=("L",))]))
+        return rows
+    v, r = _cmp(t, ran_q(92000, "M"), ran_q(93000, "N"), "--ran", "test", "--job", "test")
+    if "error" not in v:
+        bad.append("compare --ran: queued requests' runners were dropped: %r" % (v.get("reading") or v.get("verdict")))
+    # #35: a run with two jobs named test is left out of the job sets as of the timings.
+    before = [_cr(12000 + i, [_J("test", 0, 100 + i)]) for i in range(5)]
+    before.append(_cr(12005, [_J("test", 0, 100), _J("test", 0, 120)]))
+    after = [_cr(13000 + i, [_J("test", 0, 50 + i)]) for i in range(5)]
+    v, r = _cmp(t, before, after, "--job", "test")
+    if sum(x["runs"] for x in v.get("job_sets", {}).get("before", [])) != v.get("before_runs") \
+            or v.get("before_runs") != 5 or not any("can't tell which" in x[2] for x in v.get("excluded", [])):
+        bad.append("compare #35: job_sets and timings count different runs: %r %r" % (v.get("job_sets"), v.get("before_runs")))
+
+
 # split: workflows by file (#7), pull_request_target (#14), mixed headline groups (#23),
 # steps clipped to their job and overlap by how much (#35).
 def _split(t, rows, *flags):
@@ -2931,6 +3524,139 @@ for case in sorted(glob.glob(E + "/ci-*/")):
             print("ok   %-15s untouched sample fails: %s" % (name, first))
     finally:
         shutil.rmtree(work)
+
+# compare, #46 review: a downstream --ran gate (it runs only when test passed) must not hide
+# the runners only failed tests used. Every run of each file is read for labels, as before.
+def _gate_run(rid, t, lab, ok, took):
+    st = differential.stamp
+    j = lambda i, name, c, s, e, labels, runner: {
+        "id": rid * 10 + i, "name": name, "run_attempt": 1, "conclusion": c, "created_at": st(s),
+        "started_at": st(s) if runner else None, "completed_at": st(e), "labels": labels,
+        "runner_name": runner, "runner_group_id": 1 if runner else None, "runner_group_name": "g" if runner else None,
+        "steps": []}
+    jobs = [j(1, "test", "success" if ok else "failure", t + 1, t + 1 + took, [lab], "r" + lab),
+            j(2, "gate", "success", t + 2 + took, t + 8 + took, ["L"], "rL") if ok
+            else j(2, "gate", "skipped", t + 2 + took, t + 2 + took, [], None)]
+    return {"id": rid, "name": "CI", "path": ".github/workflows/ci.yml", "workflow_id": 1, "event": "pull_request",
+            "head_branch": "b", "head_sha": "%040x" % rid, "head_repo": "o/r", "run_attempt": 1,
+            "conclusion": "success" if ok else "failure", "created_at": st(t), "run_started_at": st(t),
+            "updated_at": st(t + 20 + took), "pull_requests": [rid], "pull_request_bases": ["main"],
+            "pull_requests_found": [], "head_message": "x", "jobs": jobs}
+with tempfile.TemporaryDirectory() as t:
+    differential.write(t + "/b.jsonl", [_gate_run(100 + i, i * 3600, "M", False, 10) for i in range(12)]
+                       + [_gate_run(200 + i, (20 + i) * 3600, "L", True, 100) for i in range(12)])
+    differential.write(t + "/a.jsonl", [_gate_run(300 + i, (50 + i) * 3600, "N", False, 100) for i in range(12)]
+                       + [_gate_run(400 + i, (70 + i) * 3600, "L", True, 10) for i in range(12)])
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--job", "test", "--ran", "gate"])
+    if r.returncode != 2 or "before only: M" not in r.stderr or "after only: N" not in r.stderr:
+        bad.append("compare --ran gate: a runner only failed tests used went unread\n" + r.stdout + r.stderr)
+
+# compare, #46 review: with --ran, a run whose --ran job the queue cancelled (it asked for a
+# runner and never got one) is still read by the runner checks, as main read it: a test leg
+# that failed on another runner in a green run refuses.
+with tempfile.TemporaryDirectory() as t:
+    def _odd(rows):
+        x = rows[-1]
+        x["jobs"][0].update(conclusion="failure", labels=["M"], runner_name="rM")
+        x["jobs"][1].update(conclusion="cancelled", runner_name=None, runner_group_id=None, runner_group_name=None,
+                            completed_at=x["jobs"][1]["started_at"])
+        return rows
+    b = _odd([_gate_run(500 + i, i * 3600, "L", True, 100) for i in range(8)])
+    a_ = _odd([_gate_run(600 + i, (20 + i) * 3600, "L", True, 50) for i in range(8)])
+    differential.write(t + "/b.jsonl", b)
+    differential.write(t + "/a.jsonl", a_)
+    for flags in (["--ran", "gate"], ["--job", "test", "--ran", "gate"]):
+        r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl"] + flags)
+        if r.returncode != 2 or "different runners within the before runs" not in r.stderr:
+            bad.append("compare %s: a queue-cancelled gate hid a test leg on another runner\n%s%s"
+                       % (" ".join(flags), r.stdout, r.stderr))
+
+# compare, #46 review: --ran times runs where the job ran in the run's final attempt, as main
+# did; a job recorded only under another attempt doesn't make the run one that ran it.
+with tempfile.TemporaryDirectory() as t:
+    def _other_attempt(rows):
+        for x in rows:
+            x["jobs"][1]["run_attempt"] = 2
+        return rows
+    differential.write(t + "/b.jsonl", _other_attempt([_gate_run(700 + i, i * 3600, "L", True, 100) for i in range(6)]))
+    differential.write(t + "/a.jsonl", _other_attempt([_gate_run(800 + i, (20 + i) * 3600, "L", True, 50) for i in range(6)]))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--ran", "gate", "--json"])
+    if r.returncode == 0 and json.loads(r.stdout)["verdict_code"] != "not_enough_runs":
+        bad.append("compare --ran: a job under another attempt made its run one that ran it: %s" % r.stdout[:300])
+
+# compare, #46 review (Astra, workload round 1): --ran times the runs main timed, where the job
+# ran in the final attempt, runner name or not. Leaving out a run whose job has a start time but
+# no runner name skipped its unreadable start, which main refuses on.
+with tempfile.TemporaryDirectory() as t:
+    for side, ids, day, end in (("b", range(1, 7), "2026-01-01", "T00:01:00Z"), ("a", range(7, 12), "2026-01-02", "T00:00:30Z")):
+        start = day + "T00:00:00Z"
+        differential.write(t + "/" + side, [
+            dict(id=i, name="CI", event="pull_request", conclusion="success", fetch_window=day, created_at=start,
+                 run_started_at="bad" if i == 6 else start,
+                 jobs=[dict(name="test", conclusion="success", labels=["linux"], started_at=start,
+                            completed_at=day + end, runner_name=None if i == 6 else "r")]) for i in ids])
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--ran", "test", "--json"])
+    if r.returncode != 2 or "unreadable timestamp" not in r.stderr:
+        bad.append("compare --ran: a run whose job had no runner name was left out, not read: %s%s"
+                   % (r.stdout[:300], r.stderr[-300:]))
+
+# compare, #46 review round 17 (Opus and Astra): a --job job with no start time isn't timed, as
+# main never counted its run as one that ran the job; with --end and --ran main refuses.
+with tempfile.TemporaryDirectory() as t:
+    for side, ids, day, end in (("b", range(1, 6), "2026-01-01", "T00:01:00Z"), ("a", range(6, 11), "2026-01-02", "T00:00:30Z")):
+        start = day + "T00:00:00Z"
+        differential.write(t + "/" + side, [
+            dict(id=i, name="CI", event="pull_request", conclusion="success", run_started_at=start, created_at=start,
+                 jobs=[dict(name="gate", conclusion="success", started_at=start, completed_at=day + "T00:00:01Z",
+                            labels=["linux"], runner_name="r"),
+                       dict(name="test", conclusion="success", started_at=None, completed_at=day + end,
+                            labels=["linux"], runner_name="r")]) for i in ids])
+    for flags in (["--job", "test", "--end", "--ran", "gate"], ["--job", "test", "--end"]):
+        r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--json"] + flags)
+        if r.returncode == 0 and json.loads(r.stdout)["verdict_code"] not in ("not_enough_runs", "not_valid"):
+            bad.append("compare %s: a job with no start time was timed: %s" % (" ".join(flags), r.stdout[:300]))
+# ... and its run's clock is still read, as main read it (Astra round 18): one unreadable stops.
+with tempfile.TemporaryDirectory() as t:
+    for side, ids, day, end in (("b", range(1, 7), "2026-01-01", "T00:01:00Z"), ("a", range(7, 12), "2026-01-02", "T00:00:30Z")):
+        start = day + "T00:00:00Z"
+        differential.write(t + "/" + side, [
+            dict(id=i, name="CI", event="pull_request", conclusion="success", created_at=start,
+                 run_started_at="bad" if i == 6 else start,
+                 jobs=[dict(name="test", conclusion="success", labels=["linux"], runner_name="r", runner_group_id=1,
+                            started_at=None if i == 6 else start, completed_at=day + end)]) for i in ids])
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--json", "--job", "test", "--end"])
+    if r.returncode != 2 or "unreadable timestamp" not in r.stderr:
+        bad.append("compare --job --end: a run left out for its job's missing start skipped its unreadable clock: %s"
+                   % r.stdout[:300])
+
+# A record fetch couldn't have written stops the read (Astra round 19: main crashed sorting a
+# job named 7 into a job set; head had left that run out and read the rest as faster).
+with tempfile.TemporaryDirectory() as t:
+    for side, ids, day, end in (("b", range(1, 7), "2026-01-01", "T00:01:00Z"), ("a", range(7, 12), "2026-01-02", "T00:00:30Z")):
+        start = day + "T00:00:00Z"
+        job = lambda name, ok, fin: dict(name=name, conclusion=ok, started_at=start, completed_at=fin,
+                                         runner_name="r", labels=["linux"], runner_group_id=1)
+        differential.write(t + "/" + side, [
+            dict(id=i, name="CI", event="pull_request", conclusion="success", created_at=start,
+                 jobs=[job("test", "success", start if i == 6 else day + end)]
+                 + ([job(7, "failure", day + end)] if i == 6 else [])) for i in ids])
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--json", "--job", "test"])
+    if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
+        bad.append("compare: a job named with a number was read: %s" % r.stdout[:300])
+
+# Astra round 20: a lone surrogate (an escaped \ud800) in a field is a field of the wrong kind; main
+# crashed writing it out in text mode.
+with tempfile.TemporaryDirectory() as t:
+    start = "2026-01-01T00:00:00Z"
+    rows = lambda ids, end, odd=None: [dict(id=i, name="CI", event="\ud800" if i == odd else "pull_request",
+                                            conclusion="success", created_at=start,
+                                            jobs=[dict(name="test", conclusion="success", started_at=start, completed_at=end)])
+                                       for i in ids]
+    differential.write(t + "/b", rows(range(1, 7), "2026-01-01T00:01:00Z", odd=6))
+    differential.write(t + "/a", rows(range(7, 12), "2026-01-01T00:00:30Z"))
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--job", "test"])
+    if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
+        bad.append("compare: a lone surrogate was read: %s%s" % (r.stdout[:200], r.stderr[-200:]))
 
 # split, #47 review round 17 (Opus): a run with no creation time, or a name that isn't text,
 # stops the read; main crashed on these (a failure), so reading them would be laxer.
