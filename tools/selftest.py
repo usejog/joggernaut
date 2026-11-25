@@ -2947,10 +2947,21 @@ with tempfile.TemporaryDirectory() as t:
                         ("a name that isn't text", [_r(1, "CI", "ci.yml", "pull_request", True),
                                                     _r(2, 7, None, "push", False, sha="s2")]),
                         ("no creation time on a second event", [_r(1, "CI", "ci.yml", "pull_request", True),
-                                                                _r(2, "CI", "ci.yml", "pull_request_target", False, created=None)])):
+                                                                _r(2, "CI", "ci.yml", "pull_request_target", False, created=None)]),
+                        # Astra round 18: an empty creation time; a number for the pull requests; a step
+                        # named with a number.
+                        ("an empty creation time", [_r(1, "CI", "ci.yml", "pull_request", True, created=""),
+                                                    _r(2, "Lint", "lint.yml", "push", True, sha="s2")]),
+                        ("a number for its pull requests", [dict(_r(1, "CI", None, "pull_request", True), pull_requests=1, head_sha=None)]),
+                        # Opus round 18: pull requests saved as GitHub's objects; a repository as a list.
+                        ("pull requests as objects", [dict(_r(1, "CI", "ci.yml", "pull_request", False), head_sha=None, pull_requests=[{"number": 1}])]),
+                        ("a repository as a list", [dict(_r(1, "CI", "ci.yml", "pull_request", False), head_sha=None, head_repo=["o/r"], pull_requests=[])]),
+                        ("a step named with a number", [dict(_r(1, "CI", "ci.yml", "push", True), jobs=[{
+                            "name": "test", "started_at": "2026-11-01T10:01:00Z",
+                            "steps": [{"name": 7, "started_at": "2026-11-01T10:00:00Z", "completed_at": "2026-11-01T10:00:30Z"}]}])])):
         differential.write(t + "/s.jsonl", rows)
         r = run([M, "split", "--in", t + "/s.jsonl", "--json"])
-        if r.returncode != 2 or "creation time" not in r.stderr:
+        if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
             bad.append("split: a run with %s was read: %s%s" % (label, r.stdout[:200], r.stderr[-200:]))
     # Astra round 17: a failed run whose commit is spelled in capitals fails that commit.
     sha = "abcdef" * 6 + "abcd"
