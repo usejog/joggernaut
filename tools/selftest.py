@@ -3288,6 +3288,22 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("compare --ran: a run whose job had no runner name was left out, not read: %s%s"
                    % (r.stdout[:300], r.stderr[-300:]))
 
+# compare, #46 review round 17 (Opus and Astra): a --job job with no start time isn't timed, as
+# main never counted its run as one that ran the job; with --end and --ran main refuses.
+with tempfile.TemporaryDirectory() as t:
+    for side, ids, day, end in (("b", range(1, 6), "2026-01-01", "T00:01:00Z"), ("a", range(6, 11), "2026-01-02", "T00:00:30Z")):
+        start = day + "T00:00:00Z"
+        differential.write(t + "/" + side, [
+            dict(id=i, name="CI", event="pull_request", conclusion="success", run_started_at=start, created_at=start,
+                 jobs=[dict(name="gate", conclusion="success", started_at=start, completed_at=day + "T00:00:01Z",
+                            labels=["linux"], runner_name="r"),
+                       dict(name="test", conclusion="success", started_at=None, completed_at=day + end,
+                            labels=["linux"], runner_name="r")]) for i in ids])
+    for flags in (["--job", "test", "--end", "--ran", "gate"], ["--job", "test", "--end"]):
+        r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--json"] + flags)
+        if r.returncode == 0 and json.loads(r.stdout)["verdict_code"] not in ("not_enough_runs", "not_valid"):
+            bad.append("compare %s: a job with no start time was timed: %s" % (" ".join(flags), r.stdout[:300]))
+
 # Never laxer than the base, on random histories (seeded: a failure names its seed, and
 # `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).
 if BASE:

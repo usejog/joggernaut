@@ -91,35 +91,24 @@ def split_fails(mod, path, extra):
 
 
 def laxer_split(base, head, path, extra=()):
-    """Head reads the file with its flags; the base reads the runs head should have selected
-    (by display name as head does; by file, which the base can't select, those runs unfiltered).
-    Head must not count fewer failed runs, and per commit with a run the base reads that didn't
-    pass, not more all-passed commits."""
+    """Both read the same file with the same flags (--workflow is a display name in both). Head
+    must not read where the base stops, count fewer failed runs, or, for a commit with a run
+    that didn't pass, count more all-passed commits (each such commit read alone). A run outside
+    --workflow's selection isn't that workflow's."""
     rows = [json.loads(l) for l in open(path) if l.strip()]
-    extra, base_extra, mine = list(extra), list(extra), rows
-    if "--workflow" in extra:
-        k = extra.index("--workflow")
-        w = extra[k + 1]
-        if any(os.path.basename(r.get("path") or "") == w for r in rows):
-            # A run with no file but its workflow's id is that workflow's (GitHub's id names it).
-            ids = {r.get("workflow_id"): os.path.basename(r["path"]) for r in rows
-                   if r.get("path") and r.get("workflow_id") is not None}
-            file_of = lambda r: os.path.basename(r.get("path") or "") or ids.get(r.get("workflow_id"), "")
-            names = {r.get("name") for r in rows if file_of(r) == w}
-            mine = [r for r in rows if file_of(r) == w or (not file_of(r) and r.get("name") in names)]
-            base_extra = extra[:k] + extra[k + 2:]
-        else:
-            mine = [r for r in rows if r.get("name") == w]
+    extra = list(extra)
+    w = extra[extra.index("--workflow") + 1] if "--workflow" in extra else None
+    mine = [r for r in rows if w is None or r.get("name") == w]
+    b, h = split_fails(base, path, extra), split_fails(head, path, extra)
+    if b is None and h is not None:
+        return "base stops, head reads"
+    if b and h and h[1] < b[1]:
+        return "base counts %d failed runs, head %d" % (b[1], h[1])
     with tempfile.TemporaryDirectory() as t:
-        pb, ph = os.path.join(t, "b.jsonl"), os.path.join(t, "h.jsonl")
-        write(pb, mine)
-        b, h = split_fails(base, pb, base_extra), split_fails(head, path, extra)
-        if b and h and h[1] < b[1]:
-            return "base counts %d failed runs, head %d" % (b[1], h[1])
+        p = os.path.join(t, "c.jsonl")
         for sha in sorted({r.get("head_sha") for r in mine if r.get("conclusion") != "success"} - {None}):
-            write(pb, [r for r in mine if r.get("head_sha") == sha])
-            write(ph, [r for r in rows if r.get("head_sha") == sha])
-            b, h = split_fails(base, pb, base_extra), split_fails(head, ph, extra)
+            write(p, [r for r in rows if r.get("head_sha") == sha])
+            b, h = split_fails(base, p, extra), split_fails(head, p, extra)
             b, h = (b or (0, 0))[0], (h or (0, 0))[0]
             STATS[("split", b < h)] = STATS.get(("split", b < h), 0) + 1
             if h > b:
@@ -214,6 +203,8 @@ def gen_run(rng, rid, t, side, shape):
                 j.update(conclusion=outcome, started_at=stamp(s), completed_at=stamp(e),
                          runner_name=None if rng.random() < shape["no_runner_name"] else "r-%s-%d" % (lab[-1], rng.randrange(3)),
                          runner_group_id=group, runner_group_name=None if group is None else "g%d" % group)
+                if rng.random() < shape["no_start"].get(name, 0):
+                    j["started_at"] = None  # GitHub can leave a job's start out
                 if name == "test":
                     test_failed = outcome != "success"
                 if name in ("test", "gate") and shape["serial"]:
@@ -266,8 +257,9 @@ def gen_shape(rng):
     if canary:
         fails_on = {"before": b, "after": c}
     # Fields GitHub can leave out or a hand-edited file can break: a job that ran with no
-    # runner name, an unreadable run clock.
+    # runner name or no start time, an unreadable run clock.
     return {"no_runner_name": rng.choice((0, 0, 0.05, 0.2)), "bad_clock": rng.choice((0, 0, 0, 0.02, 0.1)),
+            "no_start": {n: rng.choice((0, 0, 0, 0, 0, 0.05, 0.3, 1)) for n in JOBS},
             "rerun": rng.choice((0, 0, 0.05, 0.2)), "continue": rng.choice((0, 0, 0.5, 1)),
             "absent": {n: rng.choice((0, 0, 0, 0.1, 0.4)) for n in JOBS},
             "filter_slow": rng.choice((None, None, None) + JOBS),
@@ -324,7 +316,8 @@ def gen_split(rng, seed):
     rows, rid = [], seed * 1000
     files = rng.choice(([("CI", "ci.yml")], [("CI", "ci.yml"), ("Lint", "lint.yml")],
                         [("CI", "ci.yml"), ("CI", "integration.yml"), ("Lint", "lint.yml")],
-                        [("CI", "ci.yml"), ("CI", "ci.yml" + "@" + "integration.yml")]))  # a legal file name
+                        [("CI", "ci.yml"), ("CI", "ci.yml" + "@" + "integration.yml")],  # a legal file name
+                        [("CI", "ci.yml"), ("ci.yml", "lint.yml")]))  # a display name that is another file's name
     owners = [(1, "b1", "o/r"), (2, "b2", "o/r"), (3, "b1", "fork/r")]
     for c in range(rng.choice((2, 5, 10))):
         sha = "%040x" % (seed * 100 + c)

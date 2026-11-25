@@ -1408,6 +1408,9 @@ def timed_runs(runs, a, side, excluded, keep=None):
                     j = js[0]
                     if j.get("conclusion") != "success":
                         why = "job %s" % j.get("conclusion")
+                    elif not executed(j):
+                        # No start time: main never took it for a run that ran the job.
+                        why = "job %s has no start time" % a.job
                     elif a.end:
                         # On the run's clock: from the run's start to this job's end, so its
                         # queue and every job before it on its path count.
