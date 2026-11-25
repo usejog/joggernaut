@@ -3216,6 +3216,19 @@ with tempfile.TemporaryDirectory() as t:
             bad.append("compare %s: a queue-cancelled gate hid a test leg on another runner\n%s%s"
                        % (" ".join(flags), r.stdout, r.stderr))
 
+# compare, #46 review: --ran times runs where the job ran in the run's final attempt, as main
+# did; a job recorded only under another attempt doesn't make the run one that ran it.
+with tempfile.TemporaryDirectory() as t:
+    def _other_attempt(rows):
+        for x in rows:
+            x["jobs"][1]["run_attempt"] = 2
+        return rows
+    differential.write(t + "/b.jsonl", _other_attempt([_gate_run(700 + i, i * 3600, "L", True, 100) for i in range(6)]))
+    differential.write(t + "/a.jsonl", _other_attempt([_gate_run(800 + i, (20 + i) * 3600, "L", True, 50) for i in range(6)]))
+    r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--ran", "gate", "--json"])
+    if r.returncode == 0 and json.loads(r.stdout)["verdict_code"] != "not_enough_runs":
+        bad.append("compare --ran: a job under another attempt made its run one that ran it: %s" % r.stdout[:300])
+
 # Never laxer than the base, on random histories (seeded: a failure names its seed, and
 # `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).
 if BASE:

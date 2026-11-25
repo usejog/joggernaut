@@ -81,37 +81,46 @@ def laxer_compare(base, head, argv):
     return None
 
 
-def split_all_passed(mod, path, extra):
+def split_fails(mod, path, extra):
+    """(all-passed commits, runs that failed) from split, or None when it stops."""
     code, out, _ = call(mod, ["split", "--in", path, "--json"] + extra)
-    return (json.loads(out).get("wait_all_workflows_commits") or 0) if not code else 0
+    if code:
+        return None
+    res = json.loads(out)
+    return res.get("wait_all_workflows_commits") or 0, res["ended_runs"] - res["passed_runs"]
 
 
 def laxer_split(base, head, path, extra=()):
-    """Per commit with a run that didn't pass: head must not count more all-passed commits."""
+    """Head reads the file with its flags; the base reads the runs head should have selected
+    (by display name as head does; by file, which the base can't select, those runs unfiltered).
+    Head must not count fewer failed runs, and per commit with a run the base reads that didn't
+    pass, not more all-passed commits."""
     rows = [json.loads(l) for l in open(path) if l.strip()]
-    extra, base_extra = list(extra), list(extra)
+    extra, base_extra, mine = list(extra), list(extra), rows
     if "--workflow" in extra:
-        w = extra[extra.index("--workflow") + 1]
+        k = extra.index("--workflow")
+        w = extra[k + 1]
         if any(os.path.basename(r.get("path") or "") == w for r in rows):
-            # By file, which the base can't select: the base reads the same runs unfiltered.
-            rows = [r for r in rows if os.path.basename(r.get("path") or "") == w
-                    or (not r.get("path") and r.get("name") == w)]
-            base_extra = [x for k, x in enumerate(extra) if k not in (extra.index("--workflow"),
-                                                                       extra.index("--workflow") + 1)]
+            # A run with no file but its workflow's id is that workflow's (GitHub's id names it).
+            ids = {r.get("workflow_id"): os.path.basename(r["path"]) for r in rows
+                   if r.get("path") and r.get("workflow_id") is not None}
+            file_of = lambda r: os.path.basename(r.get("path") or "") or ids.get(r.get("workflow_id"), "")
+            names = {r.get("name") for r in rows if file_of(r) == w}
+            mine = [r for r in rows if file_of(r) == w or (not file_of(r) and r.get("name") in names)]
+            base_extra = extra[:k] + extra[k + 2:]
         else:
-            rows = [r for r in rows if r.get("name") == w]  # a failure outside the selection isn't its
-    by_sha = {}
-    for r in rows:
-        if (r.get("event") or "").startswith("pull_request") and r.get("head_sha"):
-            by_sha.setdefault(r["head_sha"], []).append(r)
+            mine = [r for r in rows if r.get("name") == w]
     with tempfile.TemporaryDirectory() as t:
-        for sha, rs in by_sha.items():
-            if all(r.get("conclusion") == "success" for r in rs) or len(rs) < 2:
-                continue
-            p = os.path.join(t, "c.jsonl")
-            with open(p, "w") as f:
-                f.write("".join(json.dumps(r) + "\n" for r in rs))
-            b, h = split_all_passed(base, p, base_extra), split_all_passed(head, p, extra)
+        pb, ph = os.path.join(t, "b.jsonl"), os.path.join(t, "h.jsonl")
+        write(pb, mine)
+        b, h = split_fails(base, pb, base_extra), split_fails(head, path, extra)
+        if b and h and h[1] < b[1]:
+            return "base counts %d failed runs, head %d" % (b[1], h[1])
+        for sha in sorted({r.get("head_sha") for r in mine if r.get("conclusion") != "success"} - {None}):
+            write(pb, [r for r in mine if r.get("head_sha") == sha])
+            write(ph, [r for r in rows if r.get("head_sha") == sha])
+            b, h = split_fails(base, pb, base_extra), split_fails(head, ph, extra)
+            b, h = (b or (0, 0))[0], (h or (0, 0))[0]
             STATS[("split", b < h)] = STATS.get(("split", b < h), 0) + 1
             if h > b:
                 return "commit %s: base counts %d all-passed, head %d" % (sha, b, h)
@@ -279,6 +288,8 @@ def gen_compare(rng, seed):
     tl = shape["labels"]["before"]["test"][0][-1]
     flag_sets = [[], ["--job", "test"], ["--job", "test", "--ran", "gate"], ["--ran", "gate"],
                  ["--job", "test", "--label", tl], ["--job", "test", "--end"], ["--label", tl]]
+    if shape["other_wf"]:  # two workflows in the file: every reading names one
+        flag_sets = [f + ["--workflow", "CI"] for f in flag_sets]
     for _ in range(4):
         f = []
         if rng.random() < 0.6:
@@ -317,13 +328,14 @@ def gen_split(rng, seed):
         t = c * 7200
         for pr, branch, repo in rng.sample(owners, rng.choice((1, 1, 2, 3))):
             for k, (name, f) in enumerate(files):
-                for event in rng.sample(("pull_request", "pull_request_target"), rng.choice((1, 1, 2))):
+                for event in rng.sample(("pull_request", "pull_request_target", "push"), rng.choice((1, 1, 2, 3))):
                     rid += 1
                     concl = rng.choices(("success", "failure", "cancelled", None, "skipped"), weights=(80, 12, 4, 2, 2))[0]
                     s = t + rng.randrange(60) + (rng.choice((0, 0, 0, 90000)))
                     e = s + rng.choice((10, 30, 120))
-                    rows.append({"id": rid, "name": name, "path": None if rng.random() < 0.05 else ".github/workflows/" + f,
-                                 "workflow_id": k + 1, "event": event, "head_branch": branch, "head_sha": sha,
+                    path = rng.choice((f, f, f, f + "@refs/heads/" + branch, None))
+                    rows.append({"id": rid, "name": name, "path": path and ".github/workflows/" + path,
+                                 "workflow_id": k + 1 if rng.random() < 0.7 else None, "event": event, "head_branch": branch, "head_sha": sha,
                                  "head_repo": repo, "run_attempt": rng.choice((1, 1, 1, 2)), "conclusion": concl,
                                  "created_at": stamp(s), "run_started_at": stamp(s), "updated_at": stamp(e),
                                  "pull_requests": [pr] if repo == "o/r" and rng.random() < 0.6 else [],
