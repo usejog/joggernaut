@@ -917,8 +917,10 @@ def cmd_split(a):
     by_file = bool(a.workflow) and a.workflow in files
     runs = [r for r in every if not a.workflow or (os.path.basename(r.get("path") or "") == a.workflow
                                                      if by_file else r.get("name") == a.workflow)]
-    # By file, a run saved with no file can't be placed: left out, and said first.
+    # By file, a run saved with no file but named so can't be placed: it still counts (its
+    # failure could be this workflow's), and is said first.
     unplaced_runs = [r for r in every if by_file and not r.get("path") and r.get("name") == a.workflow]
+    runs += unplaced_runs
     if not runs:
         die("no runs to read")
     # PR wait over successful runs, as compare measures it.
@@ -931,7 +933,7 @@ def cmd_split(a):
     ended = [r for r in runs if r.get("conclusion") in ("success",) + FAILED]
     passed = sum(1 for r in ended if r.get("conclusion") == "success")
     out["passed_runs"], out["ended_runs"] = passed, len(ended)
-    out["runs_left_out_no_file"] = len(unplaced_runs)
+    out["runs_named_without_file"] = len(unplaced_runs)
     out["passed_after_rerun"] = sum(1 for r in ended if r.get("conclusion") == "success"
                                     and (r.get("run_attempt") or 1) > 1)
     out["cancelled_runs"] = sum(1 for r in runs if r.get("conclusion") == "cancelled")
@@ -992,27 +994,14 @@ def cmd_split(a):
     # A run with no file beside runs with one could be another workflow, so look per commit.
     # Checks are (workflow, event) pairs, as each commit's are counted below.
     checks_ = {(wf_key(r), r.get("event")) for r in runs if r.get("event") in PR_EVENTS}
-    # A run keyed by its branch (its pull request closed by the fetch) is checked with the
-    # numbered runs of that branch and commit too, so a failure fetched late still counts.
-    commit_runs, late = {}, []
-    for pr, by_head in pushes.items():
-        for sha, rs in by_head.items():
-            if all(isinstance(x, int) for x in pr):
-                commit_runs[(pr, sha)] = list(rs)
-            else:
-                late.append((pr, sha, rs))
-    for pr, sha, rs in late:
-        into = [k for k, v in commit_runs.items()
-                if k[1] == sha and any((x.get("head_repo"), x.get("head_branch")) == pr for x in v)]
-        for k in into:
-            commit_runs[k] += rs
-        if not into:
-            commit_runs[(pr, sha)] = list(rs)
+    # A commit passes only when every pull-request run of it passed, in any pull request or
+    # branch it was seen under (a run fetched after its pull request closed is keyed by branch),
+    # not only each check's first: a failure a later run, or a run filed under the same check,
+    # showed still counts.
+    red = {r.get("head_sha") for r in runs if r.get("event") in PR_EVENTS and r.get("conclusion") != "success"}
     if len(checks_) > 1 or (any(placed_wf(r) for r in runs) and not all(placed_wf(r) for r in runs)):
-        for rs in commit_runs.values():
-            # Every run of the commit must have passed, not only each check's first: a failure
-            # a later run, or a run filed under the same check, showed still counts.
-            failed = any(x.get("conclusion") != "success" for x in rs)
+        for sha, rs in ((sha, rs) for by_head in pushes.values() for sha, rs in by_head.items()):
+            failed = sha in red
             rs = sorted(rs, key=lambda x: ts(x["created_at"]))
             t0 = ts(rs[0]["created_at"])
             # A reopened PR runs again days later: keep each workflow's first run of the day.
@@ -1240,7 +1229,8 @@ def cmd_split(a):
                                            out["passed_after_rerun"], out["cancelled_runs"]))
     if unplaced_runs:
         print("%d runs named %s have no workflow file saved, so they can't be told apart from another file's:"
-              " left out (fetch again to save it)" % (len(unplaced_runs), a.workflow))
+              " counted with it, and no commit they ran on is in the wait across workflows (fetch again to"
+              " save it)" % (len(unplaced_runs), a.workflow))
     if not ended:
         print("no run here passed or failed (%d cancelled)" % out["cancelled_runs"])
     elif out["pass_rate"] < 0.5:

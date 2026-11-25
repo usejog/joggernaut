@@ -2615,18 +2615,20 @@ with tempfile.TemporaryDirectory() as t:
     got = json.loads(_split(t, rows, "--json", "--workflow", "ci.yml").stdout or "{}")
     text = _split(t, rows, "--workflow", "ci.yml").stdout
     if not text.startswith("2 runs named ci.yml"):
-        bad.append("split: the runs left out should be said first\n" + text)
+        bad.append("split: the runs with no file should be said first\n" + text)
     # ... and with the workflow's id saved, they take its file: 1 of 3 passed, as before.
     for x in rows:
         x["workflow_id"] = 42
     got_id = json.loads(_split(t, rows, "--json", "--workflow", "ci.yml").stdout or "{}")
-    if (got_id.get("passed_runs"), got_id.get("ended_runs"), got_id.get("runs_left_out_no_file")) != (1, 3, 0):
+    if (got_id.get("passed_runs"), got_id.get("ended_runs"), got_id.get("runs_named_without_file")) != (1, 3, 0):
         bad.append("split: runs with no file but the workflow's id weren't placed: %r"
-                   % ((got_id.get("passed_runs"), got_id.get("ended_runs"), got_id.get("runs_left_out_no_file")),))
-    if (got.get("passed_runs"), got.get("ended_runs"), got.get("runs_left_out_no_file")) != (1, 1, 2) \
+                   % ((got_id.get("passed_runs"), got_id.get("ended_runs"), got_id.get("runs_named_without_file")),))
+    # By file, runs named so with no file still count (their failures could be this workflow's,
+    # as main counts them by name), and it says so first. #47 review.
+    if (got.get("passed_runs"), got.get("ended_runs"), got.get("runs_named_without_file")) != (1, 3, 2) \
             or "2 runs named ci.yml have no workflow file saved" not in text:
-        bad.append("split: --workflow by file should leave out runs with no file, and say so first: %r\n%s"
-                   % ((got.get("passed_runs"), got.get("ended_runs"), got.get("runs_left_out_no_file")), text))
+        bad.append("split: --workflow by file should count runs named so with no file, and say so first: %r\n%s"
+                   % ((got.get("passed_runs"), got.get("ended_runs"), got.get("runs_named_without_file")), text))
     rows = [_run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 60 + 540 * k)], 9000 * k) for k in range(2)]
     del rows[0]["path"]
     got = json.loads(_split(t, rows, "--json").stdout or "{}")
@@ -2687,9 +2689,10 @@ with tempfile.TemporaryDirectory() as t:
     b_ = json.loads(_split(t, two_ok + [nightly], "--json").stdout or "{}").get("wait_all_workflows_commits")
     if (a_, b_) != (1, 1):
         bad.append("split: an unrelated run changed a two-event commit's wait: %r %r" % (a_, b_))
-    # #47 review: a failed run fetched after the pull request closed (keyed by branch) is checked
-    # with the commit's numbered runs; and a failed run filed under a check that already passed
-    # (ci.yml@integration.yml is a legal file name, read as ci.yml) still fails the commit.
+    # #47 review: a commit fails if any run of it failed, in any pull request or branch: a failed
+    # run fetched after the pull request closed (keyed by branch), one under another pull request
+    # or a fork, and one filed under a check that already passed (a file legally named with an
+    # at sign and a second extension reads as its first part) each fail the commit.
     late = []
     for k, (ev, path, ok, prs) in enumerate((("pull_request_target", "ci.yml", True, [42]),
                                              ("pull_request", "ci.yml", True, [42]),
@@ -2704,10 +2707,15 @@ with tempfile.TemporaryDirectory() as t:
         x.update(path=".github/workflows/" + path, workflow_id=k, conclusion="success" if ok else "failure",
                  head_sha="%040d" % 44, pull_requests=[44])
         named.append(x)
+    # The same commit on two pull requests: failed under #1, passed on two checks under #2.
+    two_prs = [dict(late[0], id=90, pull_requests=[2], head_branch="b2"), dict(late[1], id=91, pull_requests=[2], head_branch="b2"),
+               dict(late[2], id=92, pull_requests=[1], head_branch="b1", path=".github/workflows/ci.yml")]
     a_ = json.loads(_split(t, late, "--json").stdout or "{}").get("wait_all_workflows_commits")
     b_ = json.loads(_split(t, named, "--json").stdout or "{}").get("wait_all_workflows_commits")
-    if (a_, b_) != (0, 0):
-        bad.append("split: a late or same-check failed run left a commit all-passed: %r %r" % (a_, b_))
+    c_ = json.loads(_split(t, two_prs, "--json").stdout or "{}").get("wait_all_workflows_commits")
+    if (a_, b_, c_) != (0, 0, 0):
+        bad.append("split: a late, same-check or other pull request's failed run left a commit all-passed: %r %r %r"
+                   % (a_, b_, c_))
     # Pushes per PR: a run keyed by branch on a commit a numbered run counts isn't another PR.
     pp = []
     for k, (sha, prs, ev) in enumerate(((1, [42], "pull_request"), (2, [42], "pull_request"), (2, [], "pull_request_target"))):
@@ -2884,6 +2892,8 @@ if BASE:
     bad += ["laxer than the base: " + x for x in found]
     if not found:
         print("ok   never laxer than the base on 200 random histories and every compare and split above")
+elif os.environ.get("GITHUB_EVENT_NAME", "").startswith("pull_request"):
+    bad.append("never-laxer check not run on a pull request: no base measure.py (the checkout needs fetch-depth: 2)")
 else:
     print("note never-laxer check not run: no base measure.py (set JOGGERNAUT_BASE_MEASURE to one, or run on"
           " a pull request's merge commit)")
