@@ -3257,6 +3257,26 @@ with tempfile.TemporaryDirectory() as t:
             or "own duration in the same runs" not in v.get("verdict", ""):
         bad.append("compare #36: --end without the job's own duration: %r" % v)
 
+# compare, #46 review: with --ran, a run whose --ran job the queue cancelled (it asked for a
+# runner and never got one) is still read by the runner checks, as main read it: a test leg
+# that failed on another runner in a green run refuses.
+with tempfile.TemporaryDirectory() as t:
+    def _odd(rows):
+        x = rows[-1]
+        x["jobs"][0].update(conclusion="failure", labels=["M"], runner_name="rM")
+        x["jobs"][1].update(conclusion="cancelled", runner_name=None, runner_group_id=None, runner_group_name=None,
+                            completed_at=x["jobs"][1]["started_at"])
+        return rows
+    b = _odd([_gate_run(500 + i, i * 3600, "L", True, 100) for i in range(8)])
+    a_ = _odd([_gate_run(600 + i, (20 + i) * 3600, "L", True, 50) for i in range(8)])
+    differential.write(t + "/b.jsonl", b)
+    differential.write(t + "/a.jsonl", a_)
+    for flags in (["--ran", "gate"], ["--job", "test", "--ran", "gate"]):
+        r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl"] + flags)
+        if r.returncode != 2 or "different runners within the before runs" not in r.stderr:
+            bad.append("compare %s: a queue-cancelled gate hid a test leg on another runner\n%s%s"
+                       % (" ".join(flags), r.stdout, r.stderr))
+
 # Never laxer than the base, on random histories (seeded: a failure names its seed, and
 # `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).
 if BASE:
@@ -3264,6 +3284,8 @@ if BASE:
     bad += ["laxer than the base: " + x for x in found]
     if not found:
         print("ok   never laxer than the base on 200 random histories and every compare and split above")
+elif os.environ.get("GITHUB_EVENT_NAME", "").startswith("pull_request"):
+    bad.append("never-laxer check not run on a pull request: no base measure.py (the checkout needs fetch-depth: 2)")
 else:
     print("note never-laxer check not run: no base measure.py (set JOGGERNAUT_BASE_MEASURE to one, or run on"
           " a pull request's merge commit)")
