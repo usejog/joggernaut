@@ -899,6 +899,16 @@ def pr_pushes(runs):
 
 def cmd_split(a):
     every = read_runs(a.input)
+    # What fetch always saves; a hand-built file without it would be read differently by each
+    # line below, so it stops here (main crashed on some of these).
+    for r in every:
+        if not isinstance(r, dict) or not isinstance(r.get("created_at"), str) or any(
+                r.get(k) is not None and not isinstance(r.get(k), str) for k in ("name", "path", "event", "head_sha")):
+            die("run %s has no creation time, or a name, file, event or commit that isn't text; give a file"
+                " fetch wrote" % (r.get("id") if isinstance(r, dict) else "?"))
+        ts(r["created_at"])
+        if r.get("head_sha"):
+            r["head_sha"] = r["head_sha"].lower()  # one commit, however a file spells it
     # GitHub's run listing can give a file with its ref (".github/workflows/build.yml@main").
     for r in every:
         if r.get("path"):

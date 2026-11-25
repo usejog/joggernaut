@@ -68,8 +68,9 @@ def laxer_compare(base, head, argv):
     base doesn't take one of the flags)."""
     argv = [x for x in argv if x != "--json"] + ["--json"]
     bc, bo, be = call(base, argv)
-    if bc and ("usage:" in be or bc == 99):
-        return "usage"  # a flag the base doesn't take, or the base crashed: nothing to compare
+    if bc and "usage:" in be:
+        return "usage"  # a flag the base doesn't take: nothing to compare
+    # A crash in the base is a failure: head must not read there either.
     hc, ho, he = call(head, argv)
     if hc == 99:
         return "head crashed: %s" % he.strip().splitlines()[-1]
@@ -82,8 +83,11 @@ def laxer_compare(base, head, argv):
 
 
 def split_fails(mod, path, extra):
-    """(all-passed commits, runs that failed) from split, or None when it stops."""
+    """(all-passed commits, runs that failed) from split, None when it stops, "crash" when it
+    crashed."""
     code, out, _ = call(mod, ["split", "--in", path, "--json"] + extra)
+    if code == 99:
+        return "crash"
     if code:
         return None
     res = json.loads(out)
@@ -100,8 +104,12 @@ def laxer_split(base, head, path, extra=()):
     w = extra[extra.index("--workflow") + 1] if "--workflow" in extra else None
     mine = [r for r in rows if w is None or r.get("name") == w]
     b, h = split_fails(base, path, extra), split_fails(head, path, extra)
-    if b is None and h is not None:
-        return "base stops, head reads"
+    if h == "crash":
+        return "head crashed"
+    if b in (None, "crash") and h is not None:
+        return "base %s, head reads" % ("crashed" if b else "stops")
+    if b == "crash":
+        return None
     if b and h and h[1] < b[1]:
         return "base counts %d failed runs, head %d" % (b[1], h[1])
     with tempfile.TemporaryDirectory() as t:
@@ -109,7 +117,9 @@ def laxer_split(base, head, path, extra=()):
         for sha in sorted({r.get("head_sha") for r in mine if r.get("conclusion") != "success"} - {None}):
             write(p, [r for r in rows if r.get("head_sha") == sha])
             b, h = split_fails(base, p, extra), split_fails(head, p, extra)
-            b, h = (b or (0, 0))[0], (h or (0, 0))[0]
+            if h == "crash":
+                return "commit %s: head crashed" % sha
+            b, h = (b if b not in (None, "crash") else (0, 0))[0], (h or (0, 0))[0]
             STATS[("split", b < h)] = STATS.get(("split", b < h), 0) + 1
             if h > b:
                 return "commit %s: base counts %d all-passed, head %d" % (sha, b, h)

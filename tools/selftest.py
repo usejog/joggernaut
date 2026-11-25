@@ -2932,6 +2932,35 @@ for case in sorted(glob.glob(E + "/ci-*/")):
     finally:
         shutil.rmtree(work)
 
+# split, #47 review round 17 (Opus): a run with no creation time, or a name that isn't text,
+# stops the read; main crashed on these (a failure), so reading them would be laxer.
+with tempfile.TemporaryDirectory() as t:
+    def _r(i, name, path, event, ok, created="2026-11-01T10:00:00Z", sha="s1"):
+        st = "success" if ok else "failure"
+        return {"id": i, "name": name, "path": path and ".github/workflows/" + path, "event": event, "head_sha": sha,
+                "head_branch": "b", "head_repo": "o/r", "pull_requests": [1] if event != "push" else [],
+                "conclusion": st, "run_attempt": 1, "created_at": created, "run_started_at": created,
+                "jobs": [{"id": i, "name": "j", "conclusion": st, "started_at": "2026-11-01T10:00:00Z",
+                          "completed_at": "2026-11-01T10:05:00Z", "labels": ["L"], "runner_name": "r"}]}
+    for label, rows in (("no creation time", [_r(1, "A", "a.yml", "pull_request", False, created=None),
+                                              _r(2, "B", "b.yml", "push", True, sha="s2")]),
+                        ("a name that isn't text", [_r(1, "CI", "ci.yml", "pull_request", True),
+                                                    _r(2, 7, None, "push", False, sha="s2")]),
+                        ("no creation time on a second event", [_r(1, "CI", "ci.yml", "pull_request", True),
+                                                                _r(2, "CI", "ci.yml", "pull_request_target", False, created=None)])):
+        differential.write(t + "/s.jsonl", rows)
+        r = run([M, "split", "--in", t + "/s.jsonl", "--json"])
+        if r.returncode != 2 or "creation time" not in r.stderr:
+            bad.append("split: a run with %s was read: %s%s" % (label, r.stdout[:200], r.stderr[-200:]))
+    # Astra round 17: a failed run whose commit is spelled in capitals fails that commit.
+    sha = "abcdef" * 6 + "abcd"
+    rows = [_r(1, "CI", "a.yml", "pull_request", True, sha=sha), _r(2, "CI", "b.yml", "pull_request", True, sha=sha),
+            _r(3, "CI", "a.yml", "pull_request", False, sha=sha.upper())]
+    differential.write(t + "/s.jsonl", rows)
+    got = json.loads(run([M, "split", "--in", t + "/s.jsonl", "--json", "--workflow", "CI"]).stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 0:
+        bad.append("split: a failed run with the commit in capitals left it all-passed: %r" % got.get("wait_all_workflows_commits"))
+
 # Never laxer than the base, on random histories (seeded: a failure names its seed, and
 # `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).
 if BASE:
