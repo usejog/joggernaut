@@ -3317,6 +3317,21 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("compare --job --end: a run left out for its job's missing start skipped its unreadable clock: %s"
                    % r.stdout[:300])
 
+# A record fetch couldn't have written stops the read (Astra round 19: main crashed sorting a
+# job named 7 into a job set; head had left that run out and read the rest as faster).
+with tempfile.TemporaryDirectory() as t:
+    for side, ids, day, end in (("b", range(1, 7), "2026-01-01", "T00:01:00Z"), ("a", range(7, 12), "2026-01-02", "T00:00:30Z")):
+        start = day + "T00:00:00Z"
+        job = lambda name, ok, fin: dict(name=name, conclusion=ok, started_at=start, completed_at=fin,
+                                         runner_name="r", labels=["linux"], runner_group_id=1)
+        differential.write(t + "/" + side, [
+            dict(id=i, name="CI", event="pull_request", conclusion="success", created_at=start,
+                 jobs=[job("test", "success", start if i == 6 else day + end)]
+                 + ([job(7, "failure", day + end)] if i == 6 else [])) for i in ids])
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--json", "--job", "test"])
+    if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
+        bad.append("compare: a job named with a number was read: %s" % r.stdout[:300])
+
 # Never laxer than the base, on random histories (seeded: a failure names its seed, and
 # `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).
 if BASE:
