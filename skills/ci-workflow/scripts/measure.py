@@ -253,7 +253,17 @@ def shape_problem(r):
     crashed on such records at whichever line first touched them, so each reading stops here."""
     if not isinstance(r, dict):
         return "isn't a JSON object"
-    text = lambda v: v is None or isinstance(v, str)
+    def text(v):
+        # Text the output can be written in: a lone surrogate (from an escaped \ud800) can't.
+        if v is None:
+            return True
+        if not isinstance(v, str):
+            return False
+        try:
+            v.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
     number = lambda v: v is None or (isinstance(v, int) and not isinstance(v, bool))
     def when(v):
         if v is not None and not isinstance(v, str):
@@ -281,7 +291,7 @@ def shape_problem(r):
                 + ["job " + k for k in ("id", "run_attempt", "runner_group_id") if not number(j.get(k))]
                 + ["job " + k for k in ("created_at", "started_at", "completed_at") if not when(j.get(k))]
                 + ["job " + k for k in ("run_attempt", "steps") if k in j and j[k] is None])
-        if j.get("labels") is not None and not (isinstance(j["labels"], list) and all(isinstance(x, str) for x in j["labels"])):
+        if j.get("labels") is not None and not (isinstance(j["labels"], list) and all(isinstance(x, str) and text(x) for x in j["labels"])):
             bad.append("job labels")
         steps = j.get("steps")
         if steps is not None and not isinstance(steps, list):
@@ -951,6 +961,11 @@ def pr_pushes(runs):
 
 
 def cmd_split(a):
+    if a.setup_pattern:
+        try:
+            re.compile(a.setup_pattern)
+        except re.error as e:
+            die("--setup-pattern %r isn't a regular expression: %s" % (a.setup_pattern, e))
     every = read_runs(a.input)
     for r in every:
         if r.get("head_sha"):

@@ -2963,6 +2963,16 @@ with tempfile.TemporaryDirectory() as t:
         r = run([M, "split", "--in", t + "/s.jsonl", "--json"])
         if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
             bad.append("split: a run with %s was read: %s%s" % (label, r.stdout[:200], r.stderr[-200:]))
+    # Astra round 19: an invalid --setup-pattern stops before any step is read (main crashed only
+    # when a step reached it); a lone surrogate in a field is a field of the wrong kind.
+    differential.write(t + "/s.jsonl", [_r(1, "CI", "ci.yml", "push", True)])
+    r = run([M, "split", "--in", t + "/s.jsonl", "--setup-pattern", "["])
+    if r.returncode != 2 or "isn't a regular expression" not in r.stderr:
+        bad.append("split: an invalid --setup-pattern was read: %s%s" % (r.stdout[:200], r.stderr[-200:]))
+    differential.write(t + "/s.jsonl", [dict(_r(1, "CI", "ci.yml", "push", True), event="\ud800")])
+    r = run([M, "split", "--in", t + "/s.jsonl"])
+    if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
+        bad.append("split: a lone surrogate was read: %s%s" % (r.stdout[:200], r.stderr[-200:]))
     # Astra round 17: a failed run whose commit is spelled in capitals fails that commit.
     sha = "abcdef" * 6 + "abcd"
     rows = [_r(1, "CI", "a.yml", "pull_request", True, sha=sha), _r(2, "CI", "b.yml", "pull_request", True, sha=sha),
