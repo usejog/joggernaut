@@ -116,6 +116,12 @@ def laxer_split(base, head, path, extra=()):
         b, h = split_fails(base, pb, base_extra), split_fails(head, path, extra)
         if b and h and h[1] < b[1]:
             return "base counts %d failed runs, head %d" % (b[1], h[1])
+        if base_extra != extra:
+            # The base can read the flag too (by display name): head's file must not drop a
+            # failure the base counts on its own reading.
+            b2 = split_fails(base, path, extra)
+            if b2 and h and h[1] < b2[1]:
+                return "base by name counts %d failed runs, head by file %d" % (b2[1], h[1])
         for sha in sorted({r.get("head_sha") for r in mine if r.get("conclusion") != "success"} - {None}):
             write(pb, [r for r in mine if r.get("head_sha") == sha])
             write(ph, [r for r in rows if r.get("head_sha") == sha])
@@ -324,7 +330,8 @@ def gen_split(rng, seed):
     rows, rid = [], seed * 1000
     files = rng.choice(([("CI", "ci.yml")], [("CI", "ci.yml"), ("Lint", "lint.yml")],
                         [("CI", "ci.yml"), ("CI", "integration.yml"), ("Lint", "lint.yml")],
-                        [("CI", "ci.yml"), ("CI", "ci.yml" + "@" + "integration.yml")]))  # a legal file name
+                        [("CI", "ci.yml"), ("CI", "ci.yml" + "@" + "integration.yml")],  # a legal file name
+                        [("CI", "ci.yml"), ("ci.yml", "lint.yml")]))  # a display name that is another file's name
     owners = [(1, "b1", "o/r"), (2, "b2", "o/r"), (3, "b1", "fork/r")]
     for c in range(rng.choice((2, 5, 10))):
         sha = "%040x" % (seed * 100 + c)

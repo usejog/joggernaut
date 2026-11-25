@@ -2631,16 +2631,18 @@ with tempfile.TemporaryDirectory() as t:
                 or (want[1] > 0) != ("carried no pull-request number" in text):
             bad.append("split #14: fork runs %r keyed as %r, not %r"
                        % (specs, (got.get("pr_commits"), got.get("pr_runs_keyed_by_branch")), want))
-    # --workflow a.yml selects the file a.yml, not also another file whose display name is a.yml;
-    # a renamed workflow is one workflow and one set of jobs.
+    # --workflow a.yml, where a.yml is one file and another file's display name, stops: main read
+    # it as the display name (b.yml's failed run), so reading the file alone would drop that
+    # failure (#47 review, Opus round 16). A renamed workflow is one workflow and one set of jobs.
     rows = []
     for k, (path, name, ok) in enumerate((("a.yml", "CI", True), ("b.yml", "a.yml", False))):
         x = _run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 120)], 9000 * k, name=name)
         x.update(path=".github/workflows/" + path, conclusion="success" if ok else "failure")
         rows.append(x)
-    got = json.loads(_split(t, rows, "--json", "--workflow", "a.yml").stdout or "{}")
-    if (got.get("passed_runs"), got.get("ended_runs")) != (1, 1):
-        bad.append("split: --workflow a.yml pooled another file named a.yml: %r" % ((got.get("passed_runs"), got.get("ended_runs")),))
+    r_ = _split(t, rows, "--json", "--workflow", "a.yml")
+    if r_.returncode != 2 or "another file's display name" not in r_.stderr:
+        bad.append("split: --workflow a.yml, a file and another file's display name, didn't stop: %s%s"
+                   % (r_.stdout[:300], r_.stderr[-300:]))
     rows = [_run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 120)], 9000 * k, name=n)
             for k, n in enumerate(("CI", "Checks"))]
     got = json.loads(_split(t, rows, "--json").stdout or "{}")
@@ -2657,7 +2659,7 @@ with tempfile.TemporaryDirectory() as t:
         rows.append(x)
     got = json.loads(_split(t, rows, "--json", "--workflow", "ci.yml").stdout or "{}")
     text = _split(t, rows, "--workflow", "ci.yml").stdout
-    if not text.startswith("2 runs named as ci.yml's runs are"):
+    if not text.startswith("2 runs with one of ci.yml's display names have no workflow file saved"):
         bad.append("split: the runs with no file should be said first\n" + text)
     # ... and with the workflow's id saved, they take its file: 1 of 3 passed, as before.
     for x in rows:
@@ -2669,7 +2671,7 @@ with tempfile.TemporaryDirectory() as t:
     # By file, runs named so with no file still count (their failures could be this workflow's,
     # as main counts them by name), and it says so first. #47 review.
     if (got.get("passed_runs"), got.get("ended_runs"), got.get("runs_named_without_file")) != (1, 3, 2) \
-            or "2 runs named as ci.yml's runs are have no workflow file saved" not in text:
+            or "2 runs with one of ci.yml's display names have no workflow file saved" not in text:
         bad.append("split: --workflow by file should count runs named so with no file, and say so first: %r\n%s"
                    % ((got.get("passed_runs"), got.get("ended_runs"), got.get("runs_named_without_file")), text))
     rows = [_run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 60 + 540 * k)], 9000 * k) for k in range(2)]

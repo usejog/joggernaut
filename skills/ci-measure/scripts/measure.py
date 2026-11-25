@@ -916,6 +916,12 @@ def cmd_split(a):
     # display name: never both, so a file and another file's display name don't pool.
     files = {os.path.basename(r.get("path") or "") for r in every}
     by_file = bool(a.workflow) and a.workflow in files
+    if by_file and any(r.get("name") == a.workflow and r.get("path")
+                       and os.path.basename(r["path"]) != a.workflow for r in every):
+        # Main read X as a display name: reading it as the file here would drop that
+        # workflow's runs, failures included. Neither reading is safe to pick.
+        die("--workflow %s names a workflow file and another file's display name; rename one, or"
+            " split the file by workflow first" % a.workflow)
     runs = [r for r in every if not a.workflow or (os.path.basename(r.get("path") or "") == a.workflow
                                                      if by_file else r.get("name") == a.workflow)]
     # By file, a run saved with no file but with one of that file's display names can't be
@@ -1231,9 +1237,8 @@ def cmd_split(a):
               " %d cancelled, left out" % (passed, len(ended), 100 * (out["pass_rate"] or 0),
                                            out["passed_after_rerun"], out["cancelled_runs"]))
     if unplaced_runs:
-        print("%d runs named as %s's runs are have no workflow file saved, so they can't be told apart from another file's:"
-              " counted with it, and no commit they ran on is in the wait across workflows (fetch again to"
-              " save it)" % (len(unplaced_runs), a.workflow))
+        print("%d runs with one of %s's display names have no workflow file saved, so they can't be told apart"
+              " from another file's: counted with it (fetch again to save the file)" % (len(unplaced_runs), a.workflow))
     if not ended:
         print("no run here passed or failed (%d cancelled)" % out["cancelled_runs"])
     elif out["pass_rate"] < 0.5:
