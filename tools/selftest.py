@@ -3272,6 +3272,22 @@ with tempfile.TemporaryDirectory() as t:
     if r.returncode == 0 and json.loads(r.stdout)["verdict_code"] != "not_enough_runs":
         bad.append("compare --ran: a job under another attempt made its run one that ran it: %s" % r.stdout[:300])
 
+# compare, #46 review (Astra, workload round 1): --ran times the runs main timed, where the job
+# ran in the final attempt, runner name or not. Leaving out a run whose job has a start time but
+# no runner name skipped its unreadable start, which main refuses on.
+with tempfile.TemporaryDirectory() as t:
+    for side, ids, day, end in (("b", range(1, 7), "2026-01-01", "T00:01:00Z"), ("a", range(7, 12), "2026-01-02", "T00:00:30Z")):
+        start = day + "T00:00:00Z"
+        differential.write(t + "/" + side, [
+            dict(id=i, name="CI", event="pull_request", conclusion="success", fetch_window=day, created_at=start,
+                 run_started_at="bad" if i == 6 else start,
+                 jobs=[dict(name="test", conclusion="success", labels=["linux"], started_at=start,
+                            completed_at=day + end, runner_name=None if i == 6 else "r")]) for i in ids])
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--ran", "test", "--json"])
+    if r.returncode != 2 or "unreadable timestamp" not in r.stderr:
+        bad.append("compare --ran: a run whose job had no runner name was left out, not read: %s%s"
+                   % (r.stdout[:300], r.stderr[-300:]))
+
 # Never laxer than the base, on random histories (seeded: a failure names its seed, and
 # `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).
 if BASE:

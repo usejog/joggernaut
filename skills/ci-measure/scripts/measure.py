@@ -1497,9 +1497,10 @@ def cmd_compare(a):
     # still shows where the push was sent), or with got, where it got one.
     ran_any2 = lambda r, got=False: any(j.get("name") == a.ran and (on_a_runner(j) if got else executed(j))
                                         for j in r.get("jobs", []))
-    # --ran's timed workload: runs where that job got a runner (a job cancelled in the queue didn't run).
-    # By the final attempt, as main read it (a timed run is never a rerun).
-    ran_job = (lambda r: any(j.get("name") == a.ran for j in latest_jobs(r) if on_a_runner(j))) if a.ran else None
+    # --ran's timed runs: as main chose them, where that job ran (not skipped, with a start time)
+    # in the final attempt. Choosing fewer, say only jobs that got a runner, could leave out
+    # the run main refuses on.
+    ran_job = (lambda r: any(j.get("name") == a.ran for j in latest_jobs(r) if executed(j))) if a.ran else None
     excluded = []
     # The timed runs, chosen once: the job sets, the runner checks over the timed runs and
     # the timings read this; the failure, cancellation and reach checks read every run.

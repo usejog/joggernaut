@@ -212,7 +212,7 @@ def gen_run(rng, rid, t, side, shape):
                 s = clock + 1 + int(rng.random() * 3)
                 e = s + max(1, int(speed if outcome == "success" else speed * rng.random()))
                 j.update(conclusion=outcome, started_at=stamp(s), completed_at=stamp(e),
-                         runner_name="r-%s-%d" % (lab[-1], rng.randrange(3)),
+                         runner_name=None if rng.random() < shape["no_runner_name"] else "r-%s-%d" % (lab[-1], rng.randrange(3)),
                          runner_group_id=group, runner_group_name=None if group is None else "g%d" % group)
                 if name == "test":
                     test_failed = outcome != "success"
@@ -234,7 +234,7 @@ def gen_run(rng, rid, t, side, shape):
     return {"id": rid, "name": wf[0], "path": wf[1], "workflow_id": 1 if wf[0] == "CI" else 2,
             "event": event, "head_branch": "b%d" % pr, "head_sha": "%040x" % (rid * 7919 % (1 << 60)),
             "head_repo": "o/r", "run_attempt": attempts, "conclusion": conclusion,
-            "created_at": stamp(t), "run_started_at": stamp(t + 2), "updated_at": max(ends) if ends else stamp(t + 3),
+            "created_at": stamp(t), "run_started_at": "bad" if rng.random() < shape["bad_clock"] else stamp(t + 2), "updated_at": max(ends) if ends else stamp(t + 3),
             "pull_requests": [pr] if event == "pull_request" and rng.random() < 0.9 else [],
             "pull_request_bases": [rng.choice(shape["bases"])] if event == "pull_request" else [],
             "pull_requests_found": [], "head_message": "change", "jobs": jobs}
@@ -265,7 +265,10 @@ def gen_shape(rng):
     fails_on = {s: rng.choice((None, labels[s]["test"][-1][-1], rng.choice(LABELS)[-1])) for s in labels}
     if canary:
         fails_on = {"before": b, "after": c}
-    return {"rerun": rng.choice((0, 0, 0.05, 0.2)), "continue": rng.choice((0, 0, 0.5, 1)),
+    # Fields GitHub can leave out or a hand-edited file can break: a job that ran with no
+    # runner name, an unreadable run clock.
+    return {"no_runner_name": rng.choice((0, 0, 0.05, 0.2)), "bad_clock": rng.choice((0, 0, 0, 0.02, 0.1)),
+            "rerun": rng.choice((0, 0, 0.05, 0.2)), "continue": rng.choice((0, 0, 0.5, 1)),
             "absent": {n: rng.choice((0, 0, 0, 0.1, 0.4)) for n in JOBS},
             "filter_slow": rng.choice((None, None, None) + JOBS),
             "route_slow": rng.random() < 0.3, "push_matters": rng.random() < 0.6,
