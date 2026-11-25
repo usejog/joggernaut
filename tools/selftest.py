@@ -823,10 +823,53 @@ for before, after, what in (
          "a declared error moving between same-name suites in two files"),
         ('<testsuite name="s"><error type="CleanupError"/><testcase classname="k" name="x"/></testsuite>',
          '<testsuite name="s"><error type="SetupError"/><testcase classname="k" name="x"/></testsuite>',
-         "one kind of suite error replacing another")):
+         "one kind of suite error replacing another"),
+        # #6: the same type, another message: a cleanup error replaced by a collection error.
+        ('<testsuite name="s"><error type="RuntimeError" message="cleanup failed"/><testcase classname="k" name="x"/>'
+         '</testsuite>',
+         '<testsuite name="s"><error type="RuntimeError" message="collection failed"/><testcase classname="k" name="x"/>'
+         '</testsuite>',
+         "a suite error of the same type with another message"),
+        # #6: a declared error moving between same-name child suites under parents naming other files.
+        ('<testsuites><testsuite name="p" file="a.py"><testsuite name="c" errors="1"><testcase classname="k" name="x"/>'
+         '</testsuite></testsuite><testsuite name="p" file="b.py"><testsuite name="c" errors="0">'
+         '<testcase classname="k" name="y"/></testsuite></testsuite></testsuites>',
+         '<testsuites><testsuite name="p" file="a.py"><testsuite name="c" errors="0"><testcase classname="k" name="x"/>'
+         '</testsuite></testsuite><testsuite name="p" file="b.py"><testsuite name="c" errors="1">'
+         '<testcase classname="k" name="y"/></testsuite></testsuite></testsuites>',
+         "a declared error moving between same-name suites under parents in two files")):
     r = two_reports(before, after)
     if r.returncode == 0:
         bad.append("tests: %s passed\n%s" % (what, r.stdout))
+    if "parents in two files" in what and "p [b.py]" not in r.stdout:
+        bad.append("tests: a container wasn't shown with its file\n" + r.stdout + r.stderr)
+# #6: a Python traceback without a message attribute is keyed by its last line; addresses
+# and temp names don't count.
+for before, after, want in (
+        ("Traceback (most recent call last):\n  x\nRuntimeError: cleanup", "Traceback (most recent call last):\n  x\nRuntimeError: collection", 1),
+        ('<error type="E" message="Pool at 0x7f3a2b1c9d50 failed"/>', '<error type="E" message="Pool at 0x7fe41d0c8a90 failed"/>', 0),
+        ("Traceback (most recent call last):\n  x\nRuntimeError: cleanup failed\nSee fixture.log",
+         "Traceback (most recent call last):\n  x\nRuntimeError: collection failed\nSee fixture.log", 1),
+        ('<error type="E" message="missing fixtures/tmp.cleanup.json"/>', '<error type="E" message="missing fixtures/tmp.collection.json"/>', 1),
+        ('<error type="E" message="at 0x7f3a2b1c9d50"/>', '<error type="E" message="at 0X7F3A2B1C9D50"/>', 0)):
+    wrap = lambda e: ('<testsuite name="s">%s<testcase classname="k" name="x"/></testsuite>'
+                      % (e if e.startswith("<") else '<error type="RuntimeError">%s</error>' % e))
+    r = two_reports(wrap(before), wrap(after))
+    if (r.returncode != 0) != bool(want):
+        bad.append("tests: suite error %r to %r should %s\n%s" % (before[-20:], after[-20:], "fail" if want else "pass", r.stdout))
+# #6: a suite error's message is keyed, never printed: it can hold a secret.
+r = two_reports('<testsuite name="s"><testcase classname="k" name="x"/></testsuite>',
+                '<testsuite name="s"><error type="E" message="GET https://u:hunter2@example.invalid failed"/>'
+                '<testcase classname="k" name="x"/></testsuite>')
+if r.returncode == 0 or "hunter2" in r.stdout + r.stderr:
+    bad.append("tests: a new suite error should fail without printing its message\n" + r.stdout)
+# #6: the same suite error, its message differing only in numbers (a time, a pid), is no change.
+r = two_reports('<testsuite name="s"><error type="RuntimeError" message="worker 12 died after 3.2s"/>'
+                '<testcase classname="k" name="x"/></testsuite>',
+                '<testsuite name="s"><error type="RuntimeError" message="worker 7 died after 1e-05s"/>'
+                '<testcase classname="k" name="x"/></testsuite>')
+if r.returncode != 0:
+    bad.append("tests: a suite error whose message differs only in numbers counted as new\n" + r.stdout + r.stderr)
 # cachelog: messages match from the line's start, so text inside a key can't pass for one
 code = ("import importlib.util,sys;s=importlib.util.spec_from_file_location('m',sys.argv[1]);m=importlib.util.module_from_spec(s);"
         "s.loader.exec_module(m);f=lambda l:[x for r,x in m.CACHE_OUTCOMES if r.search(l)][:1];"
