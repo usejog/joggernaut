@@ -42,6 +42,10 @@ def call(mod, argv):
             code = mod.main(argv) or 0
         except SystemExit as e:
             code = e.code if isinstance(e.code, int) else 1
+        except Exception:  # a crash: say so, never take it for a refusal
+            import traceback
+            code = 99
+            err.write(traceback.format_exc())
     return code, out.getvalue(), err.getvalue()
 
 
@@ -64,10 +68,10 @@ def laxer_compare(base, head, argv):
     base doesn't take one of the flags)."""
     argv = [x for x in argv if x != "--json"] + ["--json"]
     bc, bo, be = call(base, argv)
-    if bc and "usage:" in be:
-        return "usage"
+    if bc and ("usage:" in be or bc == 99):
+        return "usage"  # a flag the base doesn't take, or the base crashed: nothing to compare
     hc, ho, he = call(head, argv)
-    if hc and "Traceback" in he:
+    if hc == 99:
         return "head crashed: %s" % he.strip().splitlines()[-1]
     bl, bv = compare_level(bc, bo)
     hl, hv = compare_level(hc, ho)
@@ -85,6 +89,17 @@ def split_all_passed(mod, path, extra):
 def laxer_split(base, head, path, extra=()):
     """Per commit with a run that didn't pass: head must not count more all-passed commits."""
     rows = [json.loads(l) for l in open(path) if l.strip()]
+    extra, base_extra = list(extra), list(extra)
+    if "--workflow" in extra:
+        w = extra[extra.index("--workflow") + 1]
+        if any(os.path.basename(r.get("path") or "") == w for r in rows):
+            # By file, which the base can't select: the base reads the same runs unfiltered.
+            rows = [r for r in rows if os.path.basename(r.get("path") or "") == w
+                    or (not r.get("path") and r.get("name") == w)]
+            base_extra = [x for k, x in enumerate(extra) if k not in (extra.index("--workflow"),
+                                                                       extra.index("--workflow") + 1)]
+        else:
+            rows = [r for r in rows if r.get("name") == w]  # a failure outside the selection isn't its
     by_sha = {}
     for r in rows:
         if (r.get("event") or "").startswith("pull_request") and r.get("head_sha"):
@@ -96,7 +111,7 @@ def laxer_split(base, head, path, extra=()):
             p = os.path.join(t, "c.jsonl")
             with open(p, "w") as f:
                 f.write("".join(json.dumps(r) + "\n" for r in rs))
-            b, h = split_all_passed(base, p, list(extra)), split_all_passed(head, p, list(extra))
+            b, h = split_all_passed(base, p, base_extra), split_all_passed(head, p, extra)
             STATS[("split", b < h)] = STATS.get(("split", b < h), 0) + 1
             if h > b:
                 return "commit %s: base counts %d all-passed, head %d" % (sha, b, h)
@@ -230,6 +245,7 @@ def gen_shape(rng):
     if canary:
         # A canary runner that always fails, a different one each side: only failed runs show it.
         a, b, c = rng.sample([x[-1] for x in LABELS[:3]], 3)
+        c = c if rng.random() < 0.5 else b  # the same canary both sides: seen in failed runs only
         labels["before"]["test"], labels["after"]["test"] = [[a], [b]], [[a], [c]]
     speeds = lambda: {k: rng.choice((10, 30, 100)) for k in ("L", "M", "N")}
     sp = speeds()
@@ -240,7 +256,7 @@ def gen_shape(rng):
     fails_on = {s: rng.choice((None, labels[s]["test"][-1][-1], rng.choice(LABELS)[-1])) for s in labels}
     if canary:
         fails_on = {"before": b, "after": c}
-    return {"rerun": rng.choice((0, 0, 0.05, 0.2)), "continue": rng.choice((0, 0, 0.5)),
+    return {"rerun": rng.choice((0, 0, 0.05, 0.2)), "continue": rng.choice((0, 0, 0.5, 1)),
             "absent": {n: rng.choice((0, 0, 0, 0.1, 0.4)) for n in JOBS},
             "filter_slow": rng.choice((None, None, None) + JOBS),
             "route_slow": rng.random() < 0.3, "push_matters": rng.random() < 0.6,
@@ -287,32 +303,36 @@ def gen_compare(rng, seed):
 
 
 def gen_split(rng, seed):
-    """Runs of several workflows on a few pull requests' commits, some fetched after the pull
-    request closed (no number, keyed by branch), some on two events of one file."""
+    """Runs of several workflows on a few commits. A commit can be seen under two pull requests,
+    a fork, or a branch alone (its pull request closed by the fetch); a file can run on two
+    events, be named with an at sign, or be saved with no file; runs can fail, be cancelled or
+    still be going."""
     rows, rid = [], seed * 1000
     files = rng.choice(([("CI", "ci.yml")], [("CI", "ci.yml"), ("Lint", "lint.yml")],
                         [("CI", "ci.yml"), ("CI", "integration.yml"), ("Lint", "lint.yml")],
                         [("CI", "ci.yml"), ("CI", "ci.yml" + "@" + "integration.yml")]))  # a legal file name
+    owners = [(1, "b1", "o/r"), (2, "b2", "o/r"), (3, "b1", "fork/r")]
     for c in range(rng.choice((2, 5, 10))):
-        pr, sha = rng.choice((1, 2, 3)), "%040x" % (seed * 100 + c)
+        sha = "%040x" % (seed * 100 + c)
         t = c * 7200
-        for name, f in files:
-            for event in rng.sample(("pull_request", "pull_request_target"), rng.choice((1, 1, 2))):
-                rid += 1
-                ok = rng.random() < 0.75
-                s = t + rng.randrange(60)
-                e = s + rng.choice((10, 30, 120))
-                rows.append({"id": rid, "name": name, "path": ".github/workflows/" + f, "workflow_id": hash(f) % 1000,
-                             "event": event, "head_branch": "b%d" % pr, "head_sha": sha, "head_repo": "o/r",
-                             "run_attempt": 1, "conclusion": "success" if ok else "failure",
-                             "created_at": stamp(s), "run_started_at": stamp(s), "updated_at": stamp(e),
-                             "pull_requests": [pr] if rng.random() < 0.6 else [],
-                             "pull_request_bases": ["main"], "pull_requests_found": [], "head_message": "x",
-                             "jobs": [{"id": rid * 10, "name": "j", "run_attempt": 1,
-                                       "conclusion": "success" if ok else "failure", "created_at": stamp(s),
-                                       "started_at": stamp(s + 1), "completed_at": stamp(e), "labels": ["L"],
-                                       "runner_name": "r", "runner_group_id": 1, "runner_group_name": "g",
-                                       "steps": []}]})
+        for pr, branch, repo in rng.sample(owners, rng.choice((1, 1, 2, 3))):
+            for k, (name, f) in enumerate(files):
+                for event in rng.sample(("pull_request", "pull_request_target"), rng.choice((1, 1, 2))):
+                    rid += 1
+                    concl = rng.choices(("success", "failure", "cancelled", None, "skipped"), weights=(80, 12, 4, 2, 2))[0]
+                    s = t + rng.randrange(60) + (rng.choice((0, 0, 0, 90000)))
+                    e = s + rng.choice((10, 30, 120))
+                    rows.append({"id": rid, "name": name, "path": None if rng.random() < 0.05 else ".github/workflows/" + f,
+                                 "workflow_id": k + 1, "event": event, "head_branch": branch, "head_sha": sha,
+                                 "head_repo": repo, "run_attempt": rng.choice((1, 1, 1, 2)), "conclusion": concl,
+                                 "created_at": stamp(s), "run_started_at": stamp(s), "updated_at": stamp(e),
+                                 "pull_requests": [pr] if repo == "o/r" and rng.random() < 0.6 else [],
+                                 "pull_request_bases": ["main"], "pull_requests_found": [], "head_message": "x",
+                                 "jobs": [{"id": rid * 10, "name": "j", "run_attempt": 1,
+                                           "conclusion": concl if concl != "skipped" else "success",
+                                           "created_at": stamp(s), "started_at": stamp(s + 1), "completed_at": stamp(e),
+                                           "labels": ["L"], "runner_name": "r", "runner_group_id": 1,
+                                           "runner_group_name": "g", "steps": []}]})
     return rows
 
 
@@ -339,9 +359,10 @@ def run_generated(base_path, seeds):
                 if msg and msg != "usage":
                     found.append("compare seed %d %s: %s" % (seed, " ".join(f), msg))
             write(t + "/s.jsonl", gen_split(rng, seed))
-            msg = laxer_split(base, head, t + "/s.jsonl")
-            if msg:
-                found.append("split seed %d: %s" % (seed, msg))
+            for extra in ([], ["--workflow", "CI"], ["--workflow", "ci.yml"]):
+                msg = laxer_split(base, head, t + "/s.jsonl", extra)
+                if msg:
+                    found.append("split seed %d %s: %s" % (seed, " ".join(extra), msg))
     return found
 
 

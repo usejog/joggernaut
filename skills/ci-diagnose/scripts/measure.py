@@ -1493,7 +1493,11 @@ def cmd_compare(a):
     if a.min_runs < MIN_RUNS:
         die("--min-runs can't go below %d: with fewer runs a side, a 95%% interval can"
             " hardly or never rule out no change" % MIN_RUNS)
-    # --ran's workload: runs where that job got a runner (a job cancelled in the queue didn't run).
+    # Runs where the --ran job asked for a runner, in any attempt (a request the queue cancelled
+    # still shows where the push was sent), or with got, where it got one.
+    ran_any2 = lambda r, got=False: any(j.get("name") == a.ran and (on_a_runner(j) if got else executed(j))
+                                        for j in r.get("jobs", []))
+    # --ran's timed workload: runs where that job got a runner (a job cancelled in the queue didn't run).
     ran_job = (lambda r: any(j.get("name") == a.ran for j in r.get("jobs", []) if on_a_runner(j))) if a.ran else None
     excluded = []
     # The timed runs, chosen once: the job sets, the runner checks over the timed runs and
@@ -1501,8 +1505,7 @@ def cmd_compare(a):
     tb, ta = timed_runs(rb, a, "before", excluded, ran_job), timed_runs(ra, a, "after", excluded, ran_job)
     cb, ca = [x[0] for x in tb], [x[0] for x in ta]
     before, after = [x[1] for x in tb], [x[1] for x in ta]
-    ran_any = lambda r: any(j.get("name") == a.ran and executed(j) for j in r.get("jobs", []))
-    if a.ran and not any(ran_any(r) for r in rb + ra if workflow_matches(r, a.workflow)):
+    if a.ran and not any(ran_any2(r) for r in rb + ra if workflow_matches(r, a.workflow)):
         die("no run ran a job named %r" % a.ran)
     # The selection the failure check reads: every run of the workflow and event, any
     # outcome. The runner, job and cache filters choose only which runs are timed.
@@ -1511,21 +1514,19 @@ def cmd_compare(a):
     finished = lambda rs: [r for r in rs if in_workflow(r) and r.get("conclusion") not in (None, "skipped", "neutral")]
     cache = load_cache_state(a)
     # The selection the label and routing checks read: every run of the workflow, event and
-    # base, any outcome, and with --ran the runs where that job got a runner in some attempt.
-    # Runs where the --ran job asked for a runner, in any attempt (a request the queue cancelled
-    # still shows where the push was sent); the routing count's workload, where it got one.
-    ran_any2 = lambda r, got=False: any(j.get("name") == a.ran and (on_a_runner(j) if got else executed(j))
-                                        for j in r.get("jobs", []))
-    # Not by cache state (every run, finished or not): a runner seen only on the other state shows where the
-    # pushes went (as the label check always read).
+    # base, any outcome, and with --ran the runs where that job asked for a runner in some
+    # attempt (the routing count: where it got one). Not by cache state: a runner seen only on
+    # the other state shows where the pushes went (as the label check always read).
     selected = lambda rs, got=False: [r for r in rs if in_workflow(r) and (not a.ran or ran_any2(r, got))]
     # The runs the per-job and whole-run runner checks read, as before: every green run of
     # the cohort, timed or not (a canary that fails on one pool keeps its runs from being
     # timed, so which pushes went there decides which are timed), reruns included, by their
     # final attempt. Leaving reruns' pools out would let what gets rerun choose the timed runs.
+    # With --ran, the runs where that job asked for a runner in any attempt: never fewer than
+    # main read (a job cancelled in the queue still counts, so its run's other jobs are read).
     did_job = lambda r: not a.job or any(j.get("name") == a.job for j in latest_jobs(r) if executed(j))
     routed = lambda rs: [r for r in rs if workflow_matches(r, a.workflow) and r.get("conclusion") == "success"
-                         and not outside_cohort(r, a, cache) and did_job(r) and (ran_job is None or ran_job(r))]
+                         and not outside_cohort(r, a, cache) and did_job(r) and (not a.ran or ran_any2(r))]
     where = lambda r: "run %s%s" % (r.get("id"), ", a rerun" if (r.get("run_attempt") or 1) > 1 else "")
     # Runner groups (two can share every label; GitHub names each job's, and fetch saves it
     # from 0.4 on) count only when every job that got a runner, in every run these checks
@@ -1631,7 +1632,7 @@ def cmd_compare(a):
     # whose work counts in the mix); the counts reported are the timed runs'.
     candidates = lambda rs: [r for r in rs if workflow_matches(r, a.workflow) and r.get("conclusion") == "success"
                              and not outside_cohort(r, a, cache) and not run_failed(r) and did_job(r)
-                             and (ran_job is None or ran_job(r))]
+                             and (not a.ran or ran_any2(r))]
     mb_, ma_ = mix(cb), mix(ca)
     mcb, mca = mix(candidates(rb)), mix(candidates(ra))
     sets = {"before": [{"jobs": list(k), "runs": n} for k, n in mb_],
