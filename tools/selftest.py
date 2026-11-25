@@ -3303,6 +3303,19 @@ with tempfile.TemporaryDirectory() as t:
         r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--json"] + flags)
         if r.returncode == 0 and json.loads(r.stdout)["verdict_code"] not in ("not_enough_runs", "not_valid"):
             bad.append("compare %s: a job with no start time was timed: %s" % (" ".join(flags), r.stdout[:300]))
+# ... and its run's clock is still read, as main read it (Astra round 18): one unreadable stops.
+with tempfile.TemporaryDirectory() as t:
+    for side, ids, day, end in (("b", range(1, 7), "2026-01-01", "T00:01:00Z"), ("a", range(7, 12), "2026-01-02", "T00:00:30Z")):
+        start = day + "T00:00:00Z"
+        differential.write(t + "/" + side, [
+            dict(id=i, name="CI", event="pull_request", conclusion="success", created_at=start,
+                 run_started_at="bad" if i == 6 else start,
+                 jobs=[dict(name="test", conclusion="success", labels=["linux"], runner_name="r", runner_group_id=1,
+                            started_at=None if i == 6 else start, completed_at=day + end)]) for i in ids])
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--json", "--job", "test", "--end"])
+    if r.returncode != 2 or "unreadable timestamp" not in r.stderr:
+        bad.append("compare --job --end: a run left out for its job's missing start skipped its unreadable clock: %s"
+                   % r.stdout[:300])
 
 # Never laxer than the base, on random histories (seeded: a failure names its seed, and
 # `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).

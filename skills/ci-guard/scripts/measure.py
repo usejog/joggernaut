@@ -1408,15 +1408,17 @@ def timed_runs(runs, a, side, excluded, keep=None):
                     j = js[0]
                     if j.get("conclusion") != "success":
                         why = "job %s" % j.get("conclusion")
-                    elif not executed(j):
-                        # No start time: main never took it for a run that ran the job.
-                        why = "job %s has no start time" % a.job
-                    elif a.end:
-                        # On the run's clock: from the run's start to this job's end, so its
-                        # queue and every job before it on its path count.
-                        d = secs(r.get("run_started_at") or r.get("created_at"), j.get("completed_at"))
                     else:
-                        d = secs(j.get("started_at"), j.get("completed_at"))
+                        if a.end:
+                            # On the run's clock: from the run's start to this job's end, so its
+                            # queue and every job before it on its path count.
+                            d = secs(r.get("run_started_at") or r.get("created_at"), j.get("completed_at"))
+                        else:
+                            d = secs(j.get("started_at"), j.get("completed_at"))
+                        if not executed(j):
+                            # No start time: main never took it for a run that ran the job. (Its
+                            # clock is read first, as main read it: an unreadable one stops.)
+                            why, d = "job %s has no start time" % a.job, None
             else:
                 d = run_wall(r)
         if not why and d is not None and d <= 0:
