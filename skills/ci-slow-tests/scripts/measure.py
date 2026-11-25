@@ -1513,7 +1513,8 @@ def cmd_compare(a):
     ran_any2 = lambda r, got=False: any(j.get("name") == a.ran and (on_a_runner(j) if got else executed(j))
                                         for j in r.get("jobs", []))
     # --ran's timed workload: runs where that job got a runner (a job cancelled in the queue didn't run).
-    ran_job = (lambda r: any(j.get("name") == a.ran for j in r.get("jobs", []) if on_a_runner(j))) if a.ran else None
+    # By the final attempt, as main read it (a timed run is never a rerun).
+    ran_job = (lambda r: any(j.get("name") == a.ran for j in latest_jobs(r) if on_a_runner(j))) if a.ran else None
     excluded = []
     # The timed runs, chosen once: the job sets, the runner checks over the timed runs and
     # the timings read this; the failure, cancellation and reach checks read every run.
