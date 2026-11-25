@@ -965,7 +965,7 @@ def cmd_split(a):
     if a.setup_pattern:
         try:
             re.compile(a.setup_pattern)
-        except (re.error, ValueError, OverflowError, RecursionError) as e:  # flags at odds, a repeat too large, nesting too deep
+        except (re.error, ValueError, OverflowError, RuntimeError) as e:  # RecursionError is a RuntimeError
             die("--setup-pattern %r isn't a regular expression: %s" % (a.setup_pattern, e))
     every = read_runs(a.input)
     for r in every:

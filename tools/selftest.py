@@ -3695,10 +3695,10 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "split", "--in", t + "/s.jsonl", "--setup-pattern", "["])
     if r.returncode != 2 or "isn't a regular expression" not in r.stderr:
         bad.append("split: an invalid --setup-pattern was read: %s%s" % (r.stdout[:200], r.stderr[-200:]))
-    # #47 review rounds 20-21 (Opus): re.compile raises ValueError for flags at odds, OverflowError
-    # for a repeat too large and RecursionError for groups nested too deep; each stops with the same
-    # message, not a crash.
-    for pattern in ("(?a)(?u)", "a{4294967296}", "(" * 1000 + ")" * 1000):
+    # #47 review rounds 20-22 (Opus): re.compile raises ValueError for flags at odds, OverflowError
+    # for a repeat too large, RecursionError for groups nested too deep and, on Python 3.9,
+    # RuntimeError for a condition on a missing group; each stops with the same message, not a crash.
+    for pattern in ("(?(1))", "(?a)(?u)", "a{4294967296}", "(" * 1000 + ")" * 1000):
         r = run([M, "split", "--in", t + "/s.jsonl", "--setup-pattern", pattern])
         if r.returncode != 2 or "isn't a regular expression" not in r.stderr:
             bad.append("split: --setup-pattern %s... crashed or was read: %s%s"
