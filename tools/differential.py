@@ -7,8 +7,8 @@ and fail where this one gives a reading, a pass or a speed verdict the base refu
 "Laxer", for compare: the base stops (an error or a crash, not valid, or not enough runs) and this one
 gives a reading or a verdict; or the base gives only a descriptive reading and this one a
 verdict. For split: on one commit's runs, where one of them didn't pass, this one counts
-more commits whose every check passed than the base does, or reads where the base stops or
-crashes. Refusing more is allowed; a crash in this one is reported unless the base crashes too.
+more commits whose every check passed than the base does, or counts that commit as one whose
+every check passed at all, or reads where the base stops or crashes. Refusing more is allowed; a crash in this one is reported unless the base crashes too.
 
 The histories: random ones (seeded, so a failure reproduces); with --tidy N, N tidy ones that
 reach a verdict, each compared with one or two fields mutated; each --history file (split
@@ -99,8 +99,8 @@ def split_fails(mod, path, extra):
 def laxer_split(base, head, path, extra=()):
     """Both read the same file with the same flags (--workflow is a display name in both). Head
     must not read where the base stops, count fewer failed runs, or, for a commit with a run
-    that didn't pass, count more all-passed commits (each such commit read alone). A run outside
-    --workflow's selection isn't that workflow's."""
+    that didn't pass, count more all-passed commits than the base or count it all-passed at all
+    (each such commit read alone). A run outside --workflow's selection isn't that workflow's."""
     rows = [json.loads(l) for l in open(path) if l.strip()]
     extra = list(extra)
     w = extra[extra.index("--workflow") + 1] if "--workflow" in extra else None
@@ -127,6 +127,8 @@ def laxer_split(base, head, path, extra=()):
             STATS[("split", b < h)] = STATS.get(("split", b < h), 0) + 1
             if h > b:
                 return "commit %s: base counts %d all-passed, head %d" % (sha, b, h)
+            if h:
+                return "commit %s: a run of it didn't pass, and head counts it all-passed" % sha
     return None
 
 
@@ -350,12 +352,28 @@ def gen_split(rng, seed):
                                  "created_at": stamp(s), "run_started_at": stamp(s), "updated_at": stamp(e),
                                  "pull_requests": [pr] if repo == "o/r" and rng.random() < 0.6 else [],
                                  "pull_request_bases": ["main"], "pull_requests_found": [], "head_message": "x",
-                                 "jobs": [{"id": rid * 10, "name": "j", "run_attempt": 1,
+                                 "jobs": [{"id": rid * 10 + n, "name": jn, "run_attempt": 1,
                                            "conclusion": concl if concl != "skipped" else "success",
                                            "created_at": stamp(s), "started_at": stamp(s + 1), "completed_at": stamp(e),
                                            "labels": ["L"], "runner_name": "r", "runner_group_id": 1,
-                                           "runner_group_name": "g", "steps": []}]})
+                                           "runner_group_name": "g", "steps": gen_steps(rng, s + 1, e)}
+                                          for n, jn in enumerate(rng.choice((["j"], ["j"], ["j", "k"])))]})
     return rows
+
+
+def gen_steps(rng, s, e):
+    """No steps, or a job's: set up, the work (an install that may overlap it), clean up; one
+    can run past the job's end or have no times."""
+    if rng.random() < 0.4:
+        return []
+    mid = (s + e) // 2
+    steps = [("Set up job", s, s + 1), ("Install deps", s + 1, mid + rng.choice((0, 0, 2))),
+             ("Run tests", mid, e + rng.choice((0, 0, 0, 5))), ("Complete job", e, e)]
+    out = [{"name": n, "conclusion": "success", "number": k + 1, "started_at": stamp(a), "completed_at": stamp(b)}
+           for k, (n, a, b) in enumerate(steps)]
+    if rng.random() < 0.1:
+        rng.choice(out).update(started_at=None, completed_at=None)
+    return out
 
 
 def corrupt(rng, rows):
@@ -400,7 +418,8 @@ def run_generated(base_path, seeds):
                     found.append("compare seed %d %s: %s" % (seed, " ".join(f), msg))
             rows = gen_split(rng, seed)
             write(t + "/s.jsonl", corrupt(slip, rows) if slip.random() < 0.15 else rows)
-            for extra in ([], ["--workflow", "CI"], ["--workflow", "ci.yml"]):
+            for extra in ([], ["--workflow", "CI"], ["--workflow", "ci.yml"], ["--setup-pattern", "install"],
+                          ["--cohort", rng.choice(("j", "k"))]):
                 msg = laxer_split(base, head, t + "/s.jsonl", extra)
                 if msg:
                     found.append("split seed %d %s: %s" % (seed, " ".join(extra), msg))

@@ -2868,7 +2868,7 @@ with tempfile.TemporaryDirectory() as t:
     # A job that moved wholly from group 0 to group 7 is refused (0 is a group id).
     v, r = _cmp(t, [_cr(46000 + i, [_J("test", 0, 100 + i, labels=("L",), group=0)]) for i in range(6)],
                 [_cr(47000 + i, [_J("test", 0, 50 + i, labels=("L",), group=7)]) for i in range(6)], "--label", "L")
-    if "error" not in v or "L (runner group 0) before and L (runner group 7) after" not in r.stderr:
+    if "error" not in v or "L (runner group 0), first in run 46000 before and L (runner group 7), first in run 47000 after" not in r.stderr:
         bad.append("compare #12: a move from group 0 to group 7 passed: %r" % (v.get("verdict") or r.stderr))
     # Round 4. A canary on another pool fails and is retried there: the reruns' first attempts
     # show the extra pool, on the fast pushes before and the slow after. Refused.
@@ -3191,7 +3191,7 @@ with tempfile.TemporaryDirectory() as t:
     del rows2[1]["path"]
     got = json.loads(_split(t, rows2, "--json").stdout or "{}")
     if got.get("wait_all_workflows_commits") != 0 or got.get("wait_all_workflows_unplaced_commits") != 1 \
-            or len(got.get("workflows") or []) != 1 or "1 commits left out" not in _split(t, rows2).stdout:
+            or len(got.get("workflows") or []) != 1 or "1 commit left out" not in _split(t, rows2).stdout:
         bad.append("split #7: a run with no workflow file made a second workflow: %r %r"
                    % (got.get("wait_all_workflows_commits"), got.get("wait_all_workflows_unplaced_commits")))
     # ... unless its workflow id was saved: then that is its workflow.
@@ -3824,13 +3824,111 @@ with tempfile.TemporaryDirectory() as t:
     if got.get("wait_all_workflows_commits") != 0:
         bad.append("split: a failed run with the commit in capitals left it all-passed: %r" % got.get("wait_all_workflows_commits"))
 
+# Follow-ups from #46-#48's reviews (#49, #50, #51).
+with tempfile.TemporaryDirectory() as t:
+    # #50: an unreadable timestamp stops the read naming the file and the run, as any field of the
+    # wrong kind does; a run with no id, or a job whose id is null, stops it too (main crashed on
+    # the first, and read the second with every null-id job taken for one).
+    rows = [_cr(62000 + i, [_J("test", 0, 100 + i, labels=("L",), group=1)]) for i in range(6)]
+    bad_clock = copy.deepcopy(rows)
+    bad_clock[2]["jobs"][0]["started_at"] = "soon"
+    no_id = copy.deepcopy(rows)
+    del no_id[3]["id"]
+    null_job = copy.deepcopy(rows)
+    null_job[1]["jobs"][0]["id"] = None
+    for label, rs, want in (("an unreadable job start", bad_clock, "run 62002 has an unreadable timestamp"),
+                            ("no run id", no_id, "has a field of the wrong kind: id"),
+                            ("a null job id", null_job, "has a field of the wrong kind: job id")):
+        r = _split(t, rs)
+        if r.returncode != 2 or want not in r.stderr or "runs.jsonl" not in r.stderr:
+            bad.append("read_runs: %s wasn't stopped by name: %s%s" % (label, r.stdout[:200], r.stderr[-300:]))
+    # #50: an unknown group on a job that isn't measured leaves the group check on for the measured
+    # one: test moved from group 1 to group 2 under the same labels.
+    v, r = _cmp(t, [_cr(63000 + i, [_J("test", 0, 100 + i, labels=("L",), group=1),
+                                    _J("lint", 0, 5, labels=("L",), group=None)]) for i in range(6)],
+                [_cr(64000 + i, [_J("test", 0, 50 + i, labels=("L",), group=2),
+                                 _J("lint", 0, 5, labels=("L",), group=None)]) for i in range(6)], "--job", "test")
+    if "error" not in v or "runner group 1" not in r.stderr or "runner group 2" not in r.stderr:
+        bad.append("compare #50: an unknown group on lint hid test's move between groups: %r" % (v.get("verdict") or r.stderr))
+    # ... and when the measured job's own group is unknown somewhere, the count says how many of
+    # the jobs checked have none (lint's aren't checked).
+    lint = lambda: _J("lint", 0, 5, labels=("L",), group=None)
+    rb_ = [_cr(63500 + i, [_J("test", 0, 100 + i, labels=("L",), group=1), lint()]) for i in range(6)]
+    ra_ = [_cr(64500 + i, [_J("test", 0, 50 + i, labels=("L",), group=None if i == 0 else 1), lint()]) for i in range(6)]
+    _cmp(t, rb_, ra_)
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--job", "test"])
+    if "since 1 of the 12 jobs read have none saved" not in r.stdout:
+        bad.append("compare #50: the unknown-group count mixed checked and unchecked jobs: %s%s" % (r.stdout[-500:], r.stderr[-300:]))
+    # #50: a move between groups names the run each was first seen in, on both sides.
+    v, r = _cmp(t, [_cr(65000 + i, [_J("test", 0, 100 + i, labels=("L",), group=1)]) for i in range(6)],
+                [_cr(66000 + i, [_J("test", 0, 50 + i, labels=("L",), group=2)]) for i in range(6)], "--label", "L")
+    if "first in run 65000 before" not in r.stderr or "first in run 66000 after" not in r.stderr:
+        bad.append("compare #50: a move between groups didn't name the runs: %r" % r.stderr)
+    # #50: with --ran and no green run of that job on one side, the verdict names the job.
+    skipped = lambda rid: _cr(rid, [_J("test", 0, 100, labels=("L",), group=1),
+                                    _J("gate", 0, 0, labels=("L",), group=1, conclusion="skipped")])
+    befores = [skipped(67000 + i) for i in range(6)]
+    for x in befores:
+        x["jobs"][1].update(started_at=None)
+    v, r = _cmp(t, befores, [_cr(68000 + i, [_J("test", 0, 50, labels=("L",), group=1),
+                                             _J("gate", 60, 5, labels=("L",), group=1)]) for i in range(6)], "--ran", "gate")
+    if v.get("verdict_code") != "not_enough_runs" or "ran a job named 'gate' before" not in v.get("verdict", ""):
+        bad.append("compare #50: --ran with no run of the job before didn't name it: %r" % (v.get("verdict") or v))
+    # #51: a file where no run names its workflow file leaves every commit out, and says so once,
+    # in the singular for one commit.
+    rows = []
+    for k, name in enumerate(("CI", "Lint")):
+        x = _run(k, [_job("test", 100 * k, 100 * k + 1, 100 * k + 60)], 100 * k, name=name)
+        x.update(path=None, head_sha="%040d" % 9, pull_requests=[9], head_branch="b9")
+        rows.append(x)
+    r = _split(t, rows)
+    if "1 commit left out" not in r.stdout or "no commit has passing runs" in r.stdout:
+        bad.append("split #51: a history with no workflow files misread its commits: %s" % r.stdout[-600:])
+    # #49: tests notes what its ids can't tell: suite errors matched with numbers blanked, and
+    # files named by absolute path under another checkout folder.
+    def junit(folder, root, err):
+        os.makedirs(folder, exist_ok=True)
+        open(folder + "/r.xml", "w").write(
+            '<testsuite name="s" file="%s/tests/test_a.py">%s<testcase classname="a" name="t1"/></testsuite>'
+            % (root, '<error message="fixtures/http/%s missing"/>' % err if err else ""))
+    junit(t + "/jb", "/opt/actions/work/r/r", "401")
+    junit(t + "/ja", "/srv/runner-3/_work/r/r", "403")
+    r = run([M, "tests", "--before", t + "/jb", "--after", t + "/ja", "--json"])
+    notes = " ".join(json.loads(r.stdout).get("notes", [])) if r.stdout.startswith("{") else ""
+    if "numbers blanked" not in notes or "/opt/actions/work/ before, /srv/runner-3/_work/ after" not in notes:
+        bad.append("tests #49: no note for blanked suite-error numbers or a moved checkout: %s%s" % (r.stdout[-600:], r.stderr[-300:]))
+    # Paths that differ only in their separators name no other folder.
+    junit(t + "/jw", "C:\\w\\r", None)
+    junit(t + "/jv", "C:/w/r", None)
+    r = run([M, "tests", "--before", t + "/jw", "--after", t + "/jv", "--json"])
+    if "( before,  after)" in r.stdout or "folder above them" in r.stdout:
+        bad.append("tests #49: a note for paths that differ only in separators: %s" % r.stdout[-400:])
+    junit(t + "/jc", "/opt/actions/work/r/r", None)
+    r = run([M, "tests", "--before", t + "/jc", "--after", t + "/jc", "--json"])
+    if r.returncode or json.loads(r.stdout).get("notes"):
+        bad.append("tests #49: a note where nothing could change the reading: %s" % r.stdout[-400:])
+# #51: differential's split oracle refuses a head that counts a commit with a failed run as
+# all-passed, even where the base counts it so too.
+class _Fake:
+    def __init__(self, n):
+        self.n = n
+
+    def main(self, argv):
+        print(json.dumps({"wait_all_workflows_commits": self.n, "ended_runs": 1, "passed_runs": 0}))
+        return 0
+with tempfile.TemporaryDirectory() as t:
+    differential.write(t + "/s.jsonl", [dict(_run(1, [], 0), conclusion="failure")])
+    if not differential.laxer_split(_Fake(1), _Fake(1), t + "/s.jsonl") or differential.laxer_split(_Fake(0), _Fake(0), t + "/s.jsonl"):
+        bad.append("differential: a commit with a failed run counted all-passed went unseen, or one not counted was flagged")
+
 # Never laxer than the base, on random histories (seeded: a failure names its seed, and
 # `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).
 if BASE:
-    found = differential.run_generated(BASE, range(200))
+    found = differential.run_generated(BASE, range(200)) + differential.run_tidy(BASE, range(3))
     bad += ["laxer than the base: " + x for x in found]
     if not found:
-        print("ok   never laxer than the base on 200 random histories and every compare and split above")
+        print("ok   never laxer than the base on 200 random histories, 3 tidy ones with fields mutated, and"
+              " every compare and split above")
 elif os.environ.get("GITHUB_EVENT_NAME", "").startswith("pull_request"):
     bad.append("never-laxer check not run on a pull request: no base measure.py (the checkout needs fetch-depth: 2)")
 else:

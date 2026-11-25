@@ -220,9 +220,10 @@ the verdict.
 Where the pushes ran matters as much as what they ran. `compare` keys a
 runner by its labels and its runner group (two self-hosted groups can share
 every label; `fetch` saves each job's group). Groups are compared only when
-every job read that got a runner has a known one: with any unknown (a file
-from an older version, a group GitHub didn't report) the runners compare by
-labels alone, and `compare` says so. Without `--label`, the runners of
+every job checked that got a runner has a known one (with `--job` and no
+`--end`, only that job is checked): with any unknown (a file from an older
+version, a group GitHub didn't report) the runners compare by labels alone,
+and `compare` says so. Without `--label`, the runners of
 every run in each file must match, any outcome, as they always had to, and
 so must those of the selected runs (the workflow, event and base, and with
 `--ran` the runs where that job asked for a runner), groups included: a

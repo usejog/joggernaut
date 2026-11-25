@@ -70,18 +70,22 @@ def die(msg, code=2):
     sys.exit(code)
 
 
-def ts(value):
-    """GitHub timestamps: '2026-11-01T09:00:00Z', with or without fractions or an offset."""
+def parse_ts(value):
+    """GitHub timestamps: '2026-11-01T09:00:00Z', with or without fractions or an offset.
+    Seconds, or None for no value; an unreadable one raises ValueError."""
     if not value:
         return None
-    v = value.replace("Z", "+00:00")
-    m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?([+-]\d\d:?\d\d)?$", v)
+    m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?([+-]\d\d:?\d\d)?$", value.replace("Z", "+00:00"))
     if not m:
-        die("unreadable timestamp %r; use YYYY-MM-DDTHH:MM:SSZ" % value)
+        raise ValueError(value)
     frac = float(m.group(2)) if m.group(2) else 0.0
     off = (m.group(3) or "+00:00").replace(":", "")
+    return datetime.strptime(m.group(1) + off, "%Y-%m-%dT%H:%M:%S%z").timestamp() + frac
+
+
+def ts(value):
     try:
-        return datetime.strptime(m.group(1) + off, "%Y-%m-%dT%H:%M:%S%z").timestamp() + frac
+        return parse_ts(value)
     except ValueError:
         die("unreadable timestamp %r; use YYYY-MM-DDTHH:MM:SSZ" % value)
 
@@ -248,59 +252,73 @@ def check_rate():
     return core["remaining"]
 
 
+# The kind of each field a record fetch writes can hold (record): text, a whole number, a
+# timestamp, a list of one of those, or a list. A null passes (GitHub can leave a field out),
+# except in a run's id, which must be there, and in the fields read with a default when absent
+# (or, for a job's id, told apart from other jobs by it), which present must hold one.
+TEXT, NUMBER, WHEN = "text", "number", "timestamp"
+RUN_KINDS = {"name": TEXT, "path": TEXT, "event": TEXT, "head_branch": TEXT, "head_sha": TEXT, "head_message": TEXT,
+             "head_repo": TEXT, "conclusion": TEXT, "status": TEXT, "fetch_window": TEXT, "id": NUMBER,
+             "run_attempt": NUMBER, "workflow_id": NUMBER, "created_at": WHEN, "run_started_at": WHEN, "updated_at": WHEN,
+             "pull_requests": [NUMBER], "pull_request_bases": [TEXT], "pull_requests_found": [NUMBER], "jobs": list}
+JOB_KINDS = {"name": TEXT, "conclusion": TEXT, "status": TEXT, "runner_name": TEXT, "runner_group_name": TEXT,
+             "id": NUMBER, "run_attempt": NUMBER, "runner_group_id": NUMBER, "created_at": WHEN, "started_at": WHEN,
+             "completed_at": WHEN, "labels": [TEXT], "steps": list}
+STEP_KINDS = {"name": TEXT, "conclusion": TEXT, "status": TEXT, "number": NUMBER, "started_at": WHEN, "completed_at": WHEN}
+NOT_NULL = {"run_attempt", "jobs", "steps", "id"}
+
+
+def of_kind(v, kind):
+    if v is None:
+        return True
+    if kind is list:
+        return isinstance(v, list)
+    if isinstance(kind, list):
+        return isinstance(v, list) and all(x is not None and of_kind(x, kind[0]) for x in v)
+    if kind == NUMBER:
+        return isinstance(v, int) and not isinstance(v, bool)
+    if not isinstance(v, str):
+        return False
+    try:
+        v.encode("utf-8")  # text the output can be written in: a lone surrogate (an escaped \ud800) can't
+        if kind == WHEN:
+            parse_ts(v)
+    except ValueError:
+        return False
+    return True
+
+
 def shape_problem(r):
     """What makes a record not one fetch writes, or None. Read before any line uses it: main
     crashed on such records at whichever line first touched them, so each reading stops here."""
     if not isinstance(r, dict):
         return "isn't a JSON object"
-    def text(v):
-        # Text the output can be written in: a lone surrogate (from an escaped \ud800) can't.
-        if v is None:
-            return True
-        if not isinstance(v, str):
-            return False
-        try:
-            v.encode("utf-8")
-        except UnicodeEncodeError:
-            return False
-        return True
-    number = lambda v: v is None or (isinstance(v, int) and not isinstance(v, bool))
-    def when(v):
-        if v is not None and not isinstance(v, str):
-            return False
-        ts(v)  # an unreadable one stops, naming it
-        return True
-    if not isinstance(r.get("created_at"), str) or not r["created_at"] or not when(r["created_at"]):
+    if not isinstance(r.get("created_at"), str) or not r["created_at"]:
         return "has no creation time"
-    bad = ([k for k in ("name", "path", "event", "head_branch", "head_sha", "head_message", "head_repo", "conclusion",
-                        "status", "fetch_window") if not text(r.get(k))]
-           + [k for k in ("id", "run_attempt", "workflow_id") if not number(r.get(k))]
-           # Read with a default when absent, so present they must hold one.
-           + [k for k in ("run_attempt", "jobs") if k in r and r[k] is None]
-           + [k for k in ("run_started_at", "updated_at") if not when(r.get(k))]
-           + [k for k, ok in (("pull_requests", number), ("pull_request_bases", text), ("pull_requests_found", number))
-              if r.get(k) is not None and not (isinstance(r[k], list) and all(x is not None and ok(x) for x in r[k]))])
-    jobs = r.get("jobs")
-    if jobs is not None and not isinstance(jobs, list):
-        bad.append("jobs")
-    for j in jobs if isinstance(jobs, list) else []:
+    bad, unreadable = [], []
+
+    def check(rec, kinds, prefix):
+        for k, kind in kinds.items():
+            v = rec.get(k)
+            if (k in NOT_NULL and k in rec and v is None) or (k == "id" and v is None and not prefix):
+                bad.append(prefix + k)
+            elif not of_kind(v, kind):
+                (unreadable if kind == WHEN and isinstance(v, str) else bad).append(prefix + k)
+    check(r, RUN_KINDS, "")
+    for j in r["jobs"] if isinstance(r.get("jobs"), list) else []:
         if not isinstance(j, dict):
             bad.append("a job")
             continue
-        bad += (["job " + k for k in ("name", "conclusion", "status", "runner_name", "runner_group_name") if not text(j.get(k))]
-                + ["job " + k for k in ("id", "run_attempt", "runner_group_id") if not number(j.get(k))]
-                + ["job " + k for k in ("created_at", "started_at", "completed_at") if not when(j.get(k))]
-                + ["job " + k for k in ("run_attempt", "steps") if k in j and j[k] is None])
-        if j.get("labels") is not None and not (isinstance(j["labels"], list) and all(isinstance(x, str) and text(x) for x in j["labels"])):
-            bad.append("job labels")
-        steps = j.get("steps")
-        if steps is not None and not isinstance(steps, list):
-            bad.append("job steps")
-        for s in steps if isinstance(steps, list) else []:
-            if not isinstance(s, dict) or not all(text(s.get(k)) for k in ("name", "conclusion", "status")) \
-                    or not number(s.get("number")) or not all(when(s.get(k)) for k in ("started_at", "completed_at")):
+        check(j, JOB_KINDS, "job ")
+        for s in j["steps"] if isinstance(j.get("steps"), list) else []:
+            if isinstance(s, dict):
+                check(s, STEP_KINDS, "step ")
+            else:
                 bad.append("a step")
-    return ("has a field of the wrong kind: " + ", ".join(sorted(set(bad)))) if bad else None
+    why = ["has a field of the wrong kind: " + ", ".join(sorted(set(bad)))] if bad else []
+    if unreadable:
+        why.append("has an unreadable timestamp (fetch writes YYYY-MM-DDTHH:MM:SSZ): " + ", ".join(sorted(set(unreadable))))
+    return "; ".join(why) or None
 
 
 def read_runs(path, saved_ok=True, need_jobs=True):
@@ -1119,8 +1137,10 @@ def cmd_split(a):
     # branch and commit, so it isn't counted again; for counting only.
     numbered = {(rs[0].get("head_repo"), rs[0].get("head_branch"), sha) for pr, by_head in pushes.items()
                 if all(isinstance(x, int) for x in pr) for sha, rs in by_head.items()}
-    commits = {(pr, sha) for pr, by_head in pushes.items() for sha, rs in by_head.items()
-               if all(isinstance(x, int) for x in pr) or (rs[0].get("head_repo"), rs[0].get("head_branch"), sha) not in numbered}
+    counted = {pr: [sha for sha, rs in by_head.items() if all(isinstance(x, int) for x in pr)
+                    or (rs[0].get("head_repo"), rs[0].get("head_branch"), sha) not in numbered]
+               for pr, by_head in pushes.items()}
+    commits = {(pr, sha) for pr, shas in counted.items() for sha in shas}
     out["pr_commits"] = len(commits)
     out["pr_runs_keyed_by_branch"] = guessed
     out["runs_per_day"] = round(len(commits) / span_days, 1) if span_days >= 1 and commits else None
@@ -1254,9 +1274,7 @@ def cmd_split(a):
 
     # Runs per pull request (pushes that each paid for CI).
     # A group keyed by branch counts only its commits no numbered run already counts.
-    counts = [n for n in (len([sha for sha, rs in by_head.items() if all(isinstance(x, int) for x in pr)
-                               or (rs[0].get("head_repo"), rs[0].get("head_branch"), sha) not in numbered])
-                          for pr, by_head in pushes.items()) if n]
+    counts = [len(shas) for shas in counted.values() if shas]
     out["pushes_per_pr_median"] = median(counts)
     out["pushes_per_pr_max"] = max(counts) if counts else None
 
@@ -1364,10 +1382,11 @@ def cmd_split(a):
                   % (len(names), len(cross), fmt(out["wait_all_workflows_median"]), label, fmt(value),
                      " (provisional: under %d commits)" % P95_FIRM if out["wait_all_workflows_provisional"] else ""))
         else:
-            print("PR wait across workflows: no commit has passing runs of two or more workflows here")
+            print("PR wait across workflows: no %scommit has passing runs of two or more workflows here"
+                  % ("other " if unplaced else ""))
     if unplaced:
-        print("PR wait across workflows: %d commits left out: a run with no workflow file, so which workflows"
-              " ran is unknown" % unplaced)
+        print("PR wait across workflows: %d commit%s left out: a run with no workflow file, so which workflows"
+              " ran is unknown" % (unplaced, "" if unplaced == 1 else "s"))
     sp, share = out["slowest_path_split"], out["slowest_path_share"]
     print("slowest path%s: the chain of jobs that decided when each run ended, called"
           " workflows' jobs included, read from the jobs' times (check it against `needs:`)."
@@ -1560,13 +1579,6 @@ def run_failed(r):
     return r.get("conclusion") != "success" or (r.get("run_attempt") or 1) > 1 or jobs_failed
 
 
-def first_jobs(run):
-    """Jobs of the run's first attempt: where the push was routed. A rerun's later attempt
-    can land elsewhere without saying anything about the push."""
-    first = min((j.get("run_attempt", 1) for j in run.get("jobs", [])), default=1)
-    return [j for j in run.get("jobs", []) if j.get("run_attempt", 1) == first]
-
-
 def runner_key(j):
     """A job's runner as the label checks read it: its labels, sorted."""
     return tuple(sorted(j.get("labels") or []))
@@ -1719,9 +1731,9 @@ def cmd_compare(a):
         die("--min-runs can't go below %d: with fewer runs a side, a 95%% interval can"
             " hardly or never rule out no change" % MIN_RUNS)
     # Runs where the --ran job asked for a runner, in any attempt (a request the queue cancelled
-    # still shows where the push was sent), or with got, where it got one.
-    ran_any2 = lambda r, got=False: any(j.get("name") == a.ran and (on_a_runner(j) if got else executed(j))
-                                        for j in r.get("jobs", []))
+    # still shows where the push was sent), and runs where it got one.
+    asked_ran = lambda r: any(j.get("name") == a.ran and executed(j) for j in r.get("jobs", []))
+    got_ran = lambda r: any(j.get("name") == a.ran and on_a_runner(j) for j in r.get("jobs", []))
     # --ran's timed runs: as main chose them, where that job ran (not skipped, with a start time)
     # in the final attempt. Choosing fewer, say only jobs that got a runner, could leave out
     # the run main refuses on.
@@ -1732,7 +1744,7 @@ def cmd_compare(a):
     tb, ta = timed_runs(rb, a, "before", excluded, ran_job), timed_runs(ra, a, "after", excluded, ran_job)
     cb, ca = [x[0] for x in tb], [x[0] for x in ta]
     before, after = [x[1] for x in tb], [x[1] for x in ta]
-    if a.ran and not any(ran_any2(r) for r in rb + ra if workflow_matches(r, a.workflow)):
+    if a.ran and not any(asked_ran(r) for r in rb + ra if workflow_matches(r, a.workflow)):
         die("no run ran a job named %r" % a.ran)
     # The selection the failure check reads: every run of the workflow and event, any
     # outcome. The runner, job and cache filters choose only which runs are timed.
@@ -1744,7 +1756,7 @@ def cmd_compare(a):
     # base, any outcome, and with --ran the runs where that job asked for a runner in some
     # attempt (the routing count: where it got one). Not by cache state: a runner seen only on
     # the other state shows where the pushes went (as the label check always read).
-    selected = lambda rs, got=False: [r for r in rs if in_workflow(r) and (not a.ran or ran_any2(r, got))]
+    selected = lambda rs, ran=asked_ran: [r for r in rs if in_workflow(r) and (not a.ran or ran(r))]
     # The runs the per-job and whole-run runner checks read, as before: every green run of
     # the cohort, timed or not (a canary that fails on one pool keeps its runs from being
     # timed, so which pushes went there decides which are timed), reruns included, by their
@@ -1753,15 +1765,18 @@ def cmd_compare(a):
     # main read (a job cancelled in the queue still counts, so its run's other jobs are read).
     did_job = lambda r: not a.job or any(j.get("name") == a.job for j in latest_jobs(r) if executed(j))
     routed = lambda rs: [r for r in rs if workflow_matches(r, a.workflow) and r.get("conclusion") == "success"
-                         and not outside_cohort(r, a, cache) and did_job(r) and (not a.ran or ran_any2(r))]
+                         and not outside_cohort(r, a, cache) and did_job(r) and (not a.ran or asked_ran(r))]
     where = lambda r: "run %s%s" % (r.get("id"), ", a rerun" if (r.get("run_attempt") or 1) > 1 else "")
     # Runner groups (two can share every label; GitHub names each job's, and fetch saves it
-    # from 0.4 on) count only when every job that got a runner, in every run these checks
-    # read, has a known one: partial evidence can't say a group is the same or different.
-    # Otherwise the runners compare by labels alone, and the output says so.
+    # from 0.4 on) count only when every job these checks read that got a runner, in every run
+    # they read, has a known one: partial evidence can't say a group is the same or different.
+    # Otherwise the runners compare by labels alone, and the output says so. A job's own
+    # duration (--job without --end) is checked on that job alone, so only its group counts.
+    checked_job = lambda j: not a.job or a.end or j.get("name") == a.job
     read = list({j.get("id", id(j)): j for r in selected(rb) + selected(ra) + routed(rb) + routed(ra)
                  for j in latest_jobs(r) if on_a_runner(j)}.values())
-    unknown = sum(1 for j in read if j.get("runner_group_id") is None)
+    checked_jobs = [j for j in read if checked_job(j)]
+    unknown = sum(1 for j in checked_jobs if j.get("runner_group_id") is None)
     groups = bool(read) and not unknown
     # Labels as before, every job that asked for a runner; groups only for jobs that got one.
     key = lambda j: (runner_key(j), None)
@@ -1822,9 +1837,10 @@ def cmd_compare(a):
                                                  for k in sorted(sets, key=str))))
         for name, by_label in set(jb) & set(ja):
             if jb[(name, by_label)] != ja[(name, by_label)]:
+                at = lambda seen, first: "; ".join("%s, first in %s" % (show(k), where(first[(name, k)]))
+                                                   for k in sorted(seen[(name, by_label)], key=str))
                 die("job %r ran on %s before and %s after; a runner change isn't a code speedup"
-                    % (name, "; ".join(sorted(map(show, jb[(name, by_label)]), key=str)),
-                       "; ".join(sorted(map(show, ja[(name, by_label)]), key=str))))
+                    % (name, at(jb, fb_), at(ja, fa_)))
     if comparable and (not a.job or a.end):
         # Timing whole runs, or a job's end on the run's clock (the jobs before it count):
         # every routed run must have run on the same set of runners, or a shift between pools
@@ -1859,7 +1875,7 @@ def cmd_compare(a):
     # whose work counts in the mix); the counts reported are the timed runs'.
     candidates = lambda rs: [r for r in rs if workflow_matches(r, a.workflow) and r.get("conclusion") == "success"
                              and not outside_cohort(r, a, cache) and not run_failed(r) and did_job(r)
-                             and (not a.ran or ran_any2(r))]
+                             and (not a.ran or asked_ran(r))]
     mb_, ma_ = mix(cb), mix(ca)
     mcb, mca = mix(candidates(rb)), mix(candidates(ra))
     sets = {"before": [{"jobs": list(k), "runs": n} for k, n in mb_],
@@ -2023,6 +2039,9 @@ def cmd_compare(a):
     if fewer < a.min_runs:
         res["verdict_code"] = "not_enough_runs"
         res["verdict"] = "not enough runs yet (%s; %d a side needed)" % (runs, a.min_runs)
+        if a.ran and not (cb and ca):
+            res["verdict"] += ": no successful timed run ran a job named %r %s" % (
+                a.ran, "on either side" if not cb + ca else "before" if not cb else "after")
     elif fails_rose(fb, fa):
         res["verdict_code"] = "not_valid"
         res["verdict"] = "not valid: more runs fail after (%d of %d) than before (%d of %d)" % (fa + fb)
@@ -2126,7 +2145,7 @@ def cmd_compare(a):
         # tested one-sided at 5% as the reach counts are, changes which pushes are timed.
         def off_runner(rs, in_state):
             n = x = 0
-            for r in selected(rs, True):
+            for r in selected(rs, got_ran):
                 if in_state and a.cache and cache.get(str(r["id"])) != a.cache:
                     continue  # within the selected cache state: the timed runs' state
                 # Runs where it got a runner, in any attempt (a job cancelled in the queue never
@@ -2286,7 +2305,7 @@ def cmd_compare(a):
     if not groups:
         print("runner groups: not compared, since %d of the %d jobs read have none saved (a file from an older"
               " measure.py, or none reported), so a shift between groups that share these labels can't be"
-              " seen; fetch again with this measure.py to check them" % (unknown, len(read)))
+              " seen; fetch again with this measure.py to check them" % (unknown, len(checked_jobs)))
     print("cancelled runs, in neither the timings nor the failure rate: before %d of %d, after %d of %d%s"
           % (res["cancelled_before"] + res["cancelled_after"] + (
               " (a larger share after: slow runs being cancelled can pass for a speedup; say so)"
@@ -2491,6 +2510,41 @@ def show_test(t):
     return "::".join(x for x in [where, "/".join(suites)] + parts[2:] if x)
 
 
+ABSOLUTE = re.compile(r"^(?:/|[A-Za-z]:[\\/])")
+
+
+def checkout_moved(before, after):
+    """Two absolute file paths, one only before and one only after, that differ only above a
+    shared folder and file name: (before's part above it, after's), or None. A report that names
+    files by absolute path names its checkout's folder, so a test run from another folder (on
+    another runner, say) reads as moved."""
+    def paths(keys):
+        out, todo = set(), [json.loads(k) for k in keys]
+        while todo:
+            x = todo.pop()
+            if isinstance(x, list):
+                todo += x
+            elif isinstance(x, str) and ABSOLUTE.match(x):
+                out.add(x)
+        return out
+    b, c = paths(before), paths(after)
+    split = lambda p: re.split(r"[\\/]", p)
+    tails = {}
+    for q in sorted(c - b):
+        if len(split(q)) > 2:
+            tails.setdefault(tuple(split(q)[-2:]), q)
+    for p in sorted(b - c):
+        q = tails.get(tuple(split(p)[-2:]))
+        if q:
+            n = 2
+            while n < min(len(split(p)), len(split(q))) and split(p)[-n - 1] == split(q)[-n - 1]:
+                n += 1
+            cut = lambda x: x[:len(x) - len("/".join(split(x)[-n:]))]
+            if cut(p) and cut(q):
+                return cut(p), cut(q)
+    return None
+
+
 def cmd_tests(a):
     (b, eb, xb), (c, ec, xc) = junit_results(a.before), junit_results(a.after)
     if not b or not c:
@@ -2524,7 +2578,19 @@ def cmd_tests(a):
            "newly_skipped": [show_test(t) for t in newly_skipped],
            "new_failures": [label(t, k, k) for t, k in new_fail],
            "new_suite_errors": [show_test(s) + (" (%d)" % k if k > 1 else "") for s, k in suite_errors],
-           "verdict": "tests kept" if ok else "FAIL: tests lost or newly failing"}
+           "verdict": "tests kept" if ok else "FAIL: tests lost or newly failing", "notes": []}
+    # What the ids can't tell, said where it could change the reading.
+    if any(len(json.loads(k)) == 6 and json.loads(k)[3] in FAILED_TAGS for k in ec):
+        res["notes"].append(
+            "suite errors are matched by kind and by message with its numbers blanked: two that differ only in a"
+            " number (fixtures/http/401 and /403) read as one, and a message that holds a generated name (a"
+            " temporary folder) reads as a new error. Read both reports' messages before calling one kept or new")
+    moved = checkout_moved(list(b) + list(eb), list(c) + list(ec))
+    if moved:
+        res["notes"].append(
+            "the reports name files by absolute path, and some differ only in the folder above them (%s before,"
+            " %s after): a test run from another checkout folder (another runner) reads as moved. Compare reports"
+            " from one folder, or with paths relative to the checkout, before calling such a test lost" % moved)
     if a.json:
         print(json.dumps(res, indent=2))
     else:
@@ -2539,6 +2605,8 @@ def cmd_tests(a):
                 print("  new failure, passed only on a retry: " + show_test(s).replace("::(retried)", ""))
             else:
                 print("  new suite error: " + show_test(s) + ("" if k == 1 else " (%d new)" % k))
+        for n in res["notes"]:
+            print("note: " + n)
         print("verdict: " + res["verdict"])
     sys.exit(0 if ok else 1)
 
