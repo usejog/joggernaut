@@ -108,13 +108,13 @@ in `references/measuring.md`.
    (so a rerun and the wait for it count), keeping each workflow's first run
    within 24 hours of that (a cut-off the script chooses, so a pull request reopened days later doesn't stretch the wait), and a commit's workflows may have tested different bases; a commit missing a required workflow can still
    count, and its clock isn't the single-workflow line's. Split each
-   workflow too (`--workflow NAME`, the name or the file name) to see its jobs. A saving in one
+   workflow too (`--workflow NAME`) to see its jobs. A saving in one
    workflow shortens the wait only if that workflow finishes last for the
    commit, so rank against the last required finish across workflows;
    where the cross-workflow line doesn't cover every required workflow,
    give each workflow's saving and say the pull-request-wide rank is
-   unknown. If two workflow files share a name, split each by its file name
-   (`--workflow ci.yml`): its other lines pool them.
+   unknown. If two workflow files share a name, the split pools them: fetch
+   and split them apart.
 
    It reads jobs through the jobs API, because `gh run view` lacks a job's
    creation time and so can't show queue wait.

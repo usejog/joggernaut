@@ -912,23 +912,10 @@ def cmd_split(a):
             r["path"] = id_path[r["workflow_id"]]
     # (fetch saves a run's file and id together; a run with an id and no file comes only from
     # a hand-built file, and is taken as its id's workflow.)
-    # --workflow names a file (ci.yml) when one of the runs' files has that name, else a
-    # display name: never both, so a file and another file's display name don't pool.
-    files = {os.path.basename(r.get("path") or "") for r in every}
-    by_file = bool(a.workflow) and a.workflow in files
-    if by_file and any(r.get("name") == a.workflow and r.get("path")
-                       and os.path.basename(r["path"]) != a.workflow for r in every):
-        # Main read X as a display name: reading it as the file here would drop that
-        # workflow's runs, failures included. Neither reading is safe to pick.
-        die("--workflow %s names a workflow file and another file's display name; rename one, or"
-            " split the file by workflow first" % a.workflow)
-    runs = [r for r in every if not a.workflow or (os.path.basename(r.get("path") or "") == a.workflow
-                                                     if by_file else r.get("name") == a.workflow)]
-    # By file, a run saved with no file but with one of that file's display names can't be
-    # placed: it still counts (its failure could be this workflow's), and is said first.
-    shown = {r.get("name") for r in runs} | {a.workflow}
-    unplaced_runs = [r for r in every if by_file and not r.get("path") and r.get("name") in shown]
-    runs += unplaced_runs
+    # --workflow selects by display name, as it always has: a file name would read runs the
+    # display name doesn't, and could leave out a failed run of a workflow named so. Two files
+    # that share a name are told apart only in the wait across workflows.
+    runs = [r for r in every if not a.workflow or r.get("name") == a.workflow]
     if not runs:
         die("no runs to read")
     # PR wait over successful runs, as compare measures it.
@@ -941,7 +928,6 @@ def cmd_split(a):
     ended = [r for r in runs if r.get("conclusion") in ("success",) + FAILED]
     passed = sum(1 for r in ended if r.get("conclusion") == "success")
     out["passed_runs"], out["ended_runs"] = passed, len(ended)
-    out["runs_named_without_file"] = len(unplaced_runs)
     out["passed_after_rerun"] = sum(1 for r in ended if r.get("conclusion") == "success"
                                     and (r.get("run_attempt") or 1) > 1)
     out["cancelled_runs"] = sum(1 for r in runs if r.get("conclusion") == "cancelled")
@@ -1236,9 +1222,6 @@ def cmd_split(a):
     counts = ("%d of %d runs that passed or failed passed (%.0f%%), %d of them on attempt 2 or later;"
               " %d cancelled, left out" % (passed, len(ended), 100 * (out["pass_rate"] or 0),
                                            out["passed_after_rerun"], out["cancelled_runs"]))
-    if unplaced_runs:
-        print("%d runs with one of %s's display names have no workflow file saved, so they can't be told apart"
-              " from another file's: counted with it (fetch again to save the file)" % (len(unplaced_runs), a.workflow))
     if not ended:
         print("no run here passed or failed (%d cancelled)" % out["cancelled_runs"])
     elif out["pass_rate"] < 0.5:
