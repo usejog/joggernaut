@@ -3263,6 +3263,13 @@ with tempfile.TemporaryDirectory() as t:
     v, r = _cmp(t, side(100, 100, ["2026-09-30"]), side(200, 50, "2026-10-01..2026-10-08"))
     if "error" not in v or "give a file fetch wrote" not in r.stderr:
         bad.append("compare #22: a window that isn't text was read: %r\n%s" % (v, r.stderr[-300:]))
+    # An empty window is no window; a side where only some runs record one compares, unrecorded.
+    v, r = _cmp(t, side(100, 100, ""), side(200, 50, "2026-10-01..2026-10-08"))
+    if "error" not in v or "without --created" not in r.stderr:
+        bad.append("compare #22: an empty window wasn't refused: %r" % v)
+    v, r = _cmp(t, side(100, 100)[:3] + side(103, 100, "2026-09-01..2026-09-30")[:3], side(200, 50, "2026-10-01..2026-10-08"))
+    if v.get("fetch_windows") is not None or v.get("verdict_code") != "faster":
+        bad.append("compare #22: a side where some runs record no window: %r %r" % (v.get("fetch_windows"), v.get("verdict_code")))
     v, r = _cmp(t, side(100, 100), side(200, 50))
     text = run([M, "compare", "--before", t + "/b", "--after", t + "/a"]).stdout
     if v.get("fetch_windows") is not None or v.get("verdict_code") != "faster" or "not recorded" not in text:
@@ -3281,8 +3288,24 @@ with tempfile.TemporaryDirectory() as t:
     v, r = _cmp(t, before, after, "--job", "test")
     v2, r2 = _cmp(t, before, steps(side(400, 50), skip_at=(2, "site")), "--job", "test")
     if v.get("verdict_code") != "faster" or v2.get("verdict_code") != "faster_work_differs" \
-            or v2.get("work_sets", {}).get("steps") != [1, 2]:
+            or v2.get("work_sets", {}).get("steps") != [1, 2] or "changed with the change" in v2.get("verdict", ""):
         bad.append("compare #36: a step skipped in one timed run: %r %r" % (v.get("verdict_code"), v2))
+    # Workload review: one set of steps a side but not the same (the change added or dropped a
+    # step) is the workflow's diff to explain, as for jobs; with --job and over every job.
+    every_skips = lambda rows: steps(rows, skip_at=None) and [
+        dict(x, jobs=[dict(x["jobs"][0], steps=x["jobs"][0]["steps"][:1])]) for x in rows]
+    for flags in (("--job", "test"), ()):
+        v, r = _cmp(t, before, every_skips(side(400, 50)), *flags)
+        if v.get("verdict_code") != "faster_work_differs" or v.get("work_sets", {}).get("steps") != [1, 1] \
+                or "workflow's diff explains every difference" not in v.get("verdict", "") \
+                or "did different work" in v.get("verdict", ""):
+            bad.append("compare #36 %s: one set of steps a side, not the same: %r" % (flags, v))
+    # ... but where the jobs changed too, _jobs_changed already says so: no second qualification.
+    two_jobs = [dict(x, jobs=x["jobs"] + [dict(x["jobs"][0], id=x["jobs"][0]["id"] + 1, name="lint")])
+                for x in every_skips(side(400, 50))]
+    v, r = _cmp(t, before, two_jobs)
+    if v.get("verdict_code") != "faster_jobs_changed":
+        bad.append("compare #36: steps that changed with the jobs qualified twice: %r" % v.get("verdict_code"))
     xml = lambda names: '<testsuite name="s" tests="%d">%s</testsuite>' % (
         len(names), "".join('<testcase classname="c" name="%s"/>' % n for n in names))
     def reports(rows, odd=None):

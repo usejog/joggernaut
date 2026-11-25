@@ -2039,23 +2039,28 @@ def cmd_compare(a):
             die("--tests: the JUnit reports in %s ran no test for timed run %s" % (folder, r["id"]))
         return ran
     inner = [("steps", steps_of)] + ([("tests", tests_of)] if a.tests else [])
-    res["work_sets"] = {k: [len({f(r, j) for r, _, j in tb}), len({f(r, j) for r, _, j in ta})]
-                        for k, f in inner} if comparable else {}
-    # Across the sides only where the jobs were the same (_jobs_changed already says they weren't).
-    differs = [k for k, f in inner if comparable and (
-        len({f(r, j) for r, _, j in tb}) > 1 or len({f(r, j) for r, _, j in ta}) > 1
-        or (len({f(r, j) for r, _, j in tb + ta}) > 1 and not (k == "steps" and graph_changed)))]
-    if differs and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
+    # Each side's sets, read once (a test report is parsed once per timed run).
+    sets = {k: ({f(r, j) for r, _, j in tb}, {f(r, j) for r, _, j in ta}) for k, f in inner} if comparable else {}
+    res["work_sets"] = {k: [len(b), len(a_)] for k, (b, a_) in sets.items()}
+    # Within a side, the timed runs did different work: a median moves with the mix. One set a
+    # side but not the same: the change changed the work, which the workflow's diff must explain;
+    # for steps, only where the jobs were the same (_jobs_changed already says they weren't).
+    within = [k for k, (b, a_) in sets.items() if len(b) > 1 or len(a_) > 1]
+    across = [k for k, (b, a_) in sets.items()
+              if k not in within and len(b | a_) > 1 and not (k == "steps" and graph_changed)]
+    where = "job %s" % a.job if a.job else "their jobs"
+    if (within or across) and res["verdict_code"] not in ("not_enough_runs", "not_valid"):
         res["verdict_code"] += "_work_differs"
-        res["verdict"] += ("; but the timed runs did different work inside %s (%s): a step's `if:`, a cache"
-                           " state or a test selection that varies by pull request moves a median with the"
-                           " mix; compare runs that did the same work, or name why before calling it faster"
-                           % ("job %s" % a.job if a.job else "their jobs", "; ".join(
-                               "%s: %d sets before, %d after%s" % (k, res["work_sets"][k][0], res["work_sets"][k][1],
-                                                                 "" if len({f(r, j) for r, _, j in tb}) > 1
-                                                                 or len({f(r, j) for r, _, j in ta}) > 1
-                                                                 else ", one a side but not the same")
-                               for k, f in inner if k in differs)))
+        if within:
+            res["verdict"] += ("; but the timed runs did different work inside %s (%s): a step's `if:`, a cache"
+                               " state or a test selection that varies by pull request moves a median with the"
+                               " mix; compare runs that did the same work, or report the timings as unverified"
+                               % (where, "; ".join("%s: %d sets before, %d after" % (k, len(sets[k][0]), len(sets[k][1]))
+                                                   for k in within)))
+        if across:
+            res["verdict"] += ("; but the %s inside %s changed with the change (one set a side, not the same): a"
+                               " speed verdict holds only if the workflow's diff explains every difference;"
+                               " otherwise the work changed, not its speed" % (" and ".join(across), where))
     if a.end and comparable:
         # Beside a job's end on the run's clock, its own duration in the same runs (#36): an end
         # that moved while the job's own time didn't moved with what ran before it.

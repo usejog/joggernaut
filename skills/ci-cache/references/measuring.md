@@ -142,7 +142,7 @@ finish keeps the fastest of the window and can pass for a speedup with no
 change at all. `fetch` records its window on each run (`fetch_window`), and
 `compare` refuses a side fetched without `--created`; a file that records
 none (an older `measure.py`'s, or one built by hand) is compared, with a
-line saying how its sides were read is unknown.
+line saying how its sides were read isn't known.
 
 Runs that ran different jobs did different work. `compare` reads a run's
 work, as far as the jobs list shows it, as the set of jobs it ran (names
@@ -184,9 +184,16 @@ verdict ends in `_work_differs`. The same check runs on steps, always: when
 the timed jobs didn't all run the same steps (an `if:` on a step, such as a
 site build on some paths; the run file records each step's conclusion), the
 verdict ends in `_work_differs`, and `work_sets` gives the count of sets a
-side. Either way a median moves with the mix: compare runs that did the same
-work, or report the timings as unverified; don't build files that drop rows
-(the failure rate must read every run). A step a cache hit skips is the cache's
+side. Where a side holds more than one set, a median moves with the mix:
+compare runs that did the same work, or report the timings as unverified;
+don't build files that drop rows (the failure rate must read every run).
+Where each side holds one set but not the same one, the change itself
+changed the work (it added, dropped or renamed a step): as with
+`_jobs_changed`, the verdict holds only if the workflow's diff explains
+every difference. A test's name includes its report's path inside the run's
+folder, as in `tests`, so save each run's reports under the same names (not
+named by run id or commit), and a step named with a per-run expression
+makes each run its own set. A step a cache hit skips is the cache's
 effect: time hits and misses apart, each with both options
 (`--cache-state STATE.json --cache hit`, then `--cache-state STATE.json --cache miss`). `compare` also counts each side's runs cancelled with no
 failure (a newer push, a concurrency group): they are in neither the
