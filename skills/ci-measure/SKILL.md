@@ -254,7 +254,12 @@ under a merge-commit policy, ask before adding them.
    or any new failure appeared: a test failing, a test that now passes only on a retry, or a rise in suite errors (by kind, or in a suite's declared errors and failures, at any level), and refuses an empty report, a before report where no test ran or only errors show (a collection failure), and one that declares more skips than its cases mark. A test that ran (passed, or failed an assertion) and now shows only an error counts as stopped running: an error alone doesn't show its body ran. A test is known by its report's path (shard numbers
    blanked), its suite and every suite around it, class, file (its own, or
    the nearest suite's) and name, so a removed test can't hide behind an added one with another
-   name; two tests that share all of these can't be told apart. The result
+   name; two tests that share all of these can't be told apart. A suite error
+   is known by its kind and message with numbers blanked, so two that differ only
+   in a number read as one, and one whose message holds a generated name (a
+   temporary folder) reads as new; a file named by absolute path names the
+   checkout's folder, so a test run from another folder reads as moved. The
+   output adds a note when either could change the reading. The result
    covers only the reports downloaded: say which jobs and matrix legs they
    came from on each side. A missing test or a new failure fails the
    change, however much faster it is. Say so plainly, and name the tests.
