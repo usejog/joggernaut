@@ -88,7 +88,7 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("split: runs a day wrong: %r" % clean.get("runs_per_day"))
     second = []
     for row in rows:
-        c = copy.deepcopy(row); c["id"] += 200000; c["name"] = "E2E"
+        c = copy.deepcopy(row); c["id"] += 200000; c["name"] = "E2E"; c["path"] = ".github/workflows/e2e.yml"
         for j in c["jobs"]:
             j["completed_at"] = j["completed_at"].replace("T", "T", 1)
         second.append(c)
@@ -1049,6 +1049,10 @@ from datetime import datetime as _dt, timezone as _tz
 
 def _at(t):
     return _dt.fromtimestamp(1793000000 + t, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ts_of(stamp):
+    return int(_dt.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc).timestamp()) - 1793000000
 
 
 def _job(name, queued, started, done, setup=10, conclusion="success"):
@@ -2138,10 +2142,12 @@ if mm.run_minutes(two) != 2 or abs(mm.run_minutes(two, True) - 2.0) > 1e-9:
 def _job_steps(spans, end):
     return {"created_at": _at(0), "started_at": _at(0), "completed_at": _at(end), "name": "j",
             "steps": [{"name": n, "started_at": _at(a), "completed_at": _at(b)} for n, a, b in spans]}
-if not mm.steps_overlap(_job_steps([("a", 0, 50), ("b", 20, 60)], 120)):
-    bad.append("steps_overlap: 0-50 and 20-60 overlap")
-if mm.steps_overlap(_job_steps([("a", 0, 50), ("b", 50, 60), ("c", 60, 61)], 120)):
-    bad.append("steps_overlap: steps one after another don't overlap")
+if mm.overlap_seconds(_job_steps([("a", 0, 50), ("b", 20, 60)], 120)) != 30:
+    bad.append("overlap_seconds: 0-50 and 20-60 overlap for 30 s")
+if mm.overlap_seconds(_job_steps([("a", 0, 50), ("b", 50, 60), ("c", 60, 61)], 120)) != 0:
+    bad.append("overlap_seconds: steps one after another don't overlap")
+if mm.overlap_seconds(_job_steps([("a", 0, 60), ("b", 10, 30), ("c", 20, 40)], 120)) != 30:
+    bad.append("overlap_seconds: a three-way overlap counts once")
 got = mm.job_split(_job_steps([("Set up job", 0, 2), ("a", 2, 60), ("b", 2, 60)], 60))
 if got["running"] != 58 or got["setup"] != 2 or got["other"] != 0:
     bad.append("job_split: parallel steps must count elapsed time, not their sum: %r" % got)
@@ -2366,8 +2372,8 @@ with tempfile.TemporaryDirectory() as t:
 got = mm.job_split(_job_steps([("Test", 0, 70)], 60))
 if got["running"] != 60:
     bad.append("job_split: a step's time must be clipped to its job: %r" % got)
-if mm.steps_overlap(_job_steps([("a", 0, 60), ("b", 20, 20)], 60)):
-    bad.append("steps_overlap: a zero-length step overlaps nothing")
+if mm.overlap_seconds(_job_steps([("a", 0, 60), ("b", 20, 20)], 60)):
+    bad.append("overlap_seconds: a zero-length step overlaps nothing")
 ch = [_steps_job("work", 0, 1, [("Test", 100)]), _steps_job("report", 102, 103, [("Set up job", 1), ("Post results", 120)])]
 if mm.tail_gates(_run(0, ch, 0), ch)[0]:
     bad.append("tail_gates: a 120 s step named Post results was taken for runner cleanup")
@@ -3158,6 +3164,312 @@ with tempfile.TemporaryDirectory() as t:
         bad.append("compare #35: job_sets and timings count different runs: %r %r" % (v.get("job_sets"), v.get("before_runs")))
 
 
+# split: workflows by file (#7), pull_request_target (#14), mixed headline groups (#23),
+# steps clipped to their job and overlap by how much (#35).
+def _split(t, rows, *flags):
+    open(t + "/runs.jsonl", "w").write("".join(json.dumps(x) + "\n" for x in rows))
+    r = run([M, "split", "--in", t + "/runs.jsonl"] + list(flags))
+    return r
+
+
+with tempfile.TemporaryDirectory() as t:
+    # #7: a.yml and b.yml are both named CI; b fails. With a passing Lint, the commit didn't pass.
+    rows = []
+    for k, (path, name, ok) in enumerate((("a.yml", "CI", True), ("b.yml", "CI", False), ("lint.yml", "Lint", True))):
+        x = _run(k, [_job("test", 100 * k, 100 * k + 1, 100 * k + 60, conclusion="success" if ok else "failure")],
+                 100 * k, name=name)
+        x.update(path=".github/workflows/" + path, conclusion="success" if ok else "failure",
+                 head_sha="%040d" % 7, pull_requests=[7], head_branch="b7")
+        rows.append(x)
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 0 or len(got.get("workflows") or []) != 3:
+        bad.append("split #7: two files named CI, one failing, counted as a passing commit: %r %r"
+                   % (got.get("wait_all_workflows_commits"), got.get("workflows")))
+    # #7: a commit with a run that names no workflow file is left out, not counted as two workflows.
+    rows2 = copy.deepcopy(rows[:1]) + copy.deepcopy(rows[:1])
+    rows2[1].update(id=rows2[1]["id"] + 50, created_at=_at(3600), run_started_at=_at(3600))
+    del rows2[1]["path"]
+    got = json.loads(_split(t, rows2, "--json").stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 0 or got.get("wait_all_workflows_unplaced_commits") != 1 \
+            or len(got.get("workflows") or []) != 1 or "1 commits left out" not in _split(t, rows2).stdout:
+        bad.append("split #7: a run with no workflow file made a second workflow: %r %r"
+                   % (got.get("wait_all_workflows_commits"), got.get("wait_all_workflows_unplaced_commits")))
+    # ... unless its workflow id was saved: then that is its workflow.
+    rows_id = copy.deepcopy(rows2)
+    rows_id[0]["workflow_id"], rows_id[1]["workflow_id"] = 17, 35
+    rows_id[1]["name"] = "Lint"
+    legacy = copy.deepcopy(rows_id[1])
+    legacy.update(id=legacy["id"] + 700, path=".github/workflows/legacy.yml", conclusion="failure",
+                  head_sha="%040d" % 998, pull_requests=[998])
+    del legacy["workflow_id"]
+    got = json.loads(_split(t, rows_id + [legacy], "--json").stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 1 or got.get("wait_all_workflows_unplaced_commits") != 0 \
+            or len(got.get("workflows") or []) != 3:  # CI, Lint (id 35) and the older legacy.yml
+        bad.append("split #7: a run with its workflow id but no file wasn't placed: %r %r"
+                   % (got.get("wait_all_workflows_commits"), got.get("wait_all_workflows_unplaced_commits")))
+    # ... and one 48 hours later, outside the commit's window, changes nothing.
+    rows3 = [rows[0], rows[2]] + copy.deepcopy(rows2[1:])
+    rows3[-1].update(created_at=_at(200 + 48 * 3600), run_started_at=_at(200 + 48 * 3600))
+    got = json.loads(_split(t, rows3, "--json").stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 1 or got.get("wait_all_workflows_unplaced_commits") != 0:
+        bad.append("split #7: a run with no file outside the commit's window left the commit out: %r %r"
+                   % (got.get("wait_all_workflows_commits"), got.get("wait_all_workflows_unplaced_commits")))
+    # #14: a run with no pull-request number (a fork's, or a closed pull request's) is keyed by
+    # repository and branch, and counted, with the note in the output.
+    def fork_runs(specs):
+        out = []
+        for i, (prs, base, sha) in enumerate(specs):
+            x = _run(i, [_job("test", 3000 * i, 3000 * i + 1, 3000 * i + 60)], 3000 * i)
+            x.update(head_repo="fork/r", head_branch="fix", head_sha="%040d" % sha, pull_requests=prs,
+                     pull_request_bases=base)
+            out.append(x)
+        return out
+    for specs, want in (((([5], ["main"], 1), ([5], ["main"], 2)), (2, 0)),
+                        ((([], ["main"], 1), ([], [], 2)), (2, 2))):
+        got = json.loads(_split(t, fork_runs(specs), "--json").stdout or "{}")
+        text = _split(t, fork_runs(specs)).stdout
+        if (got.get("pr_commits"), got.get("pr_runs_keyed_by_branch")) != want \
+                or (want[1] > 0) != ("carried no pull-request number" in text):
+            bad.append("split #14: fork runs %r keyed as %r, not %r"
+                       % (specs, (got.get("pr_commits"), got.get("pr_runs_keyed_by_branch")), want))
+    # --workflow a.yml reads the display name a.yml, as main does, not the file a.yml: reading the
+    # file would drop b.yml's failed run main counts (#47 review, Opus and Astra round 16). A
+    # renamed workflow is one workflow and one set of jobs.
+    rows = []
+    for k, (path, name, ok) in enumerate((("a.yml", "CI", True), ("b.yml", "a.yml", False))):
+        x = _run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 120)], 9000 * k, name=name)
+        x.update(path=".github/workflows/" + path, conclusion="success" if ok else "failure")
+        rows.append(x)
+    got = json.loads(_split(t, rows, "--json", "--workflow", "a.yml").stdout or "{}")
+    if (got.get("passed_runs"), got.get("ended_runs")) != (0, 1):
+        bad.append("split: --workflow a.yml didn't read the display name a.yml: %r" % ((got.get("passed_runs"), got.get("ended_runs")),))
+    # ... and a file name that no run's display name is reads nothing, as on main.
+    r_ = _split(t, [dict(x, name="CI") for x in rows], "--json", "--workflow", "a.yml")
+    if r_.returncode != 2 or "no runs to read" not in r_.stderr:
+        bad.append("split: --workflow by a file name read runs: %s" % r_.stdout[:300])
+    rows = [_run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 120)], 9000 * k, name=n)
+            for k, n in enumerate(("CI", "Checks"))]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    if got.get("job_sets") != 1 or got.get("workflows") != ["Checks"]:
+        bad.append("split: a renamed workflow made two sets or two workflows: %r %r" % (got.get("job_sets"), got.get("workflows")))
+    # Runs saved with no file count under --workflow by their display name, and a missing file
+    # doesn't make another set of jobs.
+    rows = []
+    for k, ok in enumerate((True, False, False)):
+        x = _run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 60 * (k + 1))], 9000 * k, name="ci.yml")
+        x.update(conclusion="success" if ok else "failure")
+        if k:
+            del x["path"]
+        rows.append(x)
+    got = json.loads(_split(t, rows, "--json", "--workflow", "ci.yml").stdout or "{}")
+    # ... and with the workflow's id saved, they take its file: 1 of 3 passed, as before.
+    for x in rows:
+        x["workflow_id"] = 42
+    got_id = json.loads(_split(t, rows, "--json", "--workflow", "ci.yml").stdout or "{}")
+    if (got_id.get("passed_runs"), got_id.get("ended_runs")) != (1, 3) or (got.get("passed_runs"), got.get("ended_runs")) != (1, 3):
+        bad.append("split: runs with no file left out under --workflow: %r %r"
+                   % ((got.get("passed_runs"), got.get("ended_runs")), (got_id.get("passed_runs"), got_id.get("ended_runs"))))
+    rows = [_run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + 60 + 540 * k)], 9000 * k) for k in range(2)]
+    del rows[0]["path"]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    lint_fail = _run(5, [_job("lint", 45000, 45001, 45030, conclusion="failure")], 45000, name="Lint")
+    lint_fail.update(path=".github/workflows/lint.yml", conclusion="failure")
+    got2 = json.loads(_split(t, rows + [lint_fail], "--json").stdout or "{}")
+    if got.get("job_sets") != 1 or got2.get("job_sets") != 1:
+        bad.append("split: a run with no file, or another workflow's failure, made another set of jobs: %r %r"
+                   % (got.get("job_sets"), got2.get("job_sets")))
+    # Two workflows told apart only by their saved ids (one with no file) are two sets of jobs.
+    rows = [_run(k, [_job("test", 9000 * k, 9000 * k + 1, 9000 * k + (60 if k < 3 else 600))], 9000 * k) for k in range(5)]
+    for k, x in enumerate(rows):
+        x["workflow_id"] = 17 if k < 3 else 35
+        if k >= 3:
+            del x["path"]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    # An older failed run of ci.yml with no id doesn't make id 35 unplaceable: ci.yml's id is 17.
+    old_ci = copy.deepcopy(rows[0])
+    old_ci.update(id=old_ci["id"] + 900, conclusion="failure", head_sha="%040d" % 999, pull_requests=[999])
+    del old_ci["workflow_id"]
+    got2 = json.loads(_split(t, rows + [old_ci], "--json").stdout or "{}")
+    if got.get("job_sets") != 2 or got2.get("job_sets") != 2:
+        bad.append("split: workflows told apart by id made one set of jobs: %r %r" % (got.get("job_sets"), got2.get("job_sets")))
+    # One file on two events is two checks: a passing pull_request_target run doesn't hide a failing
+    # pull_request run of the same file. One commit seen by number and by branch is one push.
+    # A path with its ref (build.yml@main) is still build.yml.
+    two_ev = []
+    for k, (ev, name, ok, path, prs) in enumerate((("pull_request_target", "Triage", True, "ci.yml@main", [42]),
+                                                   ("pull_request", "Tests", False, "ci.yml", [42]),
+                                                   ("pull_request", "Lint", True, "lint.yml", []))):
+        x = _run(k, [_job("test", 10 * k, 10 * k + 1, 10 * k + 10)], 10 * k, name=name)
+        x.update(event=ev, path=".github/workflows/" + path, conclusion="success" if ok else "failure",
+                 head_sha="%040d" % 42, pull_requests=prs, head_branch="b42")
+        two_ev.append(x)
+    got = json.loads(_split(t, two_ev, "--json").stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 0 or got.get("pr_commits") != 1:
+        bad.append("split: one file on two events, or one commit by number and branch: %r %r"
+                   % (got.get("wait_all_workflows_commits"), got.get("pr_commits")))
+    # File names with @ keep it (ci@unit_a.yml); a ref after the extension goes (build.yml@release/1.x).
+    at_rows = []
+    for k, (path, ok) in enumerate((("ci@unit_a.yml", True), ("ci@unit_b.yml", False), ("lint.yml", True))):
+        x = _run(k, [_job("test", 10 * k, 10 * k + 1, 10 * k + 10)], 10 * k, name=path)
+        x.update(path=".github/workflows/" + path, conclusion="success" if ok else "failure",
+                 head_sha="%040d" % 77, pull_requests=[77])
+        at_rows.append(x)
+    got = json.loads(_split(t, at_rows, "--json").stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 0:
+        bad.append("split: @ in file names: %r" % got.get("wait_all_workflows_commits"))
+    # One file on two events, all passing, is a cross-workflow commit with or without an unrelated run.
+    two_ok = [dict(two_ev[0]), dict(two_ev[1], conclusion="success")]
+    two_ok[1]["jobs"] = [dict(j, conclusion="success") for j in two_ok[1]["jobs"]]
+    nightly = dict(two_ev[2], id=999, event="schedule", path=".github/workflows/nightly.yml", head_sha="%040d" % 5)
+    a_ = json.loads(_split(t, two_ok, "--json").stdout or "{}").get("wait_all_workflows_commits")
+    b_ = json.loads(_split(t, two_ok + [nightly], "--json").stdout or "{}").get("wait_all_workflows_commits")
+    if (a_, b_) != (1, 1):
+        bad.append("split: an unrelated run changed a two-event commit's wait: %r %r" % (a_, b_))
+    # #47 review: a commit fails if any run of it failed, in any pull request or branch: a failed
+    # run fetched after the pull request closed (keyed by branch), one under another pull request
+    # or a fork, and one filed under a check that already passed (a file legally named with an
+    # at sign and a second extension reads as its first part) each fail the commit.
+    late = []
+    for k, (ev, path, ok, prs) in enumerate((("pull_request_target", "ci.yml", True, [42]),
+                                             ("pull_request", "ci.yml", True, [42]),
+                                             ("pull_request", "integration.yml", False, []))):
+        x = _run(k, [_job("test", 10 * k, 10 * k + 1, 10 * k + 10)], 10 * k, name="CI")
+        x.update(event=ev, path=".github/workflows/" + path, conclusion="success" if ok else "failure",
+                 head_sha="%040d" % 43, pull_requests=prs, head_branch="b43", head_repo="o/r")
+        late.append(x)
+    named = []
+    for k, (path, ok) in enumerate((("ci.yml", True), ("ci.yml" + "@" + "integration.yml", False), ("lint.yml", True))):
+        x = _run(k, [_job("test", 10 * k, 10 * k + 1, 10 * k + 10)], 10 * k, name="W%d" % k)
+        x.update(path=".github/workflows/" + path, workflow_id=k, conclusion="success" if ok else "failure",
+                 head_sha="%040d" % 44, pull_requests=[44])
+        named.append(x)
+    # The same commit on two pull requests: failed under #1, passed on two checks under #2.
+    two_prs = [dict(late[0], id=90, pull_requests=[2], head_branch="b2"), dict(late[1], id=91, pull_requests=[2], head_branch="b2"),
+               dict(late[2], id=92, pull_requests=[1], head_branch="b1", path=".github/workflows/ci.yml")]
+    a_ = json.loads(_split(t, late, "--json").stdout or "{}").get("wait_all_workflows_commits")
+    b_ = json.loads(_split(t, named, "--json").stdout or "{}").get("wait_all_workflows_commits")
+    c_ = json.loads(_split(t, two_prs, "--json").stdout or "{}").get("wait_all_workflows_commits")
+    if (a_, b_, c_) != (0, 0, 0):
+        bad.append("split: a late, same-check or other pull request's failed run left a commit all-passed: %r %r %r"
+                   % (a_, b_, c_))
+    # #47 review, round 2: a failed push run of the commit fails it (its checks show on the pull
+    # request); under --workflow a run with no file but the display name counts.
+    push_fail = [dict(late[0], id=95, pull_requests=[45], head_sha="%040d" % 45),
+                 dict(late[1], id=96, pull_requests=[45], head_sha="%040d" % 45),
+                 dict(late[1], id=97, event="push", pull_requests=[], head_sha="%040d" % 45, conclusion="failure")]
+    d_ = json.loads(_split(t, push_fail, "--json").stdout or "{}").get("wait_all_workflows_commits")
+    no_file = [dict(late[1], id=98), dict(late[1], id=99, conclusion="failure", name="CI")]
+    del no_file[1]["path"]
+    e_ = json.loads(_split(t, no_file, "--json", "--workflow", "CI").stdout or "{}")
+    if d_ != 0 or (e_.get("passed_runs"), e_.get("ended_runs")) != (1, 2):
+        bad.append("split: a push run's failure, or a run with no file: %r %r"
+                   % (d_, (e_.get("passed_runs"), e_.get("ended_runs"))))
+    # Pushes per PR: a run keyed by branch on a commit a numbered run counts isn't another PR.
+    pp = []
+    for k, (sha, prs, ev) in enumerate(((1, [42], "pull_request"), (2, [42], "pull_request"), (2, [], "pull_request_target"))):
+        x = _run(k, [_job("test", 100 * k, 100 * k + 1, 100 * k + 10)], 100 * k)
+        x.update(head_sha="%040d" % sha, pull_requests=prs, event=ev, head_branch="b42", head_repo="o/r")
+        pp.append(x)
+    got = json.loads(_split(t, pp, "--json").stdout or "{}")
+    if got.get("pushes_per_pr_median") != 2 or got.get("pr_commits") != 2:
+        bad.append("split: a branch-keyed run of a numbered commit counted again: %r %r"
+                   % (got.get("pushes_per_pr_median"), got.get("pr_commits")))
+    # #14: a repository whose pull-request workflow runs on pull_request_target alone.
+    rows = []
+    for i in range(6):
+        x = _run(i, [_job("test", 30000 * i, 30000 * i + 1, 30000 * i + 60)], 30000 * i)
+        x["event"] = "pull_request_target"
+        x["pull_requests"] = [i % 3]
+        rows.append(x)
+    r = _split(t, rows, "--json")
+    got = json.loads(r.stdout or "{}")
+    if got.get("pr_commits") != 6 or got.get("pushes_per_pr_max") != 2 or not got.get("runs_per_day"):
+        bad.append("split #14: pull_request_target runs weren't pull-request runs: %r %r"
+                   % (got.get("pr_commits"), got.get("pushes_per_pr_max")))
+    # #23: every run's longest job is build; three of six also ran lint. One headline group,
+    # two job sets: said so, with the commonest set's median.
+    rows = []
+    for i in range(6):
+        t0 = 4000 * i
+        jobs = [_job("build", t0, t0 + 1, t0 + 600 + i)]
+        if i % 2:
+            jobs.append(_job("lint", t0, t0 + 1, t0 + 700 + i))
+            jobs[-1]["name"] = "lint"
+        rows.append(_run(i, jobs, t0))
+    for row in rows:  # make build the longest job by median: lint runs shorter
+        for j in row["jobs"]:
+            if j["name"] == "lint":
+                j["completed_at"] = _at(_ts_of(j["started_at"]) + 20)
+                j["steps"][-1]["completed_at"] = j["completed_at"]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    text = _split(t, rows).stdout
+    head = got.get("headline") or {}
+    if (head.get("commonest_set") or {}).get("median") != 602 or head["commonest_set"].get("jobs") != ["build"] \
+            or head.get("job_sets") != 2 or (head.get("commonest_set") or {}).get("runs") != 3 \
+            or (head.get("commonest_set") or {}).get("tied_with") != 1 or len(got.get("cohorts") or []) != 1 \
+            or "ran 2 different sets of jobs" not in text or "tied with 1 other set" not in text:
+        bad.append("split #23: a headline group mixing two job sets wasn't flagged: %r\n%s" % (head, text))
+    # A rerun of failed jobs lists the jobs that passed before under its own attempt: the run
+    # ran one set of jobs, and its wait covers only the rerun, which split says.
+    rows = []
+    for i in range(6):
+        t0 = 5000 * i
+        rows.append(_run(i, [_job("build", t0, t0 + 1, t0 + 300), _job("test", t0 + 300, t0 + 301, t0 + 900)], t0))
+    last = rows[-1]
+    last.update(run_attempt=2, run_started_at=_at(25000 + 1000))
+    for j in last["jobs"]:
+        j["run_attempt"] = 2
+    tj = last["jobs"][1]
+    tj.update(created_at=_at(26000), started_at=_at(26001), completed_at=_at(26600))
+    tj["steps"] = [dict(x, started_at=_at(26001), completed_at=_at(26600)) for x in tj["steps"]]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    text = _split(t, rows).stdout
+    no_start = copy.deepcopy(rows)
+    del no_start[-1]["run_started_at"]
+    if (got.get("headline") or {}).get("job_sets") != 1 or (got.get("headline") or {}).get("reruns") != 1 \
+            or "1 of the headline's runs passed on a rerun" not in text \
+            or "1 from their creation" not in _split(t, no_start).stdout:
+        bad.append("split #23: a rerun's carried-over jobs made another set, or the rerun wasn't named: %r\n%s"
+                   % (got.get("headline"), text))
+    # #35: a step stamped 10 s past its 60 s job shows clipped in the step table; a one-second
+    # step inside another sets the overlap flag, and the amount says it is one second.
+    rows = []
+    for i in range(5):
+        # Three runs overlap (by 1, 1 and 9 s) in jobs of 60, 61 and 62 s; two don't, in 100 s jobs.
+        t0 = 5000 * i
+        j = _job("test", t0, t0, t0 + (60 + i if i < 3 else 100))
+        j["steps"] = [{"name": "Set up job", "conclusion": "success", "started_at": _at(t0), "completed_at": _at(t0 + 5)},
+                      {"name": "Run tests", "conclusion": "success", "started_at": _at(t0 + 5), "completed_at": _at(t0 + 70)}]
+        if i < 3:
+            j["steps"].append({"name": "Note", "conclusion": "success", "started_at": _at(t0 + 20),
+                               "completed_at": _at(t0 + (29 if i == 2 else 21))})
+        rows.append(_run(i, [j], t0))
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    text = _split(t, rows).stdout
+    steps = {x["step"]: x["median"] for x in (got.get("last_working_job_steps") or {}).get("test", [])}
+    if steps.get("Run tests") != 57 or (got.get("last_working_job_steps_overlap_seconds") or {}).get("test") != 1 \
+            or (got.get("last_working_job_steps_overlap_job_seconds") or {}).get("test") != 61 \
+            or "in 3 of its 5 runs its steps overlapped" not in text:
+        bad.append("split #35: steps not clipped to their job, or the overlap not measured: %r %r\n%s"
+                   % (steps, got.get("last_working_job_steps_overlap_seconds"), text))
+    # Two steps that overlap only after the job ended don't overlap in it; an untimed first
+    # "Test" leaves the second as its #2.
+    for row in rows:
+        j = row["jobs"][0]
+        t0 = _ts_of(j["started_at"])
+        j["completed_at"] = _at(t0 + 60)
+        j["steps"] = [{"name": "Set up job", "conclusion": "success", "started_at": _at(t0), "completed_at": _at(t0 + 5)},
+                      {"name": "Test", "conclusion": "skipped", "started_at": None, "completed_at": None},
+                      {"name": "Test", "conclusion": "success", "started_at": _at(t0 + 5), "completed_at": _at(t0 + 70)},
+                      {"name": "Late", "conclusion": "success", "started_at": _at(t0 + 62), "completed_at": _at(t0 + 69)}]
+    got = json.loads(_split(t, rows, "--json").stdout or "{}")
+    occ = [(x["step"], x["occurrence"]) for x in (got.get("last_working_job_steps") or {}).get("test", [])]
+    late = [x["median"] for x in (got.get("last_working_job_steps") or {}).get("test", []) if x["step"] == "Late"]
+    if ("Test", 2) not in occ or ("Test", 1) in occ or late != [0] \
+            or (got.get("last_working_job_steps_overlap") or {}).get("test"):
+        bad.append("split #35: occurrence or out-of-job overlap wrong: %r %r" % (occ, got.get("last_working_job_steps_overlap")))
+
+
 # #37: closed pull requests that reused one branch still count as one (a run can't be tied
 # to its own pull request for certain), and flaky says which branches and pull requests.
 def _closed(i, branch, found, st):
@@ -3453,6 +3765,64 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--job", "test"])
     if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
         bad.append("compare: a lone surrogate was read: %s%s" % (r.stdout[:200], r.stderr[-200:]))
+
+# split, #47 review round 17 (Opus): a run with no creation time, or a name that isn't text,
+# stops the read; main crashed on these (a failure), so reading them would be laxer.
+with tempfile.TemporaryDirectory() as t:
+    def _r(i, name, path, event, ok, created="2026-11-01T10:00:00Z", sha="s1"):
+        st = "success" if ok else "failure"
+        return {"id": i, "name": name, "path": path and ".github/workflows/" + path, "event": event, "head_sha": sha,
+                "head_branch": "b", "head_repo": "o/r", "pull_requests": [1] if event != "push" else [],
+                "conclusion": st, "run_attempt": 1, "created_at": created, "run_started_at": created,
+                "jobs": [{"id": i, "name": "j", "conclusion": st, "started_at": "2026-11-01T10:00:00Z",
+                          "completed_at": "2026-11-01T10:05:00Z", "labels": ["L"], "runner_name": "r"}]}
+    for label, rows in (("no creation time", [_r(1, "A", "a.yml", "pull_request", False, created=None),
+                                              _r(2, "B", "b.yml", "push", True, sha="s2")]),
+                        ("a name that isn't text", [_r(1, "CI", "ci.yml", "pull_request", True),
+                                                    _r(2, 7, None, "push", False, sha="s2")]),
+                        ("no creation time on a second event", [_r(1, "CI", "ci.yml", "pull_request", True),
+                                                                _r(2, "CI", "ci.yml", "pull_request_target", False, created=None)]),
+                        # Astra round 18: an empty creation time; a number for the pull requests; a step
+                        # named with a number.
+                        ("an empty creation time", [_r(1, "CI", "ci.yml", "pull_request", True, created=""),
+                                                    _r(2, "Lint", "lint.yml", "push", True, sha="s2")]),
+                        ("a number for its pull requests", [dict(_r(1, "CI", None, "pull_request", True), pull_requests=1, head_sha=None)]),
+                        # Opus round 18: pull requests saved as GitHub's objects; a repository as a list.
+                        ("pull requests as objects", [dict(_r(1, "CI", "ci.yml", "pull_request", False), head_sha=None, pull_requests=[{"number": 1}])]),
+                        ("a repository as a list", [dict(_r(1, "CI", "ci.yml", "pull_request", False), head_sha=None, head_repo=["o/r"], pull_requests=[])]),
+                        ("a step named with a number", [dict(_r(1, "CI", "ci.yml", "push", True), jobs=[{
+                            "name": "test", "started_at": "2026-11-01T10:01:00Z",
+                            "steps": [{"name": 7, "started_at": "2026-11-01T10:00:00Z", "completed_at": "2026-11-01T10:00:30Z"}]}])])):
+        differential.write(t + "/s.jsonl", rows)
+        r = run([M, "split", "--in", t + "/s.jsonl", "--json"])
+        if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
+            bad.append("split: a run with %s was read: %s%s" % (label, r.stdout[:200], r.stderr[-200:]))
+    # Astra round 19: an invalid --setup-pattern stops before any step is read (main crashed only
+    # when a step reached it); a lone surrogate in a field is a field of the wrong kind.
+    differential.write(t + "/s.jsonl", [_r(1, "CI", "ci.yml", "push", True)])
+    r = run([M, "split", "--in", t + "/s.jsonl", "--setup-pattern", "["])
+    if r.returncode != 2 or "isn't a regular expression" not in r.stderr:
+        bad.append("split: an invalid --setup-pattern was read: %s%s" % (r.stdout[:200], r.stderr[-200:]))
+    # #47 review rounds 20-22 (Opus): re.compile raises ValueError for flags at odds, OverflowError
+    # for a repeat too large, RecursionError for groups nested too deep and, on Python 3.9,
+    # RuntimeError for a condition on a missing group; each stops with the same message, not a crash.
+    for pattern in ("(?(1))", "(?a)(?u)", "a{4294967296}", "(" * 1000 + ")" * 1000):
+        r = run([M, "split", "--in", t + "/s.jsonl", "--setup-pattern", pattern])
+        if r.returncode != 2 or "isn't a regular expression" not in r.stderr:
+            bad.append("split: --setup-pattern %s... crashed or was read: %s%s"
+                       % (pattern[:15], r.stdout[:200], r.stderr[-200:]))
+    differential.write(t + "/s.jsonl", [dict(_r(1, "CI", "ci.yml", "push", True), event="\ud800")])
+    r = run([M, "split", "--in", t + "/s.jsonl"])
+    if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
+        bad.append("split: a lone surrogate was read: %s%s" % (r.stdout[:200], r.stderr[-200:]))
+    # Astra round 17: a failed run whose commit is spelled in capitals fails that commit.
+    sha = "abcdef" * 6 + "abcd"
+    rows = [_r(1, "CI", "a.yml", "pull_request", True, sha=sha), _r(2, "CI", "b.yml", "pull_request", True, sha=sha),
+            _r(3, "CI", "a.yml", "pull_request", False, sha=sha.upper())]
+    differential.write(t + "/s.jsonl", rows)
+    got = json.loads(run([M, "split", "--in", t + "/s.jsonl", "--json", "--workflow", "CI"]).stdout or "{}")
+    if got.get("wait_all_workflows_commits") != 0:
+        bad.append("split: a failed run with the commit in capitals left it all-passed: %r" % got.get("wait_all_workflows_commits"))
 
 # Never laxer than the base, on random histories (seeded: a failure names its seed, and
 # `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).

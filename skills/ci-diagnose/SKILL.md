@@ -84,6 +84,11 @@ in `references/measuring.md`.
      --out .joggernaut/before-ci.jsonl
    ```
 
+   A workflow that runs on `pull_request_target` instead is fetched with
+   `--event pull_request_target`; `split` counts both as pull-request runs
+   (each run records the pull request's head commit, not the base's that
+   `GITHUB_SHA` names for that event).
+
    The cut-off leaves every run in the file finished: the file is also the
    baseline a fix is measured against, and `fetch` refuses runs still
    going, since the fast ones finish first.
@@ -95,7 +100,10 @@ in `references/measuring.md`.
    days, and join only the files from this fetch, by name
    (`cat .joggernaut/before-ci.jsonl .joggernaut/before-lint.jsonl >
    .joggernaut/before.jsonl`): `split` then prints the PR wait across them
-   per commit. That line counts a commit
+   per commit. It tells workflows apart by file, not by display name (a run
+   saved with no file takes its file from another run of the same workflow
+   id, or stands for its id), and leaves out a commit with a run it can't
+   place. That line counts a commit
    once every workflow it ran passed, timed from the first run's creation
    (so a rerun and the wait for it count), keeping each workflow's first run
    within 24 hours of that (a cut-off the script chooses, so a pull request reopened days later doesn't stretch the wait), and a commit's workflows may have tested different bases; a commit missing a required workflow can still
@@ -129,11 +137,14 @@ in `references/measuring.md`.
      total wait (the six groups with the most wait; `--json` lists all). The headline is the group with the most of the wait
      among those of 5 runs or more (`--cohort JOB` picks another; with no
      group that big, the headline is the blend, and says so); the slowest path below describes that
-     group. Report the headline as the PR wait, naming its group, with the
-     other groups beside it. The blended median over every run is printed
+     group. A group can still hold runs that ran different sets of jobs;
+     `split` says so under the headline, with the commonest set's own
+     median: report that beside the headline (if several sets tie for
+     commonest, name them instead of picking one). Report the headline as the PR
+     wait, naming its group, with the other groups beside it. The blended median over every run is printed
      last and labelled as a blend: never report it as the PR wait. With several
      workflows in the file each group is one workflow's runs and the blend
-     pools them; report the "PR wait across workflows" line instead, as the elapsed time for commits where two or more workflows were seen, read as follows: for each commit it takes each workflow's first run within 24 hours of the commit's first, drops the commit if any of those failed (even if a later run passed), and times until their last job finished (an optional slow job counts; a workflow missing for a commit isn't in it). Report a pull-request-wide wait only when every required workflow is present. If branch protection requires only some
+     pools them; report the "PR wait across workflows" line instead, as the elapsed time for commits where two or more workflows were seen, read as follows: for each commit it takes each workflow's first run within 24 hours of the commit's first, drops the commit if any run of it didn't pass, of any event and under any pull request or branch (even if a later run passed), and times until their last job finished (an optional slow job counts; a workflow missing for a commit isn't in it). Report a pull-request-wide wait only when every required workflow is present. If branch protection requires only some
      jobs (read `required_status_checks` as in ci-workflow; on 403 or 404,
      say it is unknown), the required checks can't pass before the slowest
      required job ends: say which job that is and rank on its path. Reviews,
@@ -171,9 +182,13 @@ in `references/measuring.md`.
      jobs included (`--json` lists every job, not only ten), and each called
      workflow's time, from its first job queued to its last done (read
      from the name, so a job whose own name holds " / " is grouped too);
-   - pushes a day: distinct pull-request commits that started CI, over the
-     days the file spans. A reopened pull request or a re-run of the same
-     commit isn't counted again;
+   - pushes a day: distinct pull-request head commits that started CI
+     (`pull_request` and `pull_request_target` runs alike), over the days
+     the file spans. A reopened pull request or a re-run of the same commit
+     isn't counted again. A run whose pull request had closed by the fetch,
+     or a fork's, carries no pull-request number, so it is keyed by
+     repository and branch (two pull requests from one branch count as one),
+     and `split` says how many were;
    - runner-minutes, unrounded and rounded up per job (step 5 says which a
      label is priced by), by runner label, and the share in runs that failed,
      timed out or were cancelled (by a concurrency group or by hand). Not
