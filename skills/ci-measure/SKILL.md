@@ -209,7 +209,13 @@ under a merge-commit policy, ask before adding them.
    in `_jobs_changed` and is never a plain one: it holds only if the
    workflow's diff explains every difference and every removed job's work
    still runs (step 3, the tests by name); otherwise the mix of work
-   changed, not the CI.
+   changed, not the CI. When the timed jobs ran different steps, or with
+   `--tests DIR` different tests, it ends in `_work_differs`. Runs within a
+   side that did different work make the median move with the mix; one set
+   a side that differs means the work changed between the sides (the
+   change, or the pull requests in each window), and holds only if the
+   workflow's diff explains it. With `--end`, the reading also gives the
+   job's own duration in the same runs, to report beside it.
 
    It prints the medians, the slowest runs (below 20 runs a side, the
    smaller side's slowest run and the larger side's typical slowest of that

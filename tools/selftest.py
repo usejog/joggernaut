@@ -564,6 +564,14 @@ with tempfile.TemporaryDirectory() as t:
     r, n = fetch(["completed"] * 6, *window)
     if r.returncode != 0 or n != 6:
         bad.append("fetch: a finished window should be written whole (%r runs)\n%s" % (n, r.stderr))
+    # #22: each run records how it was read: the window, or null without one.
+    for extra, want in ((list(window), window[1]), ([], None)):
+        out = t + "/out/window-%s.jsonl" % bool(extra)
+        r = subprocess.run([sys.executable, M, "fetch", "--repo", "o/r", "--workflow", "ci.yml", "--out", out]
+                           + extra, cwd=t, env=env, capture_output=True, text=True)
+        got = {json.loads(l).get("fetch_window", "absent") for l in open(out)} if os.path.exists(out) else None
+        if r.returncode != 0 or got != {want}:
+            bad.append("fetch #22: runs should record their window %r: %r\n%s" % (want, got, r.stderr))
     r, n = fetch(["completed"] * 6, "--limit", "5", "--created", "2026-10-06")
     if r.returncode == 0 or n is not None:
         bad.append("fetch: a one-day window larger than --limit was written\n" + r.stdout + r.stderr)
@@ -3550,6 +3558,106 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl", "--job", "test", "--ran", "gate"])
     if r.returncode != 2 or "before only: M" not in r.stderr or "after only: N" not in r.stderr:
         bad.append("compare --ran gate: a runner only failed tests used went unread\n" + r.stdout + r.stderr)
+
+# #22: a side fetched without --created is refused; one that records its window is named;
+# a file that records nothing (hand-built, or an older measure.py's) is compared, and says so.
+with tempfile.TemporaryDirectory() as t:
+    side = lambda base_id, took, w="absent": [dict(_cr(base_id + i, [_J("test", 0, took + i)]),
+                                                   **({} if w == "absent" else {"fetch_window": w})) for i in range(6)]
+    v, r = _cmp(t, side(100, 100, None), side(200, 50, "2026-10-01..2026-10-08"))
+    if "error" not in v or "without --created" not in r.stderr:
+        bad.append("compare #22: a side fetched without a window wasn't refused: %r" % v)
+    v, r = _cmp(t, side(100, 100, "<=2026-09-30T00:00:00Z"), side(200, 50, "2026-10-01..2026-10-08"))
+    if v.get("fetch_windows") != {"before": ["<=2026-09-30T00:00:00Z"], "after": ["2026-10-01..2026-10-08"]} \
+            or v.get("verdict_code") != "faster":
+        bad.append("compare #22: recorded windows: %r %r" % (v.get("fetch_windows"), v.get("verdict_code")))
+    # A window fetch couldn't have written (not text) stops the read, as any field of the wrong kind.
+    v, r = _cmp(t, side(100, 100, ["2026-09-30"]), side(200, 50, "2026-10-01..2026-10-08"))
+    if "error" not in v or "give a file fetch wrote" not in r.stderr:
+        bad.append("compare #22: a window that isn't text was read: %r\n%s" % (v, r.stderr[-300:]))
+    # An empty window is no window; a side where only some runs record one compares, unrecorded.
+    v, r = _cmp(t, side(100, 100, ""), side(200, 50, "2026-10-01..2026-10-08"))
+    if "error" not in v or "without --created" not in r.stderr:
+        bad.append("compare #22: an empty window wasn't refused: %r" % v)
+    v, r = _cmp(t, side(100, 100)[:3] + side(103, 100, "2026-09-01..2026-09-30")[:3], side(200, 50, "2026-10-01..2026-10-08"))
+    if v.get("fetch_windows") is not None or v.get("verdict_code") != "faster":
+        bad.append("compare #22: a side where some runs record no window: %r %r" % (v.get("fetch_windows"), v.get("verdict_code")))
+    v, r = _cmp(t, side(100, 100), side(200, 50))
+    text = run([M, "compare", "--before", t + "/b", "--after", t + "/a"]).stdout
+    if v.get("fetch_windows") is not None or v.get("verdict_code") != "faster" or "not recorded" not in text:
+        bad.append("compare #22: a file without windows should compare and say so: %r\n%s" % (v, text))
+
+    # #32, #36: the work inside the timed jobs. Same steps and tests: a plain verdict; a step one
+    # run skipped, or with --tests a test one run didn't run, qualifies it; a timed run with no
+    # report under --tests is refused.
+    def steps(rows, skip_at=None):
+        for k, x in enumerate(rows):
+            x["jobs"][0]["steps"] = [{"name": n, "conclusion": "skipped" if (k, n) == skip_at else "success",
+                                      "started_at": x["jobs"][0]["started_at"], "completed_at": x["jobs"][0]["started_at"]}
+                                     for n in ("build", "site")]
+        return rows
+    before, after = steps(side(300, 100)), steps(side(400, 50))
+    v, r = _cmp(t, before, after, "--job", "test")
+    v2, r2 = _cmp(t, before, steps(side(400, 50), skip_at=(2, "site")), "--job", "test")
+    if v.get("verdict_code") != "faster" or v2.get("verdict_code") != "faster_work_differs" \
+            or v2.get("work_sets", {}).get("steps") != [1, 2] or "differ between the sides" in v2.get("verdict", ""):
+        bad.append("compare #36: a step skipped in one timed run: %r %r" % (v.get("verdict_code"), v2))
+    # Workload review: one set of steps a side but not the same (the change added or dropped a
+    # step) is the workflow's diff to explain, as for jobs; with --job and over every job.
+    def every_skips(rows):
+        # Every run of the side runs only the first step: one set a side.
+        return [dict(x, jobs=[dict(x["jobs"][0], steps=x["jobs"][0]["steps"][:1])]) for x in steps(rows)]
+    for flags in (("--job", "test"), ()):
+        v, r = _cmp(t, before, every_skips(side(400, 50)), *flags)
+        if v.get("verdict_code") != "faster_work_differs" or v.get("work_sets", {}).get("steps") != [1, 1] \
+                or "workflow's diff explains every difference" not in v.get("verdict", "") \
+                or "did different work" in v.get("verdict", ""):
+            bad.append("compare #36 %s: one set of steps a side, not the same: %r" % (flags, v))
+    # ... but where the jobs changed too, _jobs_changed already says so: no second qualification.
+    two_jobs = [dict(x, jobs=x["jobs"] + [dict(x["jobs"][0], id=x["jobs"][0]["id"] + 1, name="lint")])
+                for x in every_skips(side(400, 50))]
+    v, r = _cmp(t, before, two_jobs)
+    if v.get("verdict_code") != "faster_jobs_changed":
+        bad.append("compare #36: steps that changed with the jobs qualified twice: %r" % v.get("verdict_code"))
+    xml = lambda names: '<testsuite name="s" tests="%d">%s</testsuite>' % (
+        len(names), "".join('<testcase classname="c" name="%s"/>' % n for n in names))
+    def reports(rows, odd=None):
+        for x in rows:
+            os.makedirs("%s/rep/%d" % (t, x["id"]), exist_ok=True)
+            open("%s/rep/%d/r.xml" % (t, x["id"]), "w").write(xml(["a", "b"] + (["c"] if x["id"] == odd else [])))
+    reports(before + after)
+    v, r = _cmp(t, before, after, "--job", "test", "--tests", t + "/rep")
+    reports([after[3]], odd=after[3]["id"])
+    v2, r2 = _cmp(t, before, after, "--job", "test", "--tests", t + "/rep")
+    shutil.rmtree("%s/rep/%d" % (t, before[0]["id"]))
+    v3, r3 = _cmp(t, before, after, "--job", "test", "--tests", t + "/rep")
+    if v.get("verdict_code") != "faster" or v2.get("verdict_code") != "faster_work_differs" \
+            or v2.get("work_sets", {}).get("tests") != [1, 2] or "error" not in v3 or "no JUnit report" not in r3.stderr:
+        bad.append("compare #32: --tests: %r %r %r" % (v.get("verdict_code"), v2.get("verdict_code"), v3))
+    # One set of tests a side, not the same: qualified as for steps, naming the tests.
+    reports(before)
+    for x in after:
+        open("%s/rep/%d/r.xml" % (t, x["id"]), "w").write(xml(["a", "b", "c"]))
+    v5, r5 = _cmp(t, before, after, "--job", "test", "--tests", t + "/rep")
+    if v5.get("verdict_code") != "faster_work_differs" or v5.get("work_sets", {}).get("tests") != [1, 1] \
+            or "tests inside job test differ between the sides" not in v5.get("verdict", ""):
+        bad.append("compare #32: one set of tests a side, not the same: %r" % v5)
+    # #36: --end gives the job's own duration in the same runs beside its end.
+    v, r = _cmp(t, before, after, "--job", "test", "--end")
+    if v.get("own_duration_median_before") != 102.5 or v.get("own_duration_median_after") != 52.5 \
+            or "own duration in the same runs" not in v.get("verdict", ""):
+        bad.append("compare #36: --end without the job's own duration: %r" % v)
+    # Astra (workload round 1): the own duration is hidden with the timings below enough runs,
+    # and a timed run whose reports ran only skipped tests is refused under --tests.
+    v, r = _cmp(t, before[:1], after[:1], "--job", "test", "--end")
+    if v.get("verdict_code") != "not_enough_runs" or v.get("own_duration_median_before") is not None:
+        bad.append("compare #36: --end's own duration shown below enough runs: %r" % v)
+    open("%s/rep/%d/r.xml" % (t, after[0]["id"]), "w").write(
+        '<testsuite name="s" tests="1"><testcase classname="c" name="a"><skipped/></testcase></testsuite>')
+    reports(before)
+    v4, r4 = _cmp(t, before, after, "--job", "test", "--tests", t + "/rep")
+    if "error" not in v4 or "ran no test" not in r4.stderr:
+        bad.append("compare #32: --tests read a report of skipped tests alone: %r %s" % (v4, r4.stderr[-200:]))
 
 # compare, #46 review: with --ran, a run whose --ran job the queue cancelled (it asked for a
 # runner and never got one) is still read by the runner checks, as main read it: a test leg

@@ -139,7 +139,10 @@ fetch it only once it has ended and every run created in it has finished;
 `fetch` refuses it otherwise, and refuses a window with more runs than
 `--limit`. Fast runs finish first, so stopping at the fifth run to
 finish keeps the fastest of the window and can pass for a speedup with no
-change at all.
+change at all. `fetch` records its window on each run (`fetch_window`), and
+`compare` refuses a side fetched without `--created`; a file that records
+none (an older `measure.py`'s, or one built by hand) is compared, with a
+line saying how its sides were read isn't known.
 
 Runs that ran different jobs did different work. `compare` reads a run's
 work, as far as the jobs list shows it, as the set of jobs it ran (names
@@ -173,17 +176,24 @@ with counts, so matrix legs count):
 The same jobs can still run different tests (per-pull-request test
 selection inside a job); only `MEASURE tests` shows that, and only for the
 reports compared, and it passes a run that ran more tests. Where selection
-can vary inside a job, a speed verdict needs every timed run to have run the
-same tests: compare each run's report with one reference run's both ways
-(`--before A --after B`, then `--before B --after A`; both pass only when
-the names match). If they all match, the verdict stands; if timing only the
-matching runs would mean dropping rows from the files, don't build such
-files (the failure rate must read every run): report the timings as
-unverified instead (issue #32 tracks a tool check). The same holds for a step that
-runs on some runs only (an `if:` on a step, such as a site build on some
-paths): if the timed runs didn't all run the same steps (the run file records
-each step's conclusion; a skipped step shows `skipped`), report the timings
-as unverified, for the same reason. A step a cache hit skips is the cache's
+can vary inside a job, pass `compare --tests DIR`, a folder holding one
+folder per run id with that run's JUnit XML (as `flaky --reports` reads
+them): every timed run needs its report, and when the timed runs didn't all
+run the same tests (by name, as `tests` keys them, with their counts) the
+verdict ends in `_work_differs`. The same check runs on steps, always: when
+the timed jobs didn't all run the same steps (an `if:` on a step, such as a
+site build on some paths; the run file records each step's conclusion), the
+verdict ends in `_work_differs`, and `work_sets` gives the count of sets a
+side. Where a side holds more than one set, a median moves with the mix:
+compare runs that did the same work, or report the timings as unverified;
+don't build files that drop rows (the failure rate must read every run).
+Where each side holds one set but not the same one, the work changed
+between the sides (the change added, dropped or renamed a step, or the pull
+requests in each window differ): as with `_jobs_changed`, the verdict holds
+only if the workflow's diff explains every difference. A test's name includes its report's path inside the run's
+folder, as in `tests`, so save each run's reports under the same names (not
+named by run id or commit), and a step named with a per-run expression
+makes each run its own set. A step a cache hit skips is the cache's
 effect: time hits and misses apart, each with both options
 (`--cache-state STATE.json --cache hit`, then `--cache-state STATE.json --cache miss`). `compare` also counts each side's runs cancelled with no
 failure (a newer push, a concurrency group): they are in neither the
@@ -200,8 +210,11 @@ applies to it over every job the runs ran (a job queued beside it can hold
 its runner), and every job's runner must match on both sides. Its reading is
 descriptive only (`end_descriptive`; the reading itself is in `--json` as
 `reading`): a job's end moves with which runs reached it, their queue
-order and their runners, more than any check can pin down. Report it beside
-the job's own duration (`--job` alone) and the whole run's wait, which give
+order and their runners, more than any check can pin down. The reading
+gives the job's own duration in the same runs (`own_duration_median_before`
+and `_after`): an end that moved while the job's own time didn't moved with
+what ran before it (queue order, the jobs before it). Report it beside the
+job's own duration (`--job` alone) and the whole run's wait, which give
 the verdict.
 
 Where the pushes ran matters as much as what they ran. `compare` keys a
