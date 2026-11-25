@@ -273,7 +273,7 @@ def shape_problem(r):
     if not isinstance(r.get("created_at"), str) or not r["created_at"] or not when(r["created_at"]):
         return "has no creation time"
     bad = ([k for k in ("name", "path", "event", "head_branch", "head_sha", "head_message", "head_repo", "conclusion",
-                        "status") if not text(r.get(k))]
+                        "status", "fetch_window") if not text(r.get(k))]
            + [k for k in ("id", "run_attempt", "workflow_id") if not number(r.get(k))]
            # Read with a default when absent, so present they must hold one.
            + [k for k in ("run_attempt", "jobs") if k in r and r[k] is None]

@@ -3258,7 +3258,11 @@ with tempfile.TemporaryDirectory() as t:
     v, r = _cmp(t, side(100, 100, "<=2026-09-30T00:00:00Z"), side(200, 50, "2026-10-01..2026-10-08"))
     if v.get("fetch_windows") != {"before": ["<=2026-09-30T00:00:00Z"], "after": ["2026-10-01..2026-10-08"]} \
             or v.get("verdict_code") != "faster":
-        bad.append("compare #22: recorded windows: %r" % (v.get("fetch_windows"), v.get("verdict_code")))
+        bad.append("compare #22: recorded windows: %r %r" % (v.get("fetch_windows"), v.get("verdict_code")))
+    # A window fetch couldn't have written (not text) stops the read, as any field of the wrong kind.
+    v, r = _cmp(t, side(100, 100, ["2026-09-30"]), side(200, 50, "2026-10-01..2026-10-08"))
+    if "error" not in v or "give a file fetch wrote" not in r.stderr:
+        bad.append("compare #22: a window that isn't text was read: %r\n%s" % (v, r.stderr[-300:]))
     v, r = _cmp(t, side(100, 100), side(200, 50))
     text = run([M, "compare", "--before", t + "/b", "--after", t + "/a"]).stdout
     if v.get("fetch_windows") is not None or v.get("verdict_code") != "faster" or "not recorded" not in text:
