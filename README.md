@@ -377,4 +377,4 @@ results included. New skills need evidence: see
 
 ---
 
-<sub>Made by the team behind Jog.</sub>
+<sub>Made by the team behind <a href="https://usejog.com">Jog</a>.</sub>
