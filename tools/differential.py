@@ -2,14 +2,16 @@
 """Never laxer than the base: run the base's measure.py and this one on the same histories
 and fail where this one gives a reading, a pass or a speed verdict the base refuses or fails.
 
-  differential.py BASE_MEASURE_PY [--seeds N] [--history runs.jsonl ...]
+  differential.py BASE_MEASURE_PY [--seeds N] [--tidy N] [--history runs.jsonl ...]
 
-"Laxer", for compare: the base stops (an error, not valid, or not enough runs) and this one
+"Laxer", for compare: the base stops (an error or a crash, not valid, or not enough runs) and this one
 gives a reading or a verdict; or the base gives only a descriptive reading and this one a
 verdict. For split: on one commit's runs, where one of them didn't pass, this one counts
-more commits whose every check passed than the base does. Refusing more is allowed.
+more commits whose every check passed than the base does, or reads where the base stops or
+crashes. Refusing more is allowed; a crash in this one is reported unless the base crashes too.
 
-The histories: random ones (seeded, so a failure reproduces), each --history file (split
+The histories: random ones (seeded, so a failure reproduces); with --tidy N, N tidy ones that
+reach a verdict, each compared with one or two fields mutated; each --history file (split
 whole, and compared older half against newer half), and, through check_args, every compare
 and split the selftest runs. Both scripts run in this process, so a case costs milliseconds.
 """
@@ -68,10 +70,11 @@ def laxer_compare(base, head, argv):
     base doesn't take one of the flags)."""
     argv = [x for x in argv if x != "--json"] + ["--json"]
     bc, bo, be = call(base, argv)
-    if bc and ("usage:" in be or bc == 99):
-        return "usage"  # a flag the base doesn't take, or the base crashed: nothing to compare
+    if bc and "usage:" in be:
+        return "usage"  # a flag the base doesn't take: nothing to compare
+    # A crash in the base is a failure: head must not read there either.
     hc, ho, he = call(head, argv)
-    if hc == 99:
+    if hc == 99 and bc != 99:  # a crash both share is main's too
         return "head crashed: %s" % he.strip().splitlines()[-1]
     bl, bv = compare_level(bc, bo)
     hl, hv = compare_level(hc, ho)
@@ -82,8 +85,11 @@ def laxer_compare(base, head, argv):
 
 
 def split_fails(mod, path, extra):
-    """(all-passed commits, runs that failed) from split, or None when it stops."""
+    """(all-passed commits, runs that failed) from split, None when it stops, "crash" when it
+    crashed."""
     code, out, _ = call(mod, ["split", "--in", path, "--json"] + extra)
+    if code == 99:
+        return "crash"
     if code:
         return None
     res = json.loads(out)
@@ -100,16 +106,24 @@ def laxer_split(base, head, path, extra=()):
     w = extra[extra.index("--workflow") + 1] if "--workflow" in extra else None
     mine = [r for r in rows if w is None or r.get("name") == w]
     b, h = split_fails(base, path, extra), split_fails(head, path, extra)
-    if b is None and h is not None:
-        return "base stops, head reads"
+    if h == "crash" and b != "crash":  # a crash both share is main's too
+        return "head crashed"
+    if b in (None, "crash") and h not in (None, "crash"):
+        return "base %s, head reads" % ("crashed" if b else "stops")
+    if b == "crash":
+        return None
     if b and h and h[1] < b[1]:
         return "base counts %d failed runs, head %d" % (b[1], h[1])
     with tempfile.TemporaryDirectory() as t:
         p = os.path.join(t, "c.jsonl")
-        for sha in sorted({r.get("head_sha") for r in mine if r.get("conclusion") != "success"} - {None}):
-            write(p, [r for r in rows if r.get("head_sha") == sha])
+        # A commit is its id in any case (a file can spell one id two ways).
+        low = lambda r: r.get("head_sha").lower() if isinstance(r.get("head_sha"), str) else None
+        for sha in sorted({low(r) for r in mine if r.get("conclusion") != "success"} - {None}):
+            write(p, [r for r in rows if low(r) == sha])
             b, h = split_fails(base, p, extra), split_fails(head, p, extra)
-            b, h = (b or (0, 0))[0], (h or (0, 0))[0]
+            if h == "crash" and b != "crash":
+                return "commit %s: head crashed" % sha
+            b, h = (b if b not in (None, "crash") else (0, 0))[0], (h if h not in (None, "crash") else (0, 0))[0]
             STATS[("split", b < h)] = STATS.get(("split", b < h), 0) + 1
             if h > b:
                 return "commit %s: base counts %d all-passed, head %d" % (sha, b, h)
@@ -344,6 +358,20 @@ def gen_split(rng, seed):
     return rows
 
 
+def corrupt(rng, rows):
+    """A hand-built file's slip: one field of one record (a run, a job or a step) of the wrong
+    kind, empty or missing. The base can crash on it (a failure); head must not read it then."""
+    rows = json.loads(json.dumps(rows))
+    target = rng.choice(rows)
+    if target.get("jobs") and rng.random() < 0.6:
+        target = rng.choice(target["jobs"])
+        if target.get("steps") and rng.random() < 0.3:
+            target = rng.choice(target["steps"])
+    k = rng.choice(sorted(target))
+    target[k] = rng.choice((7, "", None, [], {}, "X", [7]))
+    return rows
+
+
 def write(path, rows):
     with open(path, "w") as f:
         f.write("".join(json.dumps(r) + "\n" for r in rows))
@@ -356,6 +384,10 @@ def run_generated(base_path, seeds):
         for seed in seeds:
             rng = random.Random(seed)
             sides, cache, flag_sets = gen_compare(rng, seed)
+            slip = random.Random(seed * 7 + 1)  # its own stream: the histories stay as seeded
+            if slip.random() < 0.15:
+                side = slip.choice(("before", "after"))
+                sides[side] = corrupt(slip, sides[side])
             write(t + "/b.jsonl", sides["before"])
             write(t + "/a.jsonl", sides["after"])
             json.dump(cache, open(t + "/c.json", "w"))
@@ -366,11 +398,106 @@ def run_generated(base_path, seeds):
                 msg = laxer_compare(base, head, argv)
                 if msg and msg != "usage":
                     found.append("compare seed %d %s: %s" % (seed, " ".join(f), msg))
-            write(t + "/s.jsonl", gen_split(rng, seed))
+            rows = gen_split(rng, seed)
+            write(t + "/s.jsonl", corrupt(slip, rows) if slip.random() < 0.15 else rows)
             for extra in ([], ["--workflow", "CI"], ["--workflow", "ci.yml"]):
                 msg = laxer_split(base, head, t + "/s.jsonl", extra)
                 if msg:
                     found.append("split seed %d %s: %s" % (seed, " ".join(extra), msg))
+    return found
+
+
+# ---------------------------------------------------------------- tidy histories, one field off
+
+def gen_tidy(rng, side, n, rid0, t0):
+    """Runs that get past every check to a verdict (one runner, one job set, all green; the
+    after side twice as fast), so one mutated field decides what each version says."""
+    rows = []
+    for i in range(n):
+        rid, t = rid0 + i, t0 + i * 3600
+        jobs, clock = [], t + 5
+        for k, name in enumerate(("build", "test", "gate")):
+            dur = int((5 if name == "gate" else 60) * (0.5 if side == "after" else 1) * (0.9 + 0.2 * rng.random())) + 1
+            jobs.append({"id": rid * 10 + k, "name": name, "run_attempt": 1, "created_at": stamp(clock),
+                         "started_at": stamp(clock + 1), "completed_at": stamp(clock + 1 + dur), "conclusion": "success",
+                         "labels": ["L"], "runner_name": "r", "runner_group_id": 1, "runner_group_name": "g", "steps": []})
+            clock += 2 + dur
+        rows.append({"id": rid, "name": "CI", "path": ".github/workflows/ci.yml", "workflow_id": 1, "event": "pull_request",
+                     "head_branch": "b", "head_sha": "%040x" % rid, "head_repo": "o/r", "run_attempt": 1,
+                     "conclusion": "success", "created_at": stamp(t), "run_started_at": stamp(t + 2),
+                     "updated_at": stamp(clock), "pull_requests": [1], "pull_request_bases": ["main"],
+                     "pull_requests_found": [], "head_message": "c", "jobs": jobs})
+    return rows
+
+
+TIDY_RUN = [("run_started_at", None), ("run_started_at", "bad"), ("run_attempt", 2), ("conclusion", "cancelled"),
+            ("conclusion", "failure"), ("conclusion", None), ("created_at", "bad"), ("event", "push"), ("jobs", []),
+            ("pull_request_bases", []), ("head_sha", None)]
+TIDY_JOB = [("started_at", None), ("started_at", "bad"), ("completed_at", None), ("completed_at", "bad"),
+            ("runner_name", None), ("labels", []), ("labels", ["Z"]), ("run_attempt", 2), ("conclusion", "skipped"),
+            ("conclusion", "cancelled"), ("conclusion", "failure"), ("conclusion", None), ("runner_group_id", None),
+            ("runner_group_id", 9), ("name", "zz"), ("name", "test"), ("id", None), ("copy", 1), ("copy", 2), ("drop", None)]
+TIDY_FLAGS = [[], ["--job", "test"], ["--job", "test", "--end"], ["--job", "gate", "--end"], ["--ran", "test"],
+              ["--ran", "gate"], ["--job", "test", "--ran", "gate"], ["--job", "gate", "--end", "--ran", "test"],
+              ["--label", "L"], ["--job", "test", "--label", "L"], ["--job", "test", "--end", "--label", "L"],
+              ["--ran", "gate", "--label", "L"], ["--cache", "hit"], ["--job", "test", "--cache", "miss"], ["--base", "main"],
+              ["--workflow", "ci.yml"], ["--job", "test", "--end", "--ran", "gate", "--label", "L", "--cache", "hit"]]
+
+
+def mutate(rng, rows, ri=None):
+    """One field of run ri (else a random one) or of one of its jobs set to another value GitHub
+    (or a hand edit) can give; or a job copied (same attempt, or as attempt 2) or dropped."""
+    rows = json.loads(json.dumps(rows))
+    r = rows[ri] if ri is not None else rng.choice(rows)
+    if rng.random() < 0.3:
+        k, v = rng.choice(TIDY_RUN)
+        r[k] = v
+    elif r["jobs"]:
+        ji = rng.randrange(len(r["jobs"]))
+        j = r["jobs"][ji]
+        k, v = rng.choice(TIDY_JOB)
+        if k == "copy":
+            r["jobs"].append(dict(j, id=(j.get("id") or 0) + 5, run_attempt=v))
+        elif k == "drop":
+            r["jobs"].pop(ji)
+        else:
+            j[k] = v
+    return rows
+
+
+def run_tidy(base_path, seeds, per_flag=40):
+    base, head = mods(base_path)
+    found = []
+    with tempfile.TemporaryDirectory() as t:
+        for seed in seeds:
+            rng = random.Random(10 ** 6 + seed)
+            n = 5 + rng.randrange(3)
+            before, after = gen_tidy(rng, "before", n + 1, 1000, 0), gen_tidy(rng, "after", n + 1, 2000, 400000)
+            json.dump({str(r["id"]): "hit" for r in before + after}, open(t + "/c.json", "w"))
+            for f in TIDY_FLAGS:
+                for _ in range(per_flag):
+                    # One field, or two: half the time both in one run (a run left out for one
+                    # can hide the other from the check that would have read it).
+                    side, ri = rng.random() < 0.5, rng.randrange(n + 1)
+                    b, a = (mutate(rng, before, ri), after) if side else (before, mutate(rng, after, ri))
+                    if rng.random() < 0.4:
+                        same = rng.random() < 0.5
+                        if same and side or not same and rng.random() < 0.5:
+                            b = mutate(rng, b, ri if same else None)
+                        else:
+                            a = mutate(rng, a, ri if same else None)
+                    write(t + "/b.jsonl", b)
+                    write(t + "/a.jsonl", a)
+                    argv = ["compare", "--before", t + "/b.jsonl", "--after", t + "/a.jsonl"] + f
+                    if "--cache" in f:
+                        argv += ["--cache-state", t + "/c.json"]
+                    msg = laxer_compare(base, head, argv)
+                    if msg and msg != "usage":
+                        found.append("tidy seed %d %s: %s" % (seed, " ".join(f), msg))
+            write(t + "/s.jsonl", mutate(rng, before + after))
+            msg = laxer_split(base, head, t + "/s.jsonl")
+            if msg:
+                found.append("tidy split seed %d: %s" % (seed, msg))
     return found
 
 
@@ -414,18 +541,20 @@ def main(argv):
     if not argv or argv[0].startswith("-"):
         print(__doc__)
         return 2
-    base_path, seeds, histories = argv[0], 300, []
+    base_path, seeds, histories, tidy = argv[0], 300, [], 0
     rest = argv[1:]
     while rest:
         if rest[0] == "--seeds":
             seeds, rest = int(rest[1]), rest[2:]
+        elif rest[0] == "--tidy":
+            tidy, rest = int(rest[1]), rest[2:]
         elif rest[0] == "--history":
             histories.append(rest[1])
             rest = rest[2:]
         else:
             print("unknown argument %r" % rest[0])
             return 2
-    found = run_generated(base_path, range(seeds))
+    found = run_generated(base_path, range(seeds)) + run_tidy(base_path, range(tidy))
     for h in histories:
         found += run_history(base_path, h)
     for x in found[:20]:

@@ -248,6 +248,51 @@ def check_rate():
     return core["remaining"]
 
 
+def shape_problem(r):
+    """What makes a record not one fetch writes, or None. Read before any line uses it: main
+    crashed on such records at whichever line first touched them, so each reading stops here."""
+    if not isinstance(r, dict):
+        return "isn't a JSON object"
+    text = lambda v: v is None or isinstance(v, str)
+    number = lambda v: v is None or (isinstance(v, int) and not isinstance(v, bool))
+    def when(v):
+        if v is not None and not isinstance(v, str):
+            return False
+        ts(v)  # an unreadable one stops, naming it
+        return True
+    if not isinstance(r.get("created_at"), str) or not r["created_at"] or not when(r["created_at"]):
+        return "has no creation time"
+    bad = ([k for k in ("name", "path", "event", "head_branch", "head_sha", "head_message", "head_repo", "conclusion",
+                        "status") if not text(r.get(k))]
+           + [k for k in ("id", "run_attempt", "workflow_id") if not number(r.get(k))]
+           # Read with a default when absent, so present they must hold one.
+           + [k for k in ("run_attempt", "jobs") if k in r and r[k] is None]
+           + [k for k in ("run_started_at", "updated_at") if not when(r.get(k))]
+           + [k for k, ok in (("pull_requests", number), ("pull_request_bases", text), ("pull_requests_found", number))
+              if r.get(k) is not None and not (isinstance(r[k], list) and all(x is not None and ok(x) for x in r[k]))])
+    jobs = r.get("jobs")
+    if jobs is not None and not isinstance(jobs, list):
+        bad.append("jobs")
+    for j in jobs if isinstance(jobs, list) else []:
+        if not isinstance(j, dict):
+            bad.append("a job")
+            continue
+        bad += (["job " + k for k in ("name", "conclusion", "status", "runner_name", "runner_group_name") if not text(j.get(k))]
+                + ["job " + k for k in ("id", "run_attempt", "runner_group_id") if not number(j.get(k))]
+                + ["job " + k for k in ("created_at", "started_at", "completed_at") if not when(j.get(k))]
+                + ["job " + k for k in ("run_attempt", "steps") if k in j and j[k] is None])
+        if j.get("labels") is not None and not (isinstance(j["labels"], list) and all(isinstance(x, str) for x in j["labels"])):
+            bad.append("job labels")
+        steps = j.get("steps")
+        if steps is not None and not isinstance(steps, list):
+            bad.append("job steps")
+        for s in steps if isinstance(steps, list) else []:
+            if not isinstance(s, dict) or not all(text(s.get(k)) for k in ("name", "conclusion", "status")) \
+                    or not number(s.get("number")) or not all(when(s.get(k)) for k in ("started_at", "completed_at")):
+                bad.append("a step")
+    return ("has a field of the wrong kind: " + ", ".join(sorted(set(bad)))) if bad else None
+
+
 def read_runs(path, saved_ok=True, need_jobs=True):
     """Runs from a JSONL file fetch wrote, or from a folder of GitHub's saved answers
     (runs_from_dir). A comparison passes saved_ok=False: a folder can't show the query that
@@ -258,7 +303,7 @@ def read_runs(path, saved_ok=True, need_jobs=True):
             die("%s is a folder of saved answers; compare reads only files fetch wrote: a saved"
                 " listing can't show which query filled it, so a missing failure can't be ruled out."
                 " Describe these runs with split --runs-dir; measure with fetch" % path)
-        return runs_from_dir(path, need_jobs)
+        return checked(path, runs_from_dir(path, need_jobs))
     if not os.path.isfile(path):
         die("no file or folder %s" % path)
     runs = []
@@ -270,6 +315,14 @@ def read_runs(path, saved_ok=True, need_jobs=True):
                     runs.append(json.loads(line))
                 except ValueError:
                     die("%s line %d isn't JSON; give a file fetch wrote, or a folder of saved answers" % (path, n))
+    return checked(path, runs)
+
+
+def checked(path, runs):
+    for r in runs:
+        why = shape_problem(r)
+        if why:
+            die("%s: run %s %s; give a file fetch wrote" % (path, r.get("id") if isinstance(r, dict) else "?", why))
     return runs
 
 
@@ -1412,15 +1465,17 @@ def timed_runs(runs, a, side, excluded, keep=None):
                     j = js[0]
                     if j.get("conclusion") != "success":
                         why = "job %s" % j.get("conclusion")
-                    elif not executed(j):
-                        # No start time: main never took it for a run that ran the job.
-                        why = "job %s has no start time" % a.job
-                    elif a.end:
-                        # On the run's clock: from the run's start to this job's end, so its
-                        # queue and every job before it on its path count.
-                        d = secs(r.get("run_started_at") or r.get("created_at"), j.get("completed_at"))
                     else:
-                        d = secs(j.get("started_at"), j.get("completed_at"))
+                        if a.end:
+                            # On the run's clock: from the run's start to this job's end, so its
+                            # queue and every job before it on its path count.
+                            d = secs(r.get("run_started_at") or r.get("created_at"), j.get("completed_at"))
+                        else:
+                            d = secs(j.get("started_at"), j.get("completed_at"))
+                        if not executed(j):
+                            # No start time: main never took it for a run that ran the job. (Its
+                            # clock is read first, as main read it: an unreadable one stops.)
+                            why, d = "job %s has no start time" % a.job, None
             else:
                 d = run_wall(r)
         if not why and d is not None and d <= 0:
