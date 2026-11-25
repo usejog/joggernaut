@@ -3695,6 +3695,13 @@ with tempfile.TemporaryDirectory() as t:
     r = run([M, "split", "--in", t + "/s.jsonl", "--setup-pattern", "["])
     if r.returncode != 2 or "isn't a regular expression" not in r.stderr:
         bad.append("split: an invalid --setup-pattern was read: %s%s" % (r.stdout[:200], r.stderr[-200:]))
+    # #47 review round 20 (Opus): re.compile raises OverflowError for a repeat too large and
+    # RecursionError for groups nested too deep; both stop with the same message, not a crash.
+    for pattern in ("a{4294967296}", "(" * 1000 + ")" * 1000):
+        r = run([M, "split", "--in", t + "/s.jsonl", "--setup-pattern", pattern])
+        if r.returncode != 2 or "isn't a regular expression" not in r.stderr:
+            bad.append("split: --setup-pattern %s... crashed or was read: %s%s"
+                       % (pattern[:15], r.stdout[:200], r.stderr[-200:]))
     differential.write(t + "/s.jsonl", [dict(_r(1, "CI", "ci.yml", "push", True), event="\ud800")])
     r = run([M, "split", "--in", t + "/s.jsonl"])
     if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
