@@ -2121,10 +2121,18 @@ def junit_results(path):
           suite_path = [s.get("name") or "" for s in chain]
           suite_file = next((s.get("file") for s in reversed(chain) if s.get("file")), "")
           # Errors on the suite itself are counted apart from tests (they aren't tests that ran),
-          # by kind, so one kind replacing another shows.
+          # by kind and message, so one replacing another of the same type (a cleanup error for
+          # a collection error) shows; numbers in the message (times, ids) are blanked.
           for c in suite:
               if local(c.tag) in FAILED_TAGS:
-                  k = json.dumps([where, suite_path, suite_file, local(c.tag), c.get("type") or ""])
+                  # The message, else the whole text (a traceback's error line can be followed by
+                  # notes). Addresses and numbers blanked (times, ids, line numbers); a text that
+                  # differs otherwise, a temporary path say, counts as another error: the cautious
+                  # side for `tests`. Keyed by a short hash, never shown: it can hold a secret.
+                  msg = (c.get("message") or (c.text or "")).strip()
+                  msg = re.sub(r"0[xX][0-9a-fA-F]+|\d+(?:\.\d+)*(?:[eE][-+]?\d+)?", "#", " ".join(msg.split()))
+                  msg = "message %s" % hashlib.sha256(msg.encode()).hexdigest()[:8] if msg else ""
+                  k = json.dumps([where, suite_path, suite_file, local(c.tag), c.get("type") or "", msg])
                   errs[k] = errs.get(k, 0) + 1
           for tc in [c for c in suite if local(c.tag) == "testcase"]:
             cases += 1
@@ -2157,10 +2165,12 @@ def junit_results(path):
 
         containers = [x for x in root.iter() if local(x.tag) in ("testsuite", "testsuites")]
         for e in containers:
+            # The container's whole ancestry, each with the file it names: same-name suites
+            # under parents that name different files are different containers.
             chain, x = [], e
             while x is not None:
                 if local(x.tag) in ("testsuite", "testsuites"):
-                    chain.append(x.get("name") or local(x.tag))
+                    chain.append([x.get("name") or local(x.tag), x.get("file") or ""])
                 x = parent.get(x)
             path_ = chain[::-1]
             efile = e.get("file") or ""
@@ -2192,6 +2202,8 @@ def junit_results(path):
 def show_test(t):
     parts = json.loads(t)
     where, suites = parts[0], parts[1]
+    # A container in a declared-totals key is [name, file]: shown with its file.
+    suites = [x if isinstance(x, str) else x[0] + (" [%s]" % x[1] if x[1] else "") for x in suites]
     return "::".join(x for x in [where, "/".join(suites)] + parts[2:] if x)
 
 
