@@ -104,7 +104,7 @@ def laxer_split(base, head, path, extra=()):
     rows = [json.loads(l) for l in open(path) if l.strip()]
     extra = list(extra)
     w = extra[extra.index("--workflow") + 1] if "--workflow" in extra else None
-    mine = [r for r in rows if w is None or r.get("name") == w]
+    mine = [r for r in rows if not w or r.get("name") == w]  # an empty --workflow selects all, as measure.py reads it
     b, h = split_fails(base, path, extra), split_fails(head, path, extra)
     if h == "crash" and b != "crash":  # a crash both share is main's too
         return "head crashed"

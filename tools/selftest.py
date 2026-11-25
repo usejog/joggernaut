@@ -3404,6 +3404,20 @@ with tempfile.TemporaryDirectory() as t:
     if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
         bad.append("compare: a job named with a number was read: %s" % r.stdout[:300])
 
+# Astra round 20: a lone surrogate (an escaped \ud800) in a field is a field of the wrong kind; main
+# crashed writing it out in text mode.
+with tempfile.TemporaryDirectory() as t:
+    start = "2026-01-01T00:00:00Z"
+    rows = lambda ids, end, odd=None: [dict(id=i, name="CI", event="\ud800" if i == odd else "pull_request",
+                                            conclusion="success", created_at=start,
+                                            jobs=[dict(name="test", conclusion="success", started_at=start, completed_at=end)])
+                                       for i in ids]
+    differential.write(t + "/b", rows(range(1, 7), "2026-01-01T00:01:00Z", odd=6))
+    differential.write(t + "/a", rows(range(7, 12), "2026-01-01T00:00:30Z"))
+    r = run([M, "compare", "--before", t + "/b", "--after", t + "/a", "--job", "test"])
+    if r.returncode != 2 or "give a file fetch wrote" not in r.stderr:
+        bad.append("compare: a lone surrogate was read: %s%s" % (r.stdout[:200], r.stderr[-200:]))
+
 # Never laxer than the base, on random histories (seeded: a failure names its seed, and
 # `tools/differential.py BASE --seeds N` reproduces it; also takes --history FILE).
 if BASE:
