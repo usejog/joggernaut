@@ -77,31 +77,33 @@ in `references/measuring.md`.
    - real sleeps or waits on wall-clock time where a fake clock or waiting
      on the event fits;
    - something started for nothing (a database, a renderer, a server);
-   - overhead every test pays without being about it, which spreads time
-     evenly instead of piling it on one test: the application logging at
-     debug level in tests (Rails defaults to `:debug` everywhere but
-     production) or writing verbose query logs; an error reporter or
-     tracing client still building or sending events (Sentry, an APM
-     agent); a slower coverage tracer than the Python version allows
-     (coverage.py's `sysmon` core runs on Python 3.12 and later, and
-     measures branches only from 3.14). Rank these by profiling a sample of
-     tests, or by timing a sample locally with and without the setting;
-     the result comes from CI's runs.
+   - logging, reporting or coverage overhead shared across tests that
+     none of them is about: the application logging at debug level in
+     tests (Rails defaults to `:debug` everywhere but production) or
+     writing verbose query logs; an error reporter or tracing client still
+     building or sending events (Sentry, an APM agent); a slower coverage
+     tracer than coverage.py offers on that Python (its `sysmon` core, on
+     Python 3.12 and later). Rank these by profiling a sample of tests, or
+     by timing a sample locally with and without the setting.
 
    The fix must keep the test testing the same thing. Mock what the test
    isn't about, never the subject under test, and never a call whose
    behaviour the test checks (serialisation, authentication, timing): keep
    those in an integration test. If the right fix changes an assertion or
-   an expected value, stop and flag it for a person. For overhead: quiet
-   only the application's own logging, leaving the test runner's failure
-   output as it was, and a test that reads the log keeps its level. Fake an
-   error reporter with its SDK's own test mode (Ruby's `Sentry::Testing`),
-   or leave it unconfigured (Sentry's Python SDK with no DSN "will just not
-   send any data"), and a test that checks an error gets reported keeps
-   checking it. A coverage change must measure the same coverage: compare
-   the total and the files measured, before and after. Where a coverage
-   threshold or branch coverage is in use, a core that measures less
-   loosens a check: stop and flag it.
+   an expected value, stop and flag it for a person. For shared overhead:
+   - Logging: quieting the application's log is a person's call where
+     anything reads it (a test, a later CI step, a log kept from failed
+     runs); otherwise quiet only the application's own logging and leave
+     the test runner's output as it was.
+   - An error reporter: don't start it in tests, or replace it with a fake
+     that does nothing, except where a test checks that an error gets
+     reported.
+   - Coverage: switch the core only where the installed coverage.py
+     supports it for every feature CI uses (its docs list what `sysmon`
+     lacks: plugins, dynamic contexts, some concurrency libraries, and
+     branch coverage before Python 3.14), with no upgrade in the same
+     change. Compare the coverage data CI's checks read, before and after;
+     if anything measured drops, stop and flag it.
 4. **Check cores before shards.** Compare the test runner's worker count with
    the runner's cores (`nproc` in a CI step, or the runner's documented
    size: GitHub's standard Linux runner has 4 on public repositories and 2 on
@@ -175,11 +177,12 @@ As their authors reported them; we didn't reproduce them.
   all 63 tests kept.
 - Linear: turning off Vitest isolation took the slowest shard from about
   300–379 s to about 195 s. Boardy: each shard went from 100 s to 35 s.
-- Whop's Rails suite (written up by Evil Martians, who did the work): with
+- Evil Martians, measuring the work it was paid to do on Whop's CI: with
   verbose query logs off, the log level raised and Sentry faked in tests,
-  CI with 16 parallel processes went from about 4 minutes to about 2:
-  "Disabling the verbose query logs did the heavy lifting, with the Sentry
-  optimization providing an additional gain."
+  the run with 16 parallel processes went from about 4 minutes to about 2,
+  the three changes together: "Disabling the verbose query logs did the
+  heavy lifting, with the Sentry optimization providing an additional
+  gain."
 - Sidelab's agent, after speeding up a slow test, broke the code on purpose
   to make sure the faster test still catches the bug.
 
