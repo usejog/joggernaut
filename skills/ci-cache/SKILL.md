@@ -139,28 +139,28 @@ in `references/measuring.md`.
    6. **The build tool's own cache restores, but its tasks still run.**
       Gradle's build cache, Bazel's disk or remote cache, Turborepo and Nx
       key each task on a hash of its inputs, so a restore the cache lines
-      call a hit can still leave most tasks running when an input differs
-      from the run that saved them. Read the tool's own count: Gradle's
-      last lines (tasks executed, from cache, up to date), Bazel's
-      process summary (`remote cache hit` per action), Turborepo's run
-      summary (`--summarize` writes each task's hash and inputs under
-      `.turbo/runs`), Nx's cache-miss guide for Nx. Where a cacheable task
-      runs again on a rerun of the same commit, or on a pull request that
-      touched none of its inputs, find the input that differs by comparing
-      the two runs' input hashes: Gradle's `-Dorg.gradle.caching.debug=true`,
-      two Turborepo summaries, or Bazel's two execution logs
-      (`--execution_log_compact_file`), compared as each tool's docs say.
-      The usual culprits: an absolute path among a task's inputs, a file
-      written with a timestamp (Java's `Properties.store`, Gradle's docs
-      say), a setting of the host leaking in (Bazel's docs), a key that
-      takes in far more than the task reads (at Slack, every Python change
-      changed the frontend build's key), or build steps that change the
-      working directory (Slack). Fix one input per pull request, in the
-      build's configuration, never by skipping a task. A test task the
-      cache would then replay must pass step 4's check first, and should
-      restore its test report with it (list the report among the task's
-      outputs), or `measure.py tests` will count its tests as stopped. A
-      remote cache service is a provider: a person's call.
+      call a hit can still leave most tasks running. Read the tool's own
+      count in the build log: Gradle's last lines (tasks executed, from
+      cache, up to date), Bazel's process summary (its cache-hit counts
+      against processes run), a Turborepo run summary (`--summarize`), Nx's
+      per-task cache marks. Then take a cacheable task that ran again on
+      an existing rerun of the same commit, or on a pull request that
+      touched none of its inputs, and compare its keys across the two runs.
+      If the keys differ, find the input that differs by its hashes:
+      Gradle's `-Dorg.gradle.caching.debug=true`, two Turborepo summaries,
+      or Bazel's two execution logs (`--execution_log_compact_file`), as
+      each tool's docs say. Compare them on the runner or locally, and
+      report only which fields differ, never their values: an action's
+      environment and arguments can hold secrets. If the keys match, the
+      entry was never saved, or was evicted or unreadable: check 1 to 4
+      above. A fix may only make an input stable: an absolute path made
+      relative, a timestamp dropped from a generated file, a setting of
+      the host pinned; the output must stay the same apart from that
+      field. Removing an input from a task's key, or splitting the build
+      graph as Slack did, is a person's call, since a task that reads a
+      dropped input replays stale output. So is any fix that would let the
+      cache replay a test task: step 4's check comes first. A remote cache
+      service is a provider: a person's call.
 4. **Change one key or step per pull request.** Show the diff, the hit rate
    before, and why the new key will hit. Never change what the build or the
    tests do. A cache change must never make a job skip work it would
@@ -195,7 +195,8 @@ in `references/measuring.md`.
    says, over all successful runs, and report the hit rate before and after
    beside it; where both sides have warm runs, also compare warm with warm
    (`--cache-state`, `--cache hit`). Report hit rate and setup seconds per
-   job before and after.
+   job before and after, and for 3.6 the tool's own counts and the build
+   step's seconds.
 
 ## What it measures
 
@@ -234,11 +235,9 @@ As their authors reported them; we didn't reproduce them.
   time also includes Go's cached test results for unchanged packages.
 - At Slack, "every single Python change" altered the frontend build's
   cache key, and "our cache hit rate was zero"; builds took 60 minutes,
-  and once Python changes left that key, "if the frontend was cached, we
-  could build the whole application in as little as 25 minutes".
-- At cal.com, with Turborepo's remote cache, "subsequent builds take just 7
-  seconds to pull from cache compared to the ~1 minute for a full build".
-  (Its earlier drop from 6 minutes to 1 came from upgrading Next.js.)
+  and once the backend and frontend builds were decoupled, "if the
+  frontend was cached, we could build the whole application in as little
+  as 25 minutes".
 - A node_modules cache lost at Linear (about 28 s to restore against about
   7.5 s for a filtered install) and won at Boardy (13 s against 33 s), which
   is why the skill times both.
