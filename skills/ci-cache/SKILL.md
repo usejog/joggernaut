@@ -1,6 +1,6 @@
 ---
 name: ci-cache
-description: Use when GitHub Actions reinstalls dependencies on every pull request, a cache "never hits" or logs "Cache not found", sccache or ccache shows 0% hits, or restoring a cache looks slower than rebuilding. Not for application caches such as Redis.
+description: Use when GitHub Actions reinstalls dependencies on every pull request, a cache "never hits" or logs "Cache not found", sccache or ccache shows 0% hits, or restoring a cache looks slower than rebuilding, or a Gradle, Maven or Android build downloads and rebuilds everything each run. Not for application caches such as Redis.
 license: MIT
 compatibility: Needs Python 3.9+ and the GitHub CLI (gh), authenticated. Reads GitHub Actions runs.
 metadata:
@@ -88,7 +88,8 @@ in `references/measuring.md`.
    only if 5 below says it pays. A Docker image built on every run without
    a layer cache can use `cache-from: type=gha` and
    `cache-to: type=gha,mode=max` in `docker/build-push-action`, with a
-   Buildx builder that supports it (Docker docs).
+   Buildx builder that supports it (Docker docs). For a Gradle, Maven or
+   Android build, `references/jvm.md` gives the cache each tool expects.
    1. **Nothing is saved on the default branch.** A pull request's run can
       restore caches from its own branch, the default branch and its base
       branch, but saves only to its own merge ref (GitHub docs), so if no run

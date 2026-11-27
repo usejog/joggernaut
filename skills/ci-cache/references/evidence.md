@@ -1,6 +1,7 @@
 # Evidence for ci-cache
 
-Public posts this skill relies on, each re-read at its link on 23 Nov 2026. Numbers are as
+Public posts this skill relies on, each re-read at its link on 23 Nov 2026
+(rows added on 27 Nov 2026: read that day). Numbers are as
 the source states them; we did not reproduce them.
 
 Grades: **A** measured, first person, named repository or company; **B**
@@ -14,6 +15,8 @@ measured CI result; **D** opinion, a prompt or a restatement.
 | [CloudX engineering blog, 16 Sep 2026](https://www.cloudx.ai/posts/setup-go) | Parallel lint and test jobs shared setup-go's default cache key; test jobs regressed from a 76 s to a 180 s median, and a per-job cache brought the median job runtime to 41 s; the post says the restored cache also let Go reuse test results and run only changed packages' tests. | A |
 | [RemitAid on Zenn (in Japanese), 21 Aug 2026](https://zenn.dev/remitaid/articles/fa94cb567f5d1d) | The same shared setup-go key bug, fixed with per-job keys within a wider redesign (separate jobs, per-commit keys, fallback restores); the test job's total (ジョブ合計) on a pull-request run that restored the previous commit's cache went from about 8 minutes to 2 minutes 55 seconds. | A |
 | [Linear engineering blog, 21 Sep 2026](https://linear.app/now/ci-bottleneck-reworked) | A node_modules cache took about 28 s to restore against about 7.5 s for a filtered install. | A |
+| [Acecore (Gui), 17 Nov 2026](https://systems.acecore.net/en/insights/gradle-cache-ci-measurement/) | An Android Gradle job on one commit "took 16 minutes 20 seconds on the initial run and 6 minutes 16 seconds on the rerun", the restore taking 62 seconds; "This 1 pair of runs was measured using a PR-specific cache." The measuring paragraph doesn't name the CI. "In the final configuration, only main saves the shared cache, and PRs restore it in read-only mode", not measured. | A |
+| [Picnic (Oksana Evseeva), 24 Jul 2024](https://jobs.picnic.app/blogs/improving-maven-build-times) | The Maven build cache extension on TeamCity: "Instead of 10 minutes 4 seconds, the build that was fully cached took only 1 minute 22 seconds"; "Build times dropped from 12 minutes to 8 minutes in general." Its introduction says 13 minutes to 1 at best, which its results don't match. The cache is off for default-branch and release builds. | A |
 
 ## How the platform behaves, from its own docs
 
@@ -28,3 +31,6 @@ marked "GitHub docs" or "Go's docs" in `SKILL.md` rests on one of these.
 - [actions/setup-node: cache restore](https://github.com/actions/setup-node/blob/main/src/cache-restore.ts): sets `cache-hit` whenever a cache was restored, prefix matches included.
 - [actions/setup-python: advanced usage](https://github.com/actions/setup-python/blob/main/docs/advanced-usage.md#caching-packages): `cache-hit` reports a hit on the primary key.
 - [actions/cache: exact key match](https://github.com/actions/cache/blob/main/src/utils/actionUtils.ts): `isExactKeyMatch` compares with `localeCompare(..., { sensitivity: "accent" })`, which ignores case.
+- [gradle/actions: setup-gradle](https://github.com/gradle/actions/blob/main/docs/setup-gradle.md): "Caching is enabled by default"; saves the Gradle User Home's `caches` (`modules-2`, `build-cache-1`) and `notifications`, and wrapper distributions; writes the cache only from jobs on the default branch unless `cache-read-only` says otherwise; "Avoid using `actions/cache` configured to cache the Gradle User Home" and `setup-java`'s `cache: gradle`, which "may interfere"; Enhanced Caching, the default provider, "is currently available as a Free Preview for private repositories".
+- [actions/setup-java: caching](https://github.com/actions/setup-java#caching-packages-dependencies): `cache: maven` stores `~/.m2/repository`, keyed on `**/pom.xml`, `**/.mvn/wrapper/maven-wrapper.properties` and `**/.mvn/extensions.xml`.
+- [Maven build cache extension: overview](https://maven.apache.org/extensions/maven-build-cache-extension/concepts.html): "calculates a key from module inputs, stores outputs in the cache, and transparently restores them later"; for production builds "it is recommended to disable the cache and do clean builds instead".
