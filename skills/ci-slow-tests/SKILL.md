@@ -101,10 +101,38 @@ in `references/measuring.md`.
    that can't be made safe isolated; run each changed file alone and the
    suite in shuffled order to check; and write the rule into the
    repository's rules file so new tests follow it.
-   If one shard finishes well after the others, balance by time before
-   adding shards: take each file's measured wall time (or its tests' seconds where they don't overlap), and use a
-   splitter that reads recorded durations (pytest-split, Knapsack and the like; check how your runner's plain `--shard` splits before relying on it) or
-   move the slowest files apart. Check the slowest shard's time after.
+   **With a matrix of test shards, check two things before adding shards.**
+   - **The spread between shards.** `measure.py split --json` lists each
+     matrix leg as its own job in `jobs` (the legs' names differ only in
+     their matrix values), with its median running time. The spread is the
+     slowest leg's median minus the fastest's. With the work divided evenly,
+     each leg would run for about the legs' mean, so balancing can save up
+     to the slowest leg's median minus that mean. Write "up to": a splitter
+     moves whole files or tests, and one test longer than the mean bounds
+     it. The medians come from different runs, so a spread no larger than
+     one leg's own run-to-run range is noise. The saving shortens the wait
+     only where the slowest leg is on the slowest path (`split`'s chains).
+     To balance, take each file's measured wall time (or its tests' seconds
+     where they don't overlap) and use a splitter that reads recorded
+     durations (pytest-split, Knapsack and the like), or move the slowest
+     files apart. Check how your runner's plain `--shard` splits before
+     relying on it: Playwright's deals out whole files by default, not
+     time. pytest-split gives a test with no recorded duration the average,
+     so record the durations again as the suite changes, and its README
+     says its `least_duration` algorithm "should give more balanced
+     groups" than the default. Check the slowest shard's time after.
+   - **Discovery in every shard.** Where each shard collects the whole
+     suite and then runs only its part (Home Assistant's pytest jobs each
+     discovered every test), every shard pays the collection time. Measure
+     it in one shard's log, or time a collect-only run (`pytest
+     --collect-only -q`) as a step on CI once. A job that collects once
+     and hands each shard its list as an artifact saves about (shards − 1)
+     × the collection time in runner-minutes, less the new job's own
+     minutes. The new job runs before the shards, so the wait falls only
+     where one shard's collection takes longer than the new job's queue,
+     setup and collection together. The list must name every collected
+     test once.
+
    Every test must still run across the shards: `measure.py tests` catches
    a lost test, not one run twice, so check the split for duplicates.
 5. **Offer a per-test time check** that fails the build when a test runs
@@ -144,6 +172,9 @@ This is reasoning from how CI works, not a measurement.
   install, only its own fixtures and imports, which is why cores come
   before shards; spare cores don't mean spare memory or disk, which is why
   the suite's own times decide.
+- A matrix finishes when its slowest leg does. Moving tests from the
+  slowest leg to faster ones keeps every test and shortens the matrix, by
+  at most the slowest leg's time minus the legs' mean.
 - Every shard pays setup again, while GitHub bills a runner by the minute,
   not by the cores a job keeps busy, so idle cores cost nothing extra. Try
   the cores before adding machines.
@@ -156,6 +187,16 @@ As their authors reported them; we didn't reproduce them.
   all 63 tests kept.
 - Linear: turning off Vitest isolation took the slowest shard from about
   300–379 s to about 195 s. Boardy: each shard went from 100 s to 35 s.
+- Pinterest grouped its Android end-to-end tests "based on how long they
+  usually take" instead of by count, and the new system "shaved over nine
+  minutes off the total test time".
+- StoatFlow's Gradle integration tests took 23m53s on an 8-vCPU runner
+  with six forks, because Gradle deals test classes to forks round-robin
+  and some forks sat idle; 13 groups, the three largest split by measured
+  duration, took 10m43s on the same runner.
+- Home Assistant moved test discovery out of its 10 pytest jobs into one
+  job that splits the tests: "Not doing full-discovery in each test runner
+  saves us 3 hours on each full run!" That is runner time, not wait.
 - Sidelab's agent, after speeding up a slow test, broke the code on purpose
   to make sure the faster test still catches the bug.
 
