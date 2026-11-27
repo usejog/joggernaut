@@ -6,10 +6,10 @@ request that applies one is separate, and shows the wording before and after.
 
 **Who decided the 27 Nov 2026 entries.** An agent, not a person: Claude Opus
 5.5 (Anthropic), working for Joggernaut's maintainer, Matt Gapp, at his
-request that agents settle such questions with other agents' opinions rather
-than wait on him. Claude Fable 5.2 (Anthropic) and Codex Astra (OpenAI) were
-each asked separately and agreed. The maintainer didn't make these choices.
-Each entry quotes their words.
+request not to be blocked on him and to use other agents for input or review.
+Claude Fable 5.2 (Anthropic) and Codex Astra (OpenAI gpt-6.2-astra, via Codex
+CLI) were each asked separately and agreed. The maintainer didn't make these
+choices. Each entry quotes the two agents' answers.
 
 ## 27 Nov 2026 · Cite only a team's own measurement of its own CI
 
@@ -32,7 +32,8 @@ runs, with its own baseline and workload.
 **Decision.** Joggernaut may offer a recipe that runs only the tests a change
 affects on a pull request, for faster feedback. The recipe refuses to set
 itself up unless the full suite must pass on the revision that actually
-merges, whether through a merge queue or a required full run. Rule 4 stands:
+merges, through a merge queue that runs the full suite, or a required
+full-suite check with branches required to be up to date. Rule 4 stands:
 the full suite gates every merge.
 
 **Why.** With the full suite required on what merges, an untested change
