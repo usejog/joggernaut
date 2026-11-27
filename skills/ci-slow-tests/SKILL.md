@@ -181,9 +181,6 @@ As their authors reported them; we didn't reproduce them.
   all 63 tests kept.
 - Linear: turning off Vitest isolation took the slowest shard from about
   300–379 s to about 195 s. Boardy: each shard went from 100 s to 35 s.
-- Pinterest grouped its Android end-to-end tests "based on how long they
-  usually take" instead of by count, and the new system "shaved over nine
-  minutes off the total test time".
 - StoatFlow's Gradle integration tests, one run each on the same 8-vCPU
   runner: six forks 23m53s, with forks idle because Gradle deals test
   classes to forks round-robin; twelve forks 16m40s–18m16s; 13 groups by
