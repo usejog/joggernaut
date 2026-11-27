@@ -1,6 +1,7 @@
 # Evidence for ci-cache
 
-Public posts this skill relies on, each re-read at its link on 23 Nov 2026. Numbers are as
+Public posts this skill relies on, each re-read at its link on 23 Nov 2026
+(rows added on 27 Nov 2026: read that day). Numbers are as
 the source states them; we did not reproduce them.
 
 Grades: **A** measured, first person, named repository or company; **B**
@@ -14,6 +15,9 @@ measured CI result; **D** opinion, a prompt or a restatement.
 | [CloudX engineering blog, 16 Sep 2026](https://www.cloudx.ai/posts/setup-go) | Parallel lint and test jobs shared setup-go's default cache key; test jobs regressed from a 76 s to a 180 s median, and a per-job cache brought the median job runtime to 41 s; the post says the restored cache also let Go reuse test results and run only changed packages' tests. | A |
 | [RemitAid on Zenn (in Japanese), 21 Aug 2026](https://zenn.dev/remitaid/articles/fa94cb567f5d1d) | The same shared setup-go key bug, fixed with per-job keys within a wider redesign (separate jobs, per-commit keys, fallback restores); the test job's total (ジョブ合計) on a pull-request run that restored the previous commit's cache went from about 8 minutes to 2 minutes 55 seconds. | A |
 | [Linear engineering blog, 21 Sep 2026](https://linear.app/now/ci-bottleneck-reworked) | A node_modules cache took about 28 s to restore against about 7.5 s for a filtered install. | A |
+| [Hugo van Kemenade, python/blurb, 2 Nov 2024](https://hugovk.dev/blog/2024/speed-up-ci-with-uv/) | pip to uv on GitHub Actions, the runs linked from the post: lint with no cache 60s → 37s, with a cache 11s → 11s; test with no cache 2m 0s → 1m 26s, with a cache 1m 58s → 1m 22s; "around 1.5 times as fast". The post doesn't say whether the installed versions matched. | A |
+| [Matia Rašetina, AWS Community Builders on DEV, "Jun 1" (no year shown)](https://dev.to/aws-builders/stop-using-pip-in-ci-i-cut-build-times-by-68-with-one-change-2mim) | `pip install -r requirements.txt` to `uv pip install -r requirements.txt`, 10 runs a side on GitHub Actions with fresh installs and "no caching strategies": "pip averaged around 73 seconds, while uv averaged about 23.5 seconds." | A |
+| [Home Assistant developers' blog, 3 Apr 2024](https://contributors.home-assistant.io/blog/2024/04/03/build-images-with-uv) | pip to uv in its image builds, not test jobs (the CI isn't named): aarch64 1h 24m 53s → 5m 18s, amd64 22m 10s → 3m 20s; "In total, we save around 215 hours per month." | A |
 
 ## How the platform behaves, from its own docs
 
@@ -28,3 +32,8 @@ marked "GitHub docs" or "Go's docs" in `SKILL.md` rests on one of these.
 - [actions/setup-node: cache restore](https://github.com/actions/setup-node/blob/main/src/cache-restore.ts): sets `cache-hit` whenever a cache was restored, prefix matches included.
 - [actions/setup-python: advanced usage](https://github.com/actions/setup-python/blob/main/docs/advanced-usage.md#caching-packages): `cache-hit` reports a hit on the primary key.
 - [actions/cache: exact key match](https://github.com/actions/cache/blob/main/src/utils/actionUtils.ts): `isExactKeyMatch` compares with `localeCompare(..., { sensitivity: "accent" })`, which ignores case.
+- [actions/setup-python: caching packages](https://github.com/actions/setup-python#caching-packages-dependencies): "For `pip`, the action will cache the global cache directory", keyed on a hash of the dependency file.
+- [uv: GitHub Actions](https://docs.astral.sh/uv/guides/integration/github/): recommends `astral-sh/setup-uv`; with `actions/cache`, key on `uv.lock`, or on `requirements.txt` when using `uv pip`; "`uv cache prune --ci` … is optimized for CI. Its effect on performance is dependent on the packages being installed."
+- [uv: compatibility with pip](https://docs.astral.sh/uv/pip/compatibility/): "in some cases, `pip` and uv will yield different resolutions"; uv doesn't read `pip.conf` or `PIP_*` variables; with several indexes it limits a package to "the first index that contains the package" by default.
+- [uv: Python environments](https://docs.astral.sh/uv/pip/environments/): "uv requires using a virtual environment by default"; "`--system` is appropriate in continuous integration and containerized environments."
+- [astral-sh/setup-uv: caching](https://github.com/astral-sh/setup-uv/blob/main/docs/caching.md): saves the whole uv cache, keyed on the runner, Python version and files matching `cache-dependency-glob` (requirements, constraints, `pyproject.toml`, lock files by default); no pruning by default.
