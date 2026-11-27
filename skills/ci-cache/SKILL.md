@@ -1,6 +1,6 @@
 ---
 name: ci-cache
-description: Use when GitHub Actions reinstalls dependencies on every pull request, a cache "never hits" or logs "Cache not found", sccache or ccache shows 0% hits, or restoring a cache looks slower than rebuilding, or a Gradle, Maven or Android build downloads and rebuilds everything each run. Not for application caches such as Redis.
+description: Use when GitHub Actions reinstalls dependencies on every pull request, a cache "never hits" or logs "Cache not found", sccache or ccache shows 0% hits, or restoring a cache looks slower than rebuilding, or a Gradle, Maven or Android build downloads its dependencies on every run. Not for application caches such as Redis.
 license: MIT
 compatibility: Needs Python 3.9+ and the GitHub CLI (gh), authenticated. Reads GitHub Actions runs.
 metadata:
