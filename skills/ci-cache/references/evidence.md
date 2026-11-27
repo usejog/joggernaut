@@ -1,6 +1,7 @@
 # Evidence for ci-cache
 
-Public posts this skill relies on, each re-read at its link on 23 Nov 2026. Numbers are as
+Public posts this skill relies on, each re-read at its link on 23 Nov 2026
+(rows added on 27 Nov 2026: read that day). Numbers are as
 the source states them; we did not reproduce them.
 
 Grades: **A** measured, first person, named repository or company; **B**
@@ -14,6 +15,8 @@ measured CI result; **D** opinion, a prompt or a restatement.
 | [CloudX engineering blog, 16 Sep 2026](https://www.cloudx.ai/posts/setup-go) | Parallel lint and test jobs shared setup-go's default cache key; test jobs regressed from a 76 s to a 180 s median, and a per-job cache brought the median job runtime to 41 s; the post says the restored cache also let Go reuse test results and run only changed packages' tests. | A |
 | [RemitAid on Zenn (in Japanese), 21 Aug 2026](https://zenn.dev/remitaid/articles/fa94cb567f5d1d) | The same shared setup-go key bug, fixed with per-job keys within a wider redesign (separate jobs, per-commit keys, fallback restores); the test job's total (ジョブ合計) on a pull-request run that restored the previous commit's cache went from about 8 minutes to 2 minutes 55 seconds. | A |
 | [Linear engineering blog, 21 Sep 2026](https://linear.app/now/ci-bottleneck-reworked) | A node_modules cache took about 28 s to restore against about 7.5 s for a filtered install. | A |
+| [Slack engineering blog (David Reed), 6 Nov 2025](https://slack.engineering/build-better-software-to-build-software-better/) | With Bazel, "every single Python change, alters the cache key for the frontend", and "our cache hit rate was zero"; "many build steps mutated the working directory". "builds took 60 minutes"; after Python changes left the TypeScript builds' key, "if the frontend was cached, we could build the whole application in as little as 25 minutes". | A |
+| [cal.com (Keith Williams), 1 Jan 2026](https://cal.com/blog/how-we-cut-our-ci-wall-time-from-30-minutes-to-5-minutes) | "With Turbo Remote Caching enabled, subsequent builds take just 7 seconds to pull from cache compared to the ~1 minute for a full build." The drop from 6+ minutes to about 1 came from upgrading to Next.js 16, not from the cache. | A |
 
 ## How the platform behaves, from its own docs
 
@@ -28,3 +31,7 @@ marked "GitHub docs" or "Go's docs" in `SKILL.md` rests on one of these.
 - [actions/setup-node: cache restore](https://github.com/actions/setup-node/blob/main/src/cache-restore.ts): sets `cache-hit` whenever a cache was restored, prefix matches included.
 - [actions/setup-python: advanced usage](https://github.com/actions/setup-python/blob/main/docs/advanced-usage.md#caching-packages): `cache-hit` reports a hit on the primary key.
 - [actions/cache: exact key match](https://github.com/actions/cache/blob/main/src/utils/actionUtils.ts): `isExactKeyMatch` compares with `localeCompare(..., { sensitivity: "accent" })`, which ignores case.
+- [Gradle: debugging the build cache](https://docs.gradle.org/current/userguide/build_cache_debugging.html): `-Dorg.gradle.caching.debug=true` prints the cache key and each input property's hash, "To find the actual differences between two builds you need to resort to matching up and comparing those hashes yourself"; non-relocatable tasks "are usually a result of absolute paths being present among the task's inputs"; `Properties.store` writes a timestamp.
+- [Bazel: remote caching, debugging hits](https://bazel.build/remote/cache-remote): "An action whose result came from a remote cache is displayed as `remote cache hit`"; compare two runs' execution logs (the compact format recommended) to find actions that differ; look for "properties from the host environment leaking into either of the builds".
+- [Turborepo: `run` reference](https://turborepo.dev/docs/reference/run) and [caching](https://turborepo.dev/docs/crafting-your-repository/caching): `--summarize` writes a JSON file in `.turbo/runs` with each task's hashes; "Comparing two summaries will show why two task's hashes are different."
+- [Nx: troubleshoot cache misses](https://nx.dev/docs/kb/troubleshoot-cache-misses): how Nx decides a task is cacheable and which files a task's hash takes in.

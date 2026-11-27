@@ -1,6 +1,6 @@
 ---
 name: ci-cache
-description: Use when GitHub Actions reinstalls dependencies on every pull request, a cache "never hits" or logs "Cache not found", sccache or ccache shows 0% hits, or restoring a cache looks slower than rebuilding. Not for application caches such as Redis.
+description: Use when GitHub Actions reinstalls dependencies on every pull request, a cache "never hits" or logs "Cache not found", sccache or ccache shows 0% hits, or restoring a cache looks slower than rebuilding, or a build tool's own cache (Gradle, Bazel, Turborepo, Nx) restores but its tasks still run. Not for application caches such as Redis.
 license: MIT
 compatibility: Needs Python 3.9+ and the GitHub CLI (gh), authenticated. Reads GitHub Actions runs.
 metadata:
@@ -136,6 +136,31 @@ in `references/measuring.md`.
       any install or link that still runs, save) on exact hits, partial
       hits and misses, each weighted by how often it happens, against a
       filtered or offline install alone. Keep whichever is faster.
+   6. **The build tool's own cache restores, but its tasks still run.**
+      Gradle's build cache, Bazel's disk or remote cache, Turborepo and Nx
+      key each task on a hash of its inputs, so a restore the cache lines
+      call a hit can still leave most tasks running when an input differs
+      from the run that saved them. Read the tool's own count: Gradle's
+      last lines (tasks executed, from cache, up to date), Bazel's
+      process summary (`remote cache hit` per action), Turborepo's run
+      summary (`--summarize` writes each task's hash and inputs under
+      `.turbo/runs`), Nx's cache-miss guide for Nx. Where a cacheable task
+      runs again on a rerun of the same commit, or on a pull request that
+      touched none of its inputs, find the input that differs by comparing
+      the two runs' input hashes: Gradle's `-Dorg.gradle.caching.debug=true`,
+      two Turborepo summaries, or Bazel's two execution logs
+      (`--execution_log_compact_file`), compared as each tool's docs say.
+      The usual culprits: an absolute path among a task's inputs, a file
+      written with a timestamp (Java's `Properties.store`, Gradle's docs
+      say), a setting of the host leaking in (Bazel's docs), a key that
+      takes in far more than the task reads (at Slack, every Python change
+      changed the frontend build's key), or build steps that change the
+      working directory (Slack). Fix one input per pull request, in the
+      build's configuration, never by skipping a task. A test task the
+      cache would then replay must pass step 4's check first, and should
+      restore its test report with it (list the report among the task's
+      outputs), or `measure.py tests` will count its tests as stopped. A
+      remote cache service is a provider: a person's call.
 4. **Change one key or step per pull request.** Show the diff, the hit rate
    before, and why the new key will hit. Never change what the build or the
    tests do. A cache change must never make a job skip work it would
@@ -207,6 +232,13 @@ As their authors reported them; we didn't reproduce them.
   partly because Go reused cached test results (see step 4). RemitAid
   reported the same shared-key bug among the fixes in a wider redesign; its
   time also includes Go's cached test results for unchanged packages.
+- At Slack, "every single Python change" altered the frontend build's
+  cache key, and "our cache hit rate was zero"; builds took 60 minutes,
+  and once Python changes left that key, "if the frontend was cached, we
+  could build the whole application in as little as 25 minutes".
+- At cal.com, with Turborepo's remote cache, "subsequent builds take just 7
+  seconds to pull from cache compared to the ~1 minute for a full build".
+  (Its earlier drop from 6 minutes to 1 came from upgrading Next.js.)
 - A node_modules cache lost at Linear (about 28 s to restore against about
   7.5 s for a filtered install) and won at Boardy (13 s against 33 s), which
   is why the skill times both.
