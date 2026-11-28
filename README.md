@@ -362,7 +362,10 @@ the skill that cites it: Owen Gretzinger (Boardy), Rodrigo Roim and OpenAI's
 Core Experimentation team, Limestone Digital, Victor Mota, Sean Ireton
 (Sidelab), Shopify's Ruby LSP team, CloudX, RemitAid, Linear, Jonathan
 Muszkat (Selenios), Rocky Warren (Clipboard), Fritz Meissner (thoughtbot),
-Marc (Kumiko), Stripe, Tw93, and the t3code maintainers.
+Marc (Kumiko), Stripe, Tw93, Hugo van Kemenade (blurb), Hartmut Armbruster
+(StoatFlow), Robert Resch (Home Assistant), Gui (Acecore), Oksana Evseeva
+(Picnic), David Reed (Slack), Igor Platonov and Travis Turner (Evil Martians,
+on Whop's CI), and the t3code maintainers.
 
 ## Contributing
 
