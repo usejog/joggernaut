@@ -142,8 +142,8 @@ in `references/measuring.md`.
       the cache lines call a hit can still leave tasks running. Read the
       tool's own count in the build log: Gradle's last lines (tasks
       executed, from cache, up to date), Bazel's process summary (its
-      cache-hit counts against processes run), a Turborepo run summary
-      (`--summarize`), Nx's per-task cache marks. Then take a cacheable
+      cache-hit counts against processes run), Turborepo's `Cached:` line,
+      Nx's per-task cache marks. Then take a cacheable
       task that ran again on an existing rerun of the same commit, and
       compare its keys across the two runs, where the runs kept them. If
       the keys differ, find the input that differs by its hashes, where
