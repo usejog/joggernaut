@@ -80,8 +80,8 @@ in `references/measuring.md`.
    - logging or reporting overhead shared across tests that none of them
      is about: the application logging at debug level in tests (Rails
      defaults to `:debug` everywhere but production) or writing verbose
-     query logs; an error reporter or tracing client still building or
-     sending events (Sentry, an APM agent). Rank these by profiling a
+     query logs; an error reporter still building or sending events
+     (Sentry). Rank these by profiling a
      sample of tests, or by timing a sample locally with and without the
      setting.
 
@@ -94,8 +94,8 @@ in `references/measuring.md`.
    tests, is a person's call where anything reads what it writes (a test,
    a hook, a later CI step, a log kept from failed runs). Otherwise quiet
    only the application's own logging, leaving the test runner's output as
-   it was, and stop the reporter in tests or replace it with a fake that
-   does nothing.
+   it was, and turn off the reporter's sending of events in tests with its
+   own setting, leaving any code it wraps to run as before.
 4. **Check cores before shards.** Compare the test runner's worker count with
    the runner's cores (`nproc` in a CI step, or the runner's documented
    size: GitHub's standard Linux runner has 4 on public repositories and 2 on
@@ -172,8 +172,7 @@ As their authors reported them; we didn't reproduce them.
 - Evil Martians, measuring the work it was paid to do on Whop's CI: with
   verbose query logs off, the log level raised and Sentry faked in tests,
   the run with 16 parallel processes went from about 4 minutes to about 2
-  with all three changes; "Disabling the verbose query logs did the heavy
-  lifting, with the Sentry optimization providing an additional gain."
+  with the changes together.
 - Sidelab's agent, after speeding up a slow test, broke the code on purpose
   to make sure the faster test still catches the bug.
 
