@@ -11,29 +11,34 @@ Claude Fable 5.2 (Anthropic) and Codex Astra (OpenAI gpt-6.2-astra, via Codex
 CLI) were each asked separately and agreed. The maintainer didn't make these
 choices. Each entry quotes the two agents' answers.
 
-## 27 Nov 2026 · A consultancy's measurement of its client's CI counts, named as such
+## 27 Nov 2026 · A consultancy's measurement of its client's CI, cited as such
 
-**Decision.** A measurement made by the people who did the work, on a named
-team's real CI, and published first person (a consultancy's write-up of its
-client, say) may be cited as a result under the entry below. The citation
-names who measured it and on whose CI, and says the writer was paid for the
-work. A number that rests on the writer's own product or tool, paid or
-free, is never cited this way.
+**Decision.** As an extension of the entry below, a measurement made by the
+people who did the work, on a named team's real CI, and published first
+person (a consultancy's write-up of its client, say) may be cited as a
+result. The citation names who measured it and on whose CI, says the writer
+was paid for the work, and quotes the figure as published, for the changes
+it measured together. A number for a change that needs the writer's own
+product or tool, paid or free, to make or run is never cited this way; a
+tool that only helped find the cause doesn't count against it.
 
 **Why.** The measurement shows what happened on that team's CI, with its own
 baseline and workload, which is the reason for the entry below. The first
-case is Evil Martians' write-up of Whop's Rails suite, whose logging and
-Sentry changes rest on no tool of its own.
+case is Evil Martians' write-up of its client Whop's Rails suite: its
+logging and Sentry changes need no tool of its own.
 
 - Claude Fable 5.2: "AGREE — the measurement is on Whop's real CI with its
   own baseline and workload, which is what the existing entry's "Why" asks
   for, and the people who did the work are the ones reporting it first
-  person." Its conditions: name both, say the writer was paid, and leave
-  out numbers that depend on the writer's own tools, paid or free.
+  person." Its conditions: record it as an extension, name both and say
+  the writer was paid, leave out numbers that depend on the writer's own
+  tools, paid or free, and quote the figure as published.
 - Codex Astra: "AGREE — Evil Martians measured the change directly on
   Whop's own CI, which gives it the firsthand evidence the rule requires."
-  Its conditions: credit the consultancy as the client's, and keep the
-  exclusion for benchmarks of the writer's own product.
+  Its conditions: credit Evil Martians as Whop's consultancy, keep the
+  exclusion for benchmarks of the writer's own product, and report the
+  16-process run as about 4 minutes before and about 2 after, the three
+  changes together.
 
 ## 27 Nov 2026 · Cite only a team's own measurement of its own CI
 
