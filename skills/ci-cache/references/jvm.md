@@ -1,7 +1,9 @@
 # Gradle, Maven and Android: the cache each build tool expects
 
 For a Java, Kotlin or Android app job, built with Gradle or Maven, that
-downloads dependencies on every run. The four rules in `SKILL.md` apply to
+has no dependency cache and downloads its dependencies on every run.
+Replacing a cache a job already has is a person's call: other steps can
+read its outputs. The four rules in `SKILL.md` apply to
 every step here, and each change is its own pull request.
 
 ## 1. When this applies
@@ -21,10 +23,10 @@ change what gets built and tested:
 - a job installs the project's own modules into `~/.m2` (`mvn install`): a
   restored cache can then supply a module a later build forgot to build;
 - it turns Gradle's build cache on (`org.gradle.caching=true` or
-  `--build-cache`): with any cache of the Gradle User Home, the local
-  build cache is saved across runs, so a test task can be replayed as `FROM-CACHE` with its old
-  reports, and `measure.py tests` sees the same tests as if they ran. That
-  is `SKILL.md` step 4's case, and a person decides after its check.
+  `--build-cache`), or uses Maven's build cache extension: restoring a
+  build cache can replay a test task with its old reports, so
+  `measure.py tests` sees the same tests as if they ran. That is
+  `SKILL.md` step 4's case, and a person decides after its check.
 
 ## 2. Gradle: setup-gradle, written from the default branch
 
@@ -41,21 +43,18 @@ change what gets built and tested:
   default provider, Enhanced Caching, is under Gradle's own terms, with
   usage-based pricing planned; choosing it, or changing a job that already
   uses it, is a person's call.
-- It replaces a plain `actions/cache` step over the Gradle User Home, or
-  `setup-java`'s `cache: gradle` input, which its docs say "may
-  interfere". Remove only the overlapping cache step or input; keep
-  `setup-java` itself, which installs the JDK. A cache step with
-  `fail-on-cache-miss`, or whose `cache-hit` output a later step reads,
-  is part of a check: leave it.
+- Don't add it beside an `actions/cache` step over the Gradle User Home
+  or `setup-java`'s `cache: gradle`, which its docs say "may interfere".
+- It checks the Gradle wrapper by default; a failure there goes to a
+  person, never `validate-wrappers: false`.
 
 ## 3. Maven: setup-java's cache
 
 `actions/setup-java` with `cache: maven` caches `~/.m2/repository`, keyed on
-the build files (setup-java README). Add only that input, and read the
-pinned version's docs for anything else it turns on, keeping the rest as
-it was. Check it against `SKILL.md` step 3 like any other cache. Maven's build cache extension also replays
-cached modules' tests, so adding it is a person's call, after step 4's
-check.
+the build files (setup-java README). Read the pinned version's docs for
+anything else the input turns on, and keep the rest of the job as it
+was. Check it against `SKILL.md` step 3 like any other cache. Maven's build cache extension replays cached
+modules' tests, so adding it is a person's call, after step 4's check.
 
 ## 4. Measure
 
@@ -71,8 +70,8 @@ As their authors reported them; we didn't reproduce them.
   pull-request cache: "16 minutes 20 seconds on the initial run and 6
   minutes 16 seconds on the rerun", the restore taking 62 seconds; the
   rerun also reused 194 Gradle tasks.
-- Picnic, on TeamCity with Maven's build cache extension: "Instead of 10
-  minutes 4 seconds, the build that was fully cached took only 1 minute 22
-  seconds".
+- Picnic, on TeamCity with Maven's build cache extension, in a best case
+  the post calls rare: "Instead of 10 minutes 4 seconds, the build that
+  was fully cached took only 1 minute 22 seconds".
 
 Sources and grades: `references/evidence.md`.
