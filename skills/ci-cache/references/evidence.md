@@ -19,7 +19,8 @@ measured CI result; **D** opinion, a prompt or a restatement.
 
 ## How the platform behaves, from its own docs
 
-Not results: what the vendor documents, re-read on 23 Nov 2026. A claim
+Not results: what the vendor documents, re-read on 23 Nov 2026 (entries
+added on 27 Nov 2026: read that day). A claim
 marked "GitHub docs" or "Go's docs" in `SKILL.md` rests on one of these.
 
 - [GitHub Docs: dependency caching](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching): a pull request's run can restore caches from its own branch, the default branch and its base branch, and saves to `refs/pull/N/merge`; a saved cache can't be changed; runs from `pull_request_target`, `issue_comment` and `workflow_run` can restore but not create caches by default; a cache unused for 7 days is removed; 10 GB per repository unless raised, then the least recently used caches are deleted first; the action tries an exact key, then a prefix of the key, then `restore-keys`, and restores the newest partial match.
@@ -30,9 +31,8 @@ marked "GitHub docs" or "Go's docs" in `SKILL.md` rests on one of these.
 - [actions/setup-node: cache restore](https://github.com/actions/setup-node/blob/main/src/cache-restore.ts): sets `cache-hit` whenever a cache was restored, prefix matches included.
 - [actions/setup-python: advanced usage](https://github.com/actions/setup-python/blob/main/docs/advanced-usage.md#caching-packages): `cache-hit` reports a hit on the primary key.
 - [actions/cache: exact key match](https://github.com/actions/cache/blob/main/src/utils/actionUtils.ts): `isExactKeyMatch` compares with `localeCompare(..., { sensitivity: "accent" })`, which ignores case.
-- [actions/setup-python: caching packages](https://github.com/actions/setup-python#caching-packages-dependencies): "For `pip`, the action will cache the global cache directory", keyed on a hash of the dependency file.
 - [uv: GitHub Actions](https://docs.astral.sh/uv/guides/integration/github/): recommends `astral-sh/setup-uv`; with `actions/cache`, key on `uv.lock`, or on `requirements.txt` when using `uv pip`; "`uv cache prune --ci` … is optimized for CI. Its effect on performance is dependent on the packages being installed."
-- [uv: compatibility with pip](https://docs.astral.sh/uv/pip/compatibility/): "in some cases, `pip` and uv will yield different resolutions"; uv doesn't read `pip.conf` or `PIP_*` variables; with several indexes it limits a package to "the first index that contains the package" by default.
-- [uv: Python environments](https://docs.astral.sh/uv/pip/environments/): "uv requires using a virtual environment by default"; `--python` names the interpreter to install into, and `--system` "is roughly equivalent to `uv pip install --python $(which python)`".
-- [astral-sh/setup-uv: caching](https://github.com/astral-sh/setup-uv/blob/main/docs/caching.md): `enable-cache` defaults to `auto`, on for GitHub-hosted runners; saves the whole uv cache, keyed on the runner, Python version and files matching `cache-dependency-glob` (requirements, constraints, `pyproject.toml`, lock files by default); no pruning by default.
+- [uv: compatibility with pip](https://docs.astral.sh/uv/pip/compatibility/): "in some cases, `pip` and uv will yield different resolutions"; uv doesn't read `pip.conf` or `PIP_*` variables and has its own settings; with several indexes it limits a package to "the first index that contains the package" by default; it treats `Requires-Python` upper bounds differently from pip.
+- [uv: Python environments](https://docs.astral.sh/uv/pip/environments/): "uv requires using a virtual environment by default"; `--python` names the interpreter to install into.
+- [astral-sh/setup-uv: caching](https://github.com/astral-sh/setup-uv/blob/main/docs/caching.md): `enable-cache: auto`, the default, is "enabled on GitHub-hosted runners except for release, tag push, pull_request_target, and workflow_run events"; saves the whole uv cache, keyed on the runner, Python version and files matching `cache-dependency-glob` (requirements, constraints, `pyproject.toml`, lock files by default); no pruning by default.
 - [uv: hash checking](https://docs.astral.sh/uv/reference/settings/#verify-hashes) and [pip: secure installs](https://pip.pypa.io/en/stable/topics/secure-installs/): pip switches to hash-checking mode for every package once any requirement carries a hash; uv checks the hashes given and requires one for every package only with `--require-hashes`.

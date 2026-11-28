@@ -1,72 +1,51 @@
-# Python installs: uv in place of pip
+# Python installs: uv's cache, and uv in place of pip
 
-For a job that spends minutes of its setup in `pip install`. The four rules
-in `SKILL.md` apply to every step here, and each change is its own pull
-request.
+For a job that spends minutes of its setup installing Python packages. The
+four rules in `SKILL.md` apply to every step here, and each change is its
+own pull request.
 
-## 1. When the swap applies
+## 1. A job that already installs with uv: cache uv's cache
 
-Swap only where pip installs a complete, exact set: every package,
-dependencies included, pinned to one version (a compiled requirements file,
-`pip-compile` style), from the default index or indexes named in the file
-itself. Anything else can let uv and pip install different code, so leave
-it out of this recipe:
+`astral-sh/setup-uv` saves uv's whole cache to the GitHub Actions cache,
+keyed on the runner, the Python version and a hash of the requirements,
+constraints, `pyproject.toml` and lock files. Its default, `enable-cache:
+auto`, caches on GitHub-hosted runners except for release, tag-push,
+`pull_request_target` and `workflow_run` events; leave it at that default
+rather than `true` (setup-uv's caching docs). `prune-cache: true` drops
+what is cheap to fetch again, an effect on speed uv's docs say "is
+dependent on the packages being installed". `SKILL.md` step 3's checks
+apply as to any cache.
 
-- ranges or unpinned dependencies: uv's docs say pip and uv "will yield
-  different resolutions" in some cases. Pinning is its own pull request,
-  measured on its own, before any swap.
-- settings in `pip.conf` or `PIP_*` variables, `--find-links`, or several
-  indexes: uv reads none of pip's settings, and takes a package's versions
-  from the first index that has it where pip combines them (uv's docs).
-- a project installed with Poetry or PDM: it keeps its tool; moving it is
-  a person's call.
+## 2. A job that installs with pip: offer uv to a person
 
-## 2. The swap, with no cache yet
+Swapping pip for uv changes how packages are found, built and checked, so
+it is a person's call. uv's docs list where the two differ: they can
+resolve the same requirements differently; uv reads none of pip's settings
+(`pip.conf`, `PIP_*`) and has its own (`uv.toml`, `[tool.uv]`, `UV_*`); it
+takes a package's versions from the first index that has it; it checks
+only the hashes given unless told `--require-hashes`, where pip requires a
+hash for every package once one has one; it treats `Requires-Python` upper
+bounds differently. Matching lists of names and versions can't show that
+the same files were installed.
 
-`pip install -r requirements.txt` becomes
-`uv pip install --python "$(command -v python)" -r requirements.txt`, so uv
-installs into the interpreter the tests run with and not into a virtual
-environment it finds on its own. If the file carries hashes, add
-`--require-hashes`: pip then requires a hash for every package, and uv
-checks only the hashes given unless told to. Install uv with
-`astral-sh/setup-uv` and `enable-cache: false`: its default turns caching
-on for GitHub-hosted runners, and a cache is the next pull request, not
-this one. setup-uv is a new third-party action, so name it in the pull
-request for the person to weigh. Drop `setup-python`'s `cache: pip`, which
-caches pip's own cache folder, which uv doesn't use.
+Give the person:
 
-Check the installed set on CI, in the job, with the same command on both
-sides: after the install, save `python -m pip list --format=freeze`
-(names and versions only) from runs before the change and from the
-branch's runs. They must match exactly, pip and setuptools included. If a
-package is missing or differs, stop, and fix the requirements first in a
-pull request of their own.
+- the install step's seconds on cold and warm runs, from the saved runs'
+  step times, as a ceiling on what the swap can save (part of that time
+  can be compiling a package under either installer);
+- which of the differences above apply to this job: its requirements (a
+  complete, exact set, or ranges), its index settings and its hashes;
+- that `astral-sh/setup-uv` is a new third-party action, and the uv
+  version it would pin.
 
-## 3. Then cache uv's cache
+On a yes, make the swap as its own pull request, installing into the
+interpreter the tests run with (`uv pip install --python` naming it), and
+cache uv's cache in a later one as step 1 says.
 
-A separate pull request turns setup-uv's `enable-cache: true` on. It saves
-uv's whole cache, keyed on the runner, the Python version and a hash of the
-requirements, constraints, `pyproject.toml` and lock files (setup-uv's
-caching docs); `prune-cache: true` drops what is cheap to fetch again, an
-effect on speed uv's docs say "is dependent on the packages being
-installed". `SKILL.md` step 3's checks apply as to any cache: saved on the
-default branch, near the size cap.
-
-## 4. Measure
+## 3. Measure
 
 As `SKILL.md` step 5 says. uv's gain differs with the cache: Hugo van
-Kemenade's lint job gained nothing once it had one. So compare the job
-over cold runs and over warm runs apart (`compare --job JOB --cache-state
-FILE --cache miss`, then `--cache hit`), with the installed sets matching.
-
-## Why this works: reasoning
-
-This is reasoning from how CI works, not a measurement.
-
-- On an ephemeral runner every job installs into a new environment, so the
-  installer's own speed is paid on every run, cache or not.
-- With an exact, complete set from the same indexes, both installers fetch
-  the same packages, and the matching lists show it on CI.
+Kemenade's lint job gained nothing from uv once it had one.
 
 ## What others measured
 
