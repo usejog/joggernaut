@@ -106,17 +106,16 @@ in `references/measuring.md`.
      each matrix leg as its own job in `jobs`, with its median running
      time, where the legs' names differ (legs that share a name merge into
      one row). A leg whose median sits well above the others' is a clue to
-     read per-file times from the report: one file longer than the rest
-     can't be split, and then balancing saves nothing. `ci-measure`
-     measures the change.
+     read per-file times from the report.
      To balance, take each file's measured wall time (or its tests' seconds
      where they don't overlap) and use a splitter that reads recorded
      durations (pytest-split, Knapsack and the like), or move the slowest
      files apart. Check how your runner's plain `--shard` splits before
      relying on it: Playwright's deals out whole files by default, not
      time. pytest-split gives a test with no recorded duration the average,
-     so record the durations again as the suite changes, and where test
-     order is shuffled, give every shard the same seed: its README says its
+     so record them again after large changes to the suite, and where test
+     order is shuffled, generate one seed each run and pass it to every
+     shard: its README says its
      default algorithm "is **incompatible** with test-order-randomization
      plugins". Check the slowest shard's time after.
    - **Discovery in every shard.** Where each shard collects the whole
