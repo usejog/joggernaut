@@ -76,13 +76,26 @@ in `references/measuring.md`.
      (migrations, seeding, compiling, starting a browser or renderer);
    - real sleeps or waits on wall-clock time where a fake clock or waiting
      on the event fits;
-   - something started for nothing (a database, a renderer, a server).
+   - something started for nothing (a database, a renderer, a server);
+   - logging or reporting overhead shared across tests that none of them
+     is about: the application logging at debug level in tests (Rails
+     defaults to `:debug` everywhere but production) or writing verbose
+     query logs; an error reporter still building or sending events
+     (Sentry). Rank these by profiling a
+     sample of tests, or by timing a sample locally with and without the
+     setting.
 
    The fix must keep the test testing the same thing. Mock what the test
    isn't about, never the subject under test, and never a call whose
    behaviour the test checks (serialisation, authentication, timing): keep
    those in an integration test. If the right fix changes an assertion or
-   an expected value, stop and flag it for a person.
+   an expected value, stop and flag it for a person. For shared overhead,
+   quieting the application's log, or stopping an error reporter in
+   tests, is a person's call where anything reads what it writes (a test,
+   a hook, a later CI step, a log kept from failed runs). Otherwise quiet
+   only the application's own logging, leaving the test runner's output as
+   it was, and turn off the reporter's sending of events in tests with its
+   own setting, leaving any code it wraps to run as before.
 4. **Check cores before shards.** Compare the test runner's worker count with
    the runner's cores (`nproc` in a CI step, or the runner's documented
    size: GitHub's standard Linux runner has 4 on public repositories and 2 on
@@ -185,6 +198,10 @@ As their authors reported them; we didn't reproduce them.
 - Home Assistant moved test discovery out of its 10 pytest jobs into one
   job that splits the tests: "Not doing full-discovery in each test runner
   saves us 3 hours on each full run!" That is runner time, not wait.
+- Evil Martians, measuring the work it was paid to do on Whop's CI: with
+  verbose query logs off, the log level raised and Sentry faked in tests,
+  the run with 16 parallel processes went from about 4 minutes to about 2
+  with the changes together.
 - Sidelab's agent, after speeding up a slow test, broke the code on purpose
   to make sure the faster test still catches the bug.
 
