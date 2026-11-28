@@ -29,8 +29,8 @@ resolve the same requirements differently; uv reads none of pip's settings
 (`pip.conf`, `PIP_*`) and has its own (`uv.toml`, `[tool.uv]`, `UV_*`); it
 takes a package's versions from the first index that has it; it checks
 only the hashes given unless told `--require-hashes`, where pip requires a
-hash for every package once any requirement carries `--hash`; it treats `Requires-Python` upper
-bounds differently. Matching lists of names and versions can't show that
+hash for every package once any requirement carries `--hash`; it treats
+`Requires-Python` upper bounds differently. Matching lists of names and versions can't show that
 the same files were installed.
 
 Give the person:
@@ -59,7 +59,7 @@ Kemenade's lint job gained nothing from uv once it had one.
 As their authors reported them; we didn't reproduce them.
 
 - Hugo van Kemenade moved python/blurb's lint and test workflows to
-  uv-based tools, timed on his fork's GitHub Actions runs: "around 1.5 times as fast"; lint with
-  no cache 60s → 37s, with a cache 11s → 11s.
+  uv-based tools, timed on his fork's GitHub Actions runs: "around 1.5
+  times as fast"; lint with no cache 60s → 37s, with a cache 11s → 11s.
 
 Sources and grades: `references/evidence.md`.
