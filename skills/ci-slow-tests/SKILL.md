@@ -76,13 +76,26 @@ in `references/measuring.md`.
      (migrations, seeding, compiling, starting a browser or renderer);
    - real sleeps or waits on wall-clock time where a fake clock or waiting
      on the event fits;
-   - something started for nothing (a database, a renderer, a server).
+   - something started for nothing (a database, a renderer, a server);
+   - logging or reporting overhead shared across tests that none of them
+     is about: the application logging at debug level in tests (Rails
+     defaults to `:debug` everywhere but production) or writing verbose
+     query logs; an error reporter still building or sending events
+     (Sentry). Rank these by profiling a
+     sample of tests, or by timing a sample locally with and without the
+     setting.
 
    The fix must keep the test testing the same thing. Mock what the test
    isn't about, never the subject under test, and never a call whose
    behaviour the test checks (serialisation, authentication, timing): keep
    those in an integration test. If the right fix changes an assertion or
-   an expected value, stop and flag it for a person.
+   an expected value, stop and flag it for a person. For shared overhead,
+   quieting the application's log, or stopping an error reporter in
+   tests, is a person's call where anything reads what it writes (a test,
+   a hook, a later CI step, a log kept from failed runs). Otherwise quiet
+   only the application's own logging, leaving the test runner's output as
+   it was, and turn off the reporter's sending of events in tests with its
+   own setting, leaving any code it wraps to run as before.
 4. **Check cores before shards.** Compare the test runner's worker count with
    the runner's cores (`nproc` in a CI step, or the runner's documented
    size: GitHub's standard Linux runner has 4 on public repositories and 2 on
@@ -101,10 +114,32 @@ in `references/measuring.md`.
    that can't be made safe isolated; run each changed file alone and the
    suite in shuffled order to check; and write the rule into the
    repository's rules file so new tests follow it.
-   If one shard finishes well after the others, balance by time before
-   adding shards: take each file's measured wall time (or its tests' seconds where they don't overlap), and use a
-   splitter that reads recorded durations (pytest-split, Knapsack and the like; check how your runner's plain `--shard` splits before relying on it) or
-   move the slowest files apart. Check the slowest shard's time after.
+   **With a matrix of test shards, check two things before adding shards.**
+   - **Whether one shard is usually last.** `measure.py split --json` lists
+     each matrix leg as its own job in `jobs`, with its median running
+     time, where the legs' names differ (legs that share a name merge into
+     one row). A leg whose median sits well above the others' is a clue to
+     read per-file times from the report.
+     To balance, take each file's measured wall time (or its tests' seconds
+     where they don't overlap) and use a splitter that reads recorded
+     durations (pytest-split, Knapsack and the like), or move the slowest
+     files apart. Check how your runner's plain `--shard` splits before
+     relying on it: Playwright's deals out whole files by default, not
+     time. pytest-split gives a test with no recorded duration the average,
+     so record them again after large changes to the suite, and where test
+     order is shuffled, generate one seed each run and pass it to every
+     shard: its README says its
+     default algorithm "is **incompatible** with test-order-randomization
+     plugins". Check the slowest shard's time after.
+   - **Discovery in every shard.** Where each shard collects the whole
+     suite and then runs only its part (Home Assistant's pytest jobs each
+     discovered every test), every shard pays the collection time. Measure
+     it in one shard's log, and report it to a person as an option: a job
+     that collects once and hands each shard its list adds a job the
+     shards must wait for, changes the job graph, must collect for each
+     matrix configuration whose tests differ (a platform, a Python
+     version), and saves less where each shard still imports what it runs.
+
    Every test must still run across the shards: `measure.py tests` catches
    a lost test, not one run twice, so check the split for duplicates.
 5. **Offer a per-test time check** that fails the build when a test runs
@@ -156,6 +191,17 @@ As their authors reported them; we didn't reproduce them.
   all 63 tests kept.
 - Linear: turning off Vitest isolation took the slowest shard from about
   300–379 s to about 195 s. Boardy: each shard went from 100 s to 35 s.
+- StoatFlow's Gradle integration tests, on the same 8-vCPU runner: six
+  forks 23m53s, with forks idle because Gradle deals test
+  classes to forks round-robin; twelve forks 16m40s–18m16s; groups by
+  functional area, the three largest split by measured duration, 10m43s.
+- Home Assistant moved test discovery out of its 10 pytest jobs into one
+  job that splits the tests: "Not doing full-discovery in each test runner
+  saves us 3 hours on each full run!" That is runner time, not wait.
+- Evil Martians, measuring the work it was paid to do on Whop's CI: with
+  verbose query logs off, the log level raised and Sentry faked in tests,
+  the run with 16 parallel processes went from about 4 minutes to about 2
+  with the changes together.
 - Sidelab's agent, after speeding up a slow test, broke the code on purpose
   to make sure the faster test still catches the bug.
 
