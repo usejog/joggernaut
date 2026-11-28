@@ -50,11 +50,13 @@ change what gets built and tested:
 
 ## 3. Maven: setup-java's cache
 
-`actions/setup-java` with `cache: maven` caches `~/.m2/repository`, keyed on
-the build files (setup-java README). Read the pinned version's docs for
+In a job that already uses `actions/setup-java`, its `cache: maven` input
+caches `~/.m2/repository`, keyed on the build files (setup-java README).
+Adding setup-java to a job that gets Java elsewhere is a person's call: it
+writes its own `~/.m2/settings.xml` by default. Read the pinned version's docs for
 anything else the input turns on, and keep the rest of the job as it
-was. Check it against `SKILL.md` step 3 like any other cache. Maven's build cache extension replays cached
-modules' tests, so adding it is a person's call, after step 4's check.
+was. Check it against `SKILL.md` step 3 like any other cache. Adding Maven's build cache extension is a
+person's call, after step 4's check.
 
 ## 4. Measure
 
