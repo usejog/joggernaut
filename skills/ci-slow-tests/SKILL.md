@@ -105,30 +105,28 @@ in `references/measuring.md`.
    - **Whether one shard is usually last.** `measure.py split --json` lists
      each matrix leg as its own job in `jobs`, with its median running
      time, where the legs' names differ (legs that share a name merge into
-     one row: put the shard index in the job's `name:`). A leg whose median
-     sits well above the others' is a clue that the split is uneven; the
-     slowest leg's median minus the legs' mean is a rough estimate of what
-     balancing could save, not a bound, and only where that leg is on the
-     slowest path (`split`'s chains). `ci-measure` measures the change.
+     one row). A leg whose median sits well above the others' is a clue to
+     read per-file times from the report: one file longer than the rest
+     can't be split, and then balancing saves nothing. `ci-measure`
+     measures the change.
      To balance, take each file's measured wall time (or its tests' seconds
      where they don't overlap) and use a splitter that reads recorded
      durations (pytest-split, Knapsack and the like), or move the slowest
      files apart. Check how your runner's plain `--shard` splits before
      relying on it: Playwright's deals out whole files by default, not
      time. pytest-split gives a test with no recorded duration the average,
-     so record the durations again as the suite changes; where test order
-     is shuffled, use its `--splitting-algorithm least_duration`, since the
-     default can put a test in two groups or none (its README). Check the
-     slowest shard's time after.
+     so record the durations again as the suite changes, and where test
+     order is shuffled, give every shard the same seed: its README says its
+     default algorithm "is **incompatible** with test-order-randomization
+     plugins". Check the slowest shard's time after.
    - **Discovery in every shard.** Where each shard collects the whole
      suite and then runs only its part (Home Assistant's pytest jobs each
      discovered every test), every shard pays the collection time. Measure
-     it in one shard's log, and report it for a person: a job that
-     collects once and hands each shard its list saves about shards × the
-     collection time, less that job's own billed minutes, but it adds a job
-     the shards must wait for, changes the job graph, and must collect for
-     each matrix configuration whose tests differ (a platform, a Python
-     version).
+     it in one shard's log, and report it to a person as an option: a job
+     that collects once and hands each shard its list adds a job the
+     shards must wait for, changes the job graph, must collect for each
+     matrix configuration whose tests differ (a platform, a Python
+     version), and saves less where each shard still imports what it runs.
 
    Every test must still run across the shards: `measure.py tests` catches
    a lost test, not one run twice, so check the split for duplicates.
@@ -181,9 +179,9 @@ As their authors reported them; we didn't reproduce them.
   all 63 tests kept.
 - Linear: turning off Vitest isolation took the slowest shard from about
   300–379 s to about 195 s. Boardy: each shard went from 100 s to 35 s.
-- StoatFlow's Gradle integration tests, one run each on the same 8-vCPU
-  runner: six forks 23m53s, with forks idle because Gradle deals test
-  classes to forks round-robin; twelve forks 16m40s–18m16s; 13 groups by
+- StoatFlow's Gradle integration tests, on the same 8-vCPU runner: six
+  forks 23m53s, with forks idle because Gradle deals test
+  classes to forks round-robin; twelve forks 16m40s–18m16s; groups by
   functional area, the three largest split by measured duration, 10m43s.
 - Home Assistant moved test discovery out of its 10 pytest jobs into one
   job that splits the tests: "Not doing full-discovery in each test runner
