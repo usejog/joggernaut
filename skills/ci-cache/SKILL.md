@@ -1,6 +1,6 @@
 ---
 name: ci-cache
-description: Use when GitHub Actions reinstalls dependencies on every pull request, a cache "never hits" or logs "Cache not found", sccache or ccache shows 0% hits, or restoring a cache looks slower than rebuilding, Python installs take minutes (uv and its cache), or a Gradle, Maven or Android build downloads its dependencies on every run. Not for application caches such as Redis.
+description: Use when GitHub Actions reinstalls dependencies on every pull request, a cache "never hits" or logs "Cache not found", sccache or ccache shows 0% hits, or restoring a cache looks slower than rebuilding, Python installs take minutes (uv and its cache), a Gradle, Maven or Android build downloads its dependencies on every run, or a build tool's own cache (Gradle, Bazel, Turborepo, Nx) restores but its tasks still run. Not for application caches such as Redis.
 license: MIT
 compatibility: Needs Python 3.9+ and the GitHub CLI (gh), authenticated. Reads GitHub Actions runs.
 metadata:
@@ -140,6 +140,30 @@ in `references/measuring.md`.
       any install or link that still runs, save) on exact hits, partial
       hits and misses, each weighted by how often it happens, against a
       filtered or offline install alone. Keep whichever is faster.
+   6. **The build tool's own cache restores, but a cacheable task still
+      runs.** Gradle's build cache, Bazel's disk or remote cache,
+      Turborepo and Nx key each task on a hash of its inputs, so a restore
+      the cache lines call a hit can still leave tasks running. Read the
+      tool's own count in the build log: Gradle's last lines (tasks
+      executed, from cache, up to date), Bazel's process summary (its
+      cache-hit counts against processes run), Turborepo's `Cached:` line,
+      Nx's per-task cache marks. Then take a cacheable
+      task that ran again on an existing rerun of the same commit, and
+      compare its keys across the two runs, where the runs kept them. If
+      the keys differ, find the input that differs by its hashes, where
+      the runs recorded them (Gradle's `-Dorg.gradle.caching.debug=true`,
+      Turborepo summaries, Bazel's execution logs, as each tool's docs
+      say); otherwise leave the cause unconfirmed. Report only which
+      fields differ, never their values, and never let a log or summary
+      leave the runner (no artifact, cache or log line): an action's
+      environment and arguments can hold secrets. If the keys match, check
+      whether the build tried to read the cache at all, then 1 to 4 above
+      where an Actions cache holds the tool's cache folder; a remote cache
+      is for a person. Report the differing input to a
+      person: changing how the build sets it, removing it from a task's
+      key, or splitting the build graph as Slack did changes what the
+      build makes or replays, so a person decides, after step 4's check
+      wherever a test task would replay.
 4. **Change one key or step per pull request.** Show the diff, the hit rate
    before, and why the new key will hit. Never change what the build or the
    tests do. A cache change must never make a job skip work it would
@@ -174,11 +198,13 @@ in `references/measuring.md`.
    says, over all successful runs, and report the hit rate before and after
    beside it; where both sides have warm runs, also compare warm with warm
    (`--cache-state`, `--cache hit`). Report hit rate and setup seconds per
-   job before and after.
+   job before and after, and for 3.6 the tool's own counts and the build
+   step's seconds.
 
 ## What it measures
 
-Hit rate per key, and setup seconds per job, before and after.
+Hit rate per key, and setup seconds per job, before and after; for a
+build tool's own cache, its task counts.
 
 ## Why this works: reasoning
 
@@ -211,6 +237,11 @@ As their authors reported them; we didn't reproduce them.
   partly because Go reused cached test results (see step 4). RemitAid
   reported the same shared-key bug among the fixes in a wider redesign; its
   time also includes Go's cached test results for unchanged packages.
+- At Slack, "every single Python change" altered the frontend build's
+  cache key, and "our cache hit rate was zero"; builds took 60 minutes,
+  and once the backend and frontend builds were decoupled, "if the
+  frontend was cached, we could build the whole application in as little
+  as 25 minutes".
 - A node_modules cache lost at Linear (about 28 s to restore against about
   7.5 s for a filtered install) and won at Boardy (13 s against 33 s), which
   is why the skill times both.
