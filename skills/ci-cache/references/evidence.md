@@ -15,11 +15,12 @@ measured CI result; **D** opinion, a prompt or a restatement.
 | [CloudX engineering blog, 16 Sep 2026](https://www.cloudx.ai/posts/setup-go) | Parallel lint and test jobs shared setup-go's default cache key; test jobs regressed from a 76 s to a 180 s median, and a per-job cache brought the median job runtime to 41 s; the post says the restored cache also let Go reuse test results and run only changed packages' tests. | A |
 | [RemitAid on Zenn (in Japanese), 21 Aug 2026](https://zenn.dev/remitaid/articles/fa94cb567f5d1d) | The same shared setup-go key bug, fixed with per-job keys within a wider redesign (separate jobs, per-commit keys, fallback restores); the test job's total (ジョブ合計) on a pull-request run that restored the previous commit's cache went from about 8 minutes to 2 minutes 55 seconds. | A |
 | [Linear engineering blog, 21 Sep 2026](https://linear.app/now/ci-bottleneck-reworked) | A node_modules cache took about 28 s to restore against about 7.5 s for a filtered install. | A |
-| [Slack engineering blog (David Reed), 6 Nov 2025](https://slack.engineering/build-better-software-to-build-software-better/) | "every single Python change, alters the cache key for the frontend", and "our cache hit rate was zero"; "many build steps mutated the working directory". "builds took 60 minutes"; after the backend and frontend builds were decoupled, "if the frontend was cached, we could build the whole application in as little as 25 minutes". | A |
+| [Slack engineering blog (David Reed), 6 Nov 2025](https://slack.engineering/build-better-software-to-build-software-better/) | "every single Python change, alters the cache key for the frontend", and "our cache hit rate was zero". "builds took 60 minutes"; after the backend and frontend builds were decoupled, "if the frontend was cached, we could build the whole application in as little as 25 minutes". | A |
 
 ## How the platform behaves, from its own docs
 
-Not results: what the vendor documents, re-read on 23 Nov 2026. A claim
+Not results: what the vendor documents, re-read on 23 Nov 2026 (entries
+added on 27 Nov 2026: read that day). A claim
 marked "GitHub docs" or "Go's docs" in `SKILL.md` rests on one of these.
 
 - [GitHub Docs: dependency caching](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching): a pull request's run can restore caches from its own branch, the default branch and its base branch, and saves to `refs/pull/N/merge`; a saved cache can't be changed; runs from `pull_request_target`, `issue_comment` and `workflow_run` can restore but not create caches by default; a cache unused for 7 days is removed; 10 GB per repository unless raised, then the least recently used caches are deleted first; the action tries an exact key, then a prefix of the key, then `restore-keys`, and restores the newest partial match.

@@ -1,6 +1,6 @@
 ---
 name: ci-cache
-description: Use when GitHub Actions reinstalls dependencies on every pull request, a cache "never hits" or logs "Cache not found", sccache or ccache shows 0% hits, or restoring a cache looks slower than rebuilding, or a build tool's own cache (Gradle, Bazel, Turborepo, Nx) restores but its tasks still run. Not for application caches such as Redis.
+description: Use when GitHub Actions reinstalls dependencies on every pull request, a cache "never hits" or logs "Cache not found", sccache or ccache shows 0% hits, or restoring a cache looks slower than rebuilding, a build tool's own cache (Gradle, Bazel, Turborepo, Nx) restores but its tasks still run. Not for application caches such as Redis.
 license: MIT
 compatibility: Needs Python 3.9+ and the GitHub CLI (gh), authenticated. Reads GitHub Actions runs.
 metadata:
@@ -136,31 +136,30 @@ in `references/measuring.md`.
       any install or link that still runs, save) on exact hits, partial
       hits and misses, each weighted by how often it happens, against a
       filtered or offline install alone. Keep whichever is faster.
-   6. **The build tool's own cache restores, but its tasks still run.**
-      Gradle's build cache, Bazel's disk or remote cache, Turborepo and Nx
-      key each task on a hash of its inputs, so a restore the cache lines
-      call a hit can still leave most tasks running. Read the tool's own
-      count in the build log: Gradle's last lines (tasks executed, from
-      cache, up to date), Bazel's process summary (its cache-hit counts
-      against processes run), a Turborepo run summary (`--summarize`), Nx's
-      per-task cache marks. Then take a cacheable task that ran again on
-      an existing rerun of the same commit, or on a pull request that
-      touched none of its inputs, and compare its keys across the two runs.
-      If the keys differ, find the input that differs by its hashes:
-      Gradle's `-Dorg.gradle.caching.debug=true`, two Turborepo summaries,
-      or Bazel's two execution logs (`--execution_log_compact_file`), as
-      each tool's docs say. Compare them on the runner or locally, and
-      report only which fields differ, never their values: an action's
-      environment and arguments can hold secrets. If the keys match, the
-      entry was never saved, or was evicted or unreadable: check 1 to 4
-      above. A fix may only make an input stable: an absolute path made
-      relative, a timestamp dropped from a generated file, a setting of
-      the host pinned; the output must stay the same apart from that
-      field. Removing an input from a task's key, or splitting the build
-      graph as Slack did, is a person's call, since a task that reads a
-      dropped input replays stale output. So is any fix that would let the
-      cache replay a test task: step 4's check comes first. A remote cache
-      service is a provider: a person's call.
+   6. **The build tool's own cache restores, but a cacheable task still
+      runs.** Gradle's build cache, Bazel's disk or remote cache,
+      Turborepo and Nx key each task on a hash of its inputs, so a restore
+      the cache lines call a hit can still leave tasks running. Read the
+      tool's own count in the build log: Gradle's last lines (tasks
+      executed, from cache, up to date), Bazel's process summary (its
+      cache-hit counts against processes run), a Turborepo run summary
+      (`--summarize`), Nx's per-task cache marks. Then take a cacheable
+      task that ran again on an existing rerun of the same commit, and
+      compare its keys across the two runs. If the keys differ, find the
+      input that differs by its hashes: Gradle's
+      `-Dorg.gradle.caching.debug=true`, two Turborepo summaries, or
+      Bazel's two execution logs, as each tool's docs say. Compare them on
+      the runner, report only which fields differ, never their values, and
+      never upload a log or summary as an artifact: an action's
+      environment and arguments can hold secrets. If the keys match, check
+      whether the tool tried to read the cache at all (Turborepo's
+      `--force` and Bazel's `--noremote_accept_cached` skip it), then 1 to
+      4 above where an Actions cache holds the tool's cache folder; a
+      remote cache is for a person. Report the differing input to a
+      person: changing how the build sets it, removing it from a task's
+      key, or splitting the build graph as Slack did changes what the
+      build makes or replays, so a person decides, after step 4's check
+      wherever a test task would replay.
 4. **Change one key or step per pull request.** Show the diff, the hit rate
    before, and why the new key will hit. Never change what the build or the
    tests do. A cache change must never make a job skip work it would
@@ -200,7 +199,8 @@ in `references/measuring.md`.
 
 ## What it measures
 
-Hit rate per key, and setup seconds per job, before and after.
+Hit rate per key, and setup seconds per job, before and after; for a
+build tool's own cache, its task counts.
 
 ## Why this works: reasoning
 
